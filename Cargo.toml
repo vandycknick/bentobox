@@ -1,0 +1,23 @@
+[package]
+name = "bentobox"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bento"
+path = "src/bin/bento_cli.rs"
+
+
+[dependencies]
+anyhow = "1.0.89"
+block2 = "0.5.1"
+bus = "2.4.1"
+clap = { version = "4.5.16", features = ["derive"] }
+crossbeam = "0.8.4"
+ctrlc = "3.4.5"
+objc2 = { version = "0.5.2", features = ["catch-all"] }
+objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSRunningApplication", "NSWindow", "NSGraphics", "NSMenu", "NSMenuItem"]}
+objc2-foundation = { version = "0.2.2", features = ["NSString", "NSArray", "NSKeyValueObserving", "NSThread", "NSPathUtilities"] }
+objc2-virtualization = { version = "0.2.2", features = ["all"] }
+reqwest = { version = "0.12.8", features = ["stream", "blocking"] }
+futures-io = { version = "0.2.0-beta" }
