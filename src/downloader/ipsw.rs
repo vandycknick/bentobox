@@ -1,12 +1,8 @@
-use std::{
-    fs::File,
-    io::{self, Read, Write},
-    path::Path,
-};
+use std::{fs::File, path::Path};
 
 use anyhow::anyhow;
 
-use crate::fs::{get_app_support_dir, get_cache_dir};
+use crate::fs::get_cache_dir;
 
 struct Ipsw {
     pub url: String,

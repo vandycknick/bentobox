@@ -10,14 +10,20 @@ path = "src/bin/bento_cli.rs"
 
 [dependencies]
 anyhow = "1.0.89"
-block2 = "0.5.1"
+axum = "0.8.1"
+block2 = "0.6.0"
 bus = "2.4.1"
 clap = { version = "4.5.16", features = ["derive"] }
 crossbeam = "0.8.4"
 ctrlc = "3.4.5"
-objc2 = { version = "0.5.2", features = ["catch-all"] }
-objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSRunningApplication", "NSWindow", "NSGraphics", "NSMenu", "NSMenuItem"]}
-objc2-foundation = { version = "0.2.2", features = ["NSString", "NSArray", "NSKeyValueObserving", "NSThread", "NSPathUtilities"] }
-objc2-virtualization = { version = "0.2.2", features = ["all"] }
-reqwest = { version = "0.12.8", features = ["stream", "blocking"] }
+eyre = "0.6.12"
 futures-io = { version = "0.2.0-beta" }
+libc = "0.2.169"
+objc2 = { version = "0.6.0", features = ["catch-all", "exception"] }
+objc2-app-kit = { version = "0.3.0", features = ["NSApplication", "NSRunningApplication", "NSWindow", "NSGraphics", "NSMenu", "NSMenuItem"]}
+objc2-foundation = { version = "0.3.0", features = ["NSString", "NSArray", "NSKeyValueObserving", "NSThread", "NSPathUtilities"] }
+objc2-virtualization = { version = "0.3.0", features = ["default"] }
+reqwest = { version = "0.12.8", features = ["stream", "blocking"] }
+serde = "1.0.217"
+sqlx = { version = "0.8.3", features = ["sqlite", "runtime-tokio", "chrono"] }
+tokio = { version = "1", features = ["full"] }

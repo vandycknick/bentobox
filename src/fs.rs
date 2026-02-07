@@ -1,4 +1,3 @@
-use objc2::runtime::Bool;
 use objc2_foundation::{
     NSSearchPathDirectory, NSSearchPathDomainMask, NSSearchPathForDirectoriesInDomains,
 };
@@ -6,38 +5,35 @@ use objc2_foundation::{
 pub fn get_app_support_dir() -> Option<String> {
     let paths = unsafe {
         NSSearchPathForDirectoriesInDomains(
-            NSSearchPathDirectory::NSApplicationSupportDirectory,
-            NSSearchPathDomainMask::NSUserDomainMask,
-            Bool::YES,
+            NSSearchPathDirectory::ApplicationSupportDirectory,
+            NSSearchPathDomainMask::UserDomainMask,
+            true,
         )
     };
 
-    let paths = unsafe { paths.as_ref() };
-    paths.to_vec_retained().first().map(|s| s.to_string())
+    paths.to_vec().first().map(|s| s.to_string())
 }
 
 pub fn get_cache_dir() -> Option<String> {
     let paths = unsafe {
         NSSearchPathForDirectoriesInDomains(
-            NSSearchPathDirectory::NSCachesDirectory,
-            NSSearchPathDomainMask::NSUserDomainMask,
-            Bool::YES,
+            NSSearchPathDirectory::CachesDirectory,
+            NSSearchPathDomainMask::UserDomainMask,
+            true,
         )
     };
 
-    let paths = unsafe { paths.as_ref() };
-    paths.to_vec_retained().first().map(|s| s.to_string())
+    paths.to_vec().first().map(|s| s.to_string())
 }
 
 pub fn get_preferences_dir() -> Option<String> {
     let paths = unsafe {
         NSSearchPathForDirectoriesInDomains(
-            NSSearchPathDirectory::NSPreferencePanesDirectory,
-            NSSearchPathDomainMask::NSUserDomainMask,
-            Bool::YES,
+            NSSearchPathDirectory::PreferencePanesDirectory,
+            NSSearchPathDomainMask::UserDomainMask,
+            true,
         )
     };
 
-    let paths = unsafe { paths.as_ref() };
-    paths.to_vec_retained().first().map(|s| s.to_string())
+    paths.to_vec().first().map(|s| s.to_string())
 }

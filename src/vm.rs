@@ -2,6 +2,7 @@ use std::{
     cell::Cell,
     ffi::c_void,
     fmt::Display,
+    os::fd::AsRawFd,
     ptr,
     sync::{mpsc::sync_channel, Arc},
 };
@@ -9,31 +10,33 @@ use std::{
 use block2::StackBlock;
 use crossbeam::channel::{bounded, Receiver};
 use objc2::{
-    declare_class, msg_send_id, mutability,
+    define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, ProtocolObject},
-    ClassType, DeclaredClass,
+    AllocAnyThread, ClassType, DeclaredClass,
 };
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSArray, NSCopying, NSData, NSDataBase64DecodingOptions,
-    NSDataBase64EncodingOptions, NSDictionary, NSError, NSKeyValueChangeKey,
+    NSDataBase64EncodingOptions, NSDictionary, NSError, NSFileHandle, NSKeyValueChangeKey,
     NSKeyValueObservingOptions, NSNumber, NSObject, NSObjectNSKeyValueObserverRegistration,
     NSObjectProtocol, NSString, NSURL,
 };
 use objc2_virtualization::{
-    VZDiskImageStorageDeviceAttachment, VZMACAddress, VZMacAuxiliaryStorage,
-    VZMacAuxiliaryStorageInitializationOptions, VZMacGraphicsDeviceConfiguration,
-    VZMacGraphicsDisplayConfiguration, VZMacHardwareModel, VZMacMachineIdentifier,
-    VZMacOSBootLoader, VZMacPlatformConfiguration, VZNATNetworkDeviceAttachment,
-    VZUSBKeyboardConfiguration, VZUSBScreenCoordinatePointingDeviceConfiguration,
-    VZVirtioBlockDeviceConfiguration, VZVirtioNetworkDeviceConfiguration,
+    VZDiskImageStorageDeviceAttachment, VZFileHandleSerialPortAttachment, VZLinuxBootLoader,
+    VZMACAddress, VZMacAuxiliaryStorage, VZMacAuxiliaryStorageInitializationOptions,
+    VZMacGraphicsDeviceConfiguration, VZMacGraphicsDisplayConfiguration, VZMacHardwareModel,
+    VZMacMachineIdentifier, VZMacOSBootLoader, VZMacPlatformConfiguration,
+    VZNATNetworkDeviceAttachment, VZUSBKeyboardConfiguration,
+    VZUSBScreenCoordinatePointingDeviceConfiguration, VZVirtioBlockDeviceConfiguration,
+    VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
+    VZVirtioNetworkDeviceConfiguration, VZVirtioTraditionalMemoryBalloonDeviceConfiguration,
     VZVirtualMachineConfiguration, VZVirtualMachineState,
 };
 
 use crate::{
+    dispatch::{Queue, QueueAttribute},
     internal::{VZMacOSInstaller, VZVirtualMachine},
-    queue::{Queue, QueueAttribute},
     window::AppDelegate,
 };
 
@@ -56,7 +59,6 @@ pub enum VirtualMachineState {
 
 impl Default for VirtualMachineState {
     fn default() -> Self {
-        // NOTE: is this the correct default state. Might want to use stopped or starting
         VirtualMachineState::Unknown
     }
 }
@@ -79,7 +81,7 @@ impl Display for VirtualMachineState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VirtualMachine {
     queue: Queue,
     pub machine: Retained<VZVirtualMachine>,
@@ -92,24 +94,24 @@ impl VirtualMachine {
         unsafe { VZVirtualMachine::isSupported() }
     }
 
-    pub fn new(config: &VZVirtualMachineConfiguration) -> Self {
+    pub fn new(config: Retained<VZVirtualMachineConfiguration>) -> Self {
         unsafe {
             let queue = Queue::create("codes.nvd.bentobox", QueueAttribute::Serial);
-
             let (sender, receiver) = bounded(0);
 
             let machine = VZVirtualMachine::initWithConfiguration_queue(
                 VZVirtualMachine::alloc(),
-                config,
+                &config,
                 queue.ptr,
             );
 
             let observer = VirtualMachineStateObserver::new(machine.clone(), move |change| {
-                let state = change.get(&NSString::from_str("new"));
+                let state = change.objectForKey(ns_string!("new"));
+                let p = state.unwrap().downcast::<NSNumber>().unwrap();
 
-                let ptr: *const AnyObject = state.unwrap();
-                let value: *const NSNumber = ptr.cast();
-                let p = value.as_ref().unwrap_unchecked();
+                //let ptr: *const AnyObject = state.unwrap();
+                //let value: *const NSNumber = ptr.cast();
+                //let p = value.as_ref().unwrap_unchecked();
                 // TODO: wrap this in a custom type so that the internal VZ unsafe doesn't leak
                 let state = VZVirtualMachineState(p.as_isize());
                 let state_msg = match state {
@@ -160,6 +162,7 @@ impl VirtualMachine {
         self.queue
             .exec_block_async(&StackBlock::new(move || unsafe {
                 machine.startWithCompletionHandler(&completion_handler);
+                //machine.startWithOptions_completionHandler(options, completion_handler);
             }));
 
         receiver
@@ -203,9 +206,7 @@ impl VirtualMachine {
         app.setDelegate(Some(object));
 
         // run the app
-        unsafe {
-            app.run();
-        }
+        app.run();
     }
 
     pub fn can_start(&self) -> bool {
@@ -356,28 +357,19 @@ struct Ivars {
     handler: Box<dyn Fn(&NSDictionary<NSKeyValueChangeKey, AnyObject>) + 'static>,
 }
 
-declare_class!(
-    #[derive(Debug)]
-    struct VirtualMachineStateObserver;
-
+define_class!(
     // SAFETY:
     // - The superclass NSObject does not have any subclassing requirements.
-    // - Interior mutability is a safe default.
-    // - VirtualMachineStateObserver implements `Drop` and ensures that:
+    // - MyObserver implements `Drop` and ensures that:
     //   - It does not call an overridden method.
     //   - It does not `retain` itself.
-    unsafe impl ClassType for VirtualMachineStateObserver {
-        type Super = NSObject;
-        type Mutability = mutability::InteriorMutable;
-        const NAME: &'static str = "VirtualMachineStateObserver";
-    }
+    #[unsafe(super(NSObject))]
+    #[name = "VirtualMachineStateObserver"]
+    #[ivars = Ivars]
+    struct VirtualMachineStateObserver;
 
-    impl DeclaredClass for VirtualMachineStateObserver {
-        type Ivars = Ivars;
-    }
-
-    unsafe impl VirtualMachineStateObserver {
-        #[method(observeValueForKeyPath:ofObject:change:context:)]
+    impl VirtualMachineStateObserver {
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
         unsafe fn observe_value_for_key_path(
             &self,
             _key_path: Option<&NSString>,
@@ -405,14 +397,14 @@ impl VirtualMachineStateObserver {
         // object is later moved to another thread.
         handler: impl Fn(&NSDictionary<NSKeyValueChangeKey, AnyObject>) + 'static + Send + Sync,
     ) -> Retained<Self> {
-        let options = NSKeyValueObservingOptions::NSKeyValueObservingOptionNew;
+        let options = NSKeyValueObservingOptions::New;
         let key_path = ns_string!("state");
         let observer = Self::alloc().set_ivars(Ivars {
             object,
             key_path: key_path.copy(),
             handler: Box::new(handler),
         });
-        let observer: Retained<Self> = unsafe { msg_send_id![super(observer), init] };
+        let observer: Retained<Self> = unsafe { msg_send![super(observer), init] };
 
         // SAFETY: We make sure to un-register the observer before it's deallocated.
         //
@@ -448,6 +440,14 @@ pub struct VirtualMachineBuilder {
     config: Retained<VZVirtualMachineConfiguration>,
 }
 
+pub enum VirtualMachineGuestPlatform {
+    Linux {
+        kernel: String,
+        initramfs: String,
+        command_line: Option<String>,
+    },
+}
+
 impl VirtualMachineBuilder {
     pub fn new() -> Self {
         VirtualMachineBuilder::default()
@@ -472,6 +472,7 @@ impl VirtualMachineBuilder {
         unsafe {
             let url = NSString::from_str(device_path.as_ref());
             let device = NSURL::initFileURLWithPath(NSURL::alloc(), &url);
+            // TODO: fix unwrap here.
             let attachment = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
                 VZDiskImageStorageDeviceAttachment::alloc(),
                 &device,
@@ -518,6 +519,34 @@ impl VirtualMachineBuilder {
         self
     }
 
+    pub fn use_platform(self, platform: VirtualMachineGuestPlatform) -> Self {
+        match platform {
+            VirtualMachineGuestPlatform::Linux {
+                kernel,
+                initramfs,
+                command_line,
+            } => unsafe {
+                let bootloader = VZLinuxBootLoader::new();
+
+                let kernel = NSString::from_str(&kernel);
+                let kernel_url = NSURL::initFileURLWithPath(NSURL::alloc(), &kernel);
+                bootloader.setKernelURL(&kernel_url);
+
+                let initramfs = NSString::from_str(&initramfs);
+                let initramfs_url = NSURL::initFileURLWithPath(NSURL::alloc(), &initramfs);
+                bootloader.setInitialRamdiskURL(Some(&initramfs_url));
+
+                let command_line = command_line
+                    .unwrap_or("console=hvc0 rd.break=initqueue root=/dev/vda".to_string());
+                bootloader.setCommandLine(&NSString::from_str(&command_line));
+
+                self.config.setBootLoader(Some(&bootloader));
+            },
+        }
+
+        self
+    }
+
     pub fn use_platform_macos(
         self,
         aux_storage: impl AsRef<str>,
@@ -528,7 +557,7 @@ impl VirtualMachineBuilder {
             let hw_data = NSData::initWithBase64EncodedString_options(
                 NSData::alloc(),
                 ns_string!("YnBsaXN0MDDTAQIDBAUGXxAZRGF0YVJlcHJlc2VudGF0aW9uVmVyc2lvbl8QD1BsYXRmb3JtVmVyc2lvbl8QEk1pbmltdW1TdXBwb3J0ZWRPUxQAAAAAAAAAAAAAAAAAAAABEAKjBwgIEAwQAAgPKz1SY2VpawAAAAAAAAEBAAAAAAAAAAkAAAAAAAAAAAAAAAAAAABt"),
-                NSDataBase64DecodingOptions::NSDataBase64DecodingIgnoreUnknownCharacters
+                NSDataBase64DecodingOptions::IgnoreUnknownCharacters
             );
 
             let hw_model = VZMacHardwareModel::initWithDataRepresentation(
@@ -541,7 +570,7 @@ impl VirtualMachineBuilder {
                 let hw_data = NSData::initWithBase64EncodedString_options(
                     NSData::alloc(),
                     &NSString::from_str(id),
-                    NSDataBase64DecodingOptions::NSDataBase64DecodingIgnoreUnknownCharacters,
+                    NSDataBase64DecodingOptions::IgnoreUnknownCharacters,
                 );
                 let id = VZMacMachineIdentifier::initWithDataRepresentation(
                     VZMacMachineIdentifier::alloc(),
@@ -563,7 +592,7 @@ impl VirtualMachineBuilder {
                 VZMacAuxiliaryStorage::alloc(),
                 &aux_url,
                 &hw_model,
-                VZMacAuxiliaryStorageInitializationOptions::VZMacAuxiliaryStorageInitializationOptionAllowOverwrite
+                VZMacAuxiliaryStorageInitializationOptions::AllowOverwrite,
             );
 
             let bootloader = VZMacOSBootLoader::new();
@@ -578,8 +607,6 @@ impl VirtualMachineBuilder {
             let machine_id_str =
                 machine_id_data.base64EncodedStringWithOptions(NSDataBase64EncodingOptions(0));
             println!("Machine Id: {}", machine_id_str.to_string());
-            // YnBsaXN0MDDRAQJURUNJRBQAAAAAAAAAAKfkU8o5ADqBCAsQAAAAAAAAAQEAAAAAAAAAAwAAAAAAAAAAAAAAAAAAACE=
-            // YnBsaXN0MDDRAQJURUNJRBQAAAAAAAAAAPctOoGYCQfmCAsQAAAAAAAAAQEAAAAAAAAAAwAAAAAAAAAAAAAAAAAAACE=
 
             self.config.setPlatform(&platform);
             self.config.setBootLoader(Some(&bootloader));
@@ -612,6 +639,54 @@ impl VirtualMachineBuilder {
         self
     }
 
+    pub fn use_memory_balloon(self) -> Self {
+        unsafe {
+            let balloon = VZVirtioTraditionalMemoryBalloonDeviceConfiguration::new();
+            let devices = NSArray::from_slice(&[balloon.as_super()]);
+            self.config.setMemoryBalloonDevices(&devices);
+        }
+        self
+    }
+
+    pub fn use_entropy_device(self) -> Self {
+        unsafe {
+            let entropy = VZVirtioEntropyDeviceConfiguration::new();
+            let devices = NSArray::from_slice(&[entropy.as_super()]);
+            self.config.setEntropyDevices(&devices);
+        }
+        self
+    }
+
+    pub fn use_console<T: AsRawFd, U: AsRawFd>(
+        self,
+        stdin: Option<&T>,
+        stdout: Option<&U>,
+    ) -> Self {
+        unsafe {
+            let stdin = stdin.map(|s| {
+                NSFileHandle::initWithFileDescriptor(NSFileHandle::alloc(), s.as_raw_fd())
+            });
+            let stdout = stdout.map(|s| {
+                NSFileHandle::initWithFileDescriptor(NSFileHandle::alloc(), s.as_raw_fd())
+            });
+            let attachment =
+                VZFileHandleSerialPortAttachment::initWithFileHandleForReading_fileHandleForWriting(
+                    VZFileHandleSerialPortAttachment::alloc(),
+                    stdin.as_deref(),
+                    stdout.as_deref(),
+                );
+
+            let serial_port = VZVirtioConsoleDeviceSerialPortConfiguration::new();
+            serial_port.setAttachment(Some(&attachment));
+
+            let ports = NSArray::from_slice(&[serial_port.as_super()]);
+
+            self.config.setSerialPorts(&ports);
+        }
+
+        self
+    }
+
     pub fn build(&self) -> VirtualMachine {
         let result = unsafe { self.config.validateWithError() };
 
@@ -621,10 +696,12 @@ impl VirtualMachineBuilder {
             println!("Invalid VirtualizationConfiguration: {}", msg);
 
             // TODO: Fix this Let it panic!
-            let _ = result.unwrap();
+            //let _ = result.unwrap();
         }
 
-        VirtualMachine::new(&self.config)
+        println!("{:?}", result);
+
+        VirtualMachine::new(self.config.clone())
     }
 }
 

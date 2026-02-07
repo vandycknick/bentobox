@@ -1,0 +1,22 @@
+FROM almalinux:9.5-20241118
+
+RUN dnf install -y epel-release && \
+    dnf install -y 'dnf-command(config-manager)' && \
+    dnf install -y dnf-plugins-core && \
+    dnf config-manager -y --enable epel && \
+    dnf config-manager -y --set-enabled crb && \
+    dnf update -y && \
+    dnf group install -y 'Development Tools' && \
+    dnf install -y ncurses-devel \
+        bison \
+        flex \
+        elfutils-libelf-devel \
+        openssl-devel \
+        bc \
+        dwarves \
+        perl-Pod-Html
+
+WORKDIR /boxos
+COPY ./boxos .
+
+ENTRYPOINT ["make"]

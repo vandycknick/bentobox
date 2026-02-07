@@ -2,44 +2,36 @@ use crate::internal::{VZVirtualMachine, VZVirtualMachineView};
 use crate::vm::{VirtualMachine, VirtualMachineState};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
+use objc2::{define_class, msg_send, ClassType, DeclaredClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationOptions, NSApplicationDelegate, NSBackingStoreType,
     NSMenu, NSMenuItem, NSRunningApplication, NSWindow, NSWindowDelegate, NSWindowStyleMask,
     NSWindowTitleVisibility,
 };
 use objc2_foundation::{
-    ns_string, CGPoint, CGSize, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol,
-    NSRect,
+    ns_string, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSSize,
 };
 
-#[derive(Debug)]
 pub struct Ivars {
     mtm: MainThreadMarker,
     vm: VirtualMachine,
 }
 
-declare_class!(
-    pub struct AppDelegate;
-
+define_class!(
     // SAFETY:
     // - The superclass NSObject does not have any subclassing requirements.
-    // - Main thread only mutability is correct, since this is an application delegate.
     // - `AppDelegate` does not implement `Drop`.
-    unsafe impl ClassType for AppDelegate {
-        type Super = NSObject;
-        type Mutability = mutability::MainThreadOnly;
-        const NAME: &'static str = "AppDelegate";
-    }
-
-    impl DeclaredClass for AppDelegate {
-        type Ivars = Ivars;
-    }
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "AppDelegate"]
+    #[ivars = Ivars]
+    pub struct AppDelegate;
 
     unsafe impl NSObjectProtocol for AppDelegate {}
 
     unsafe impl NSApplicationDelegate for AppDelegate {
-        #[method(applicationDidFinishLaunching:)]
+        #[unsafe(method(applicationDidFinishLaunching:))]
         fn did_finish_launching(&self, notification: &NSNotification) {
             println!("Did finish launching!");
             self.setup_menu_bar();
@@ -47,7 +39,7 @@ declare_class!(
             dbg!(notification);
         }
 
-        #[method(applicationWillTerminate:)]
+        #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _notification: &NSNotification) {
             self.try_shutdown_vm();
             println!("Will terminate!");
@@ -55,7 +47,7 @@ declare_class!(
     }
 
     unsafe impl NSWindowDelegate for AppDelegate {
-        #[method(windowWillClose:)]
+        #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, notification: &NSNotification) {
             println!("Window will close!");
             dbg!(notification);
@@ -67,7 +59,7 @@ impl AppDelegate {
     pub fn new(mtm: MainThreadMarker, vm: VirtualMachine) -> Retained<Self> {
         let this = mtm.alloc();
         let this = this.set_ivars(Ivars { vm, mtm });
-        unsafe { msg_send_id![super(this), init] }
+        unsafe { msg_send![super(this), init] }
     }
 
     pub fn setup_menu_bar(&self) {
@@ -130,8 +122,8 @@ impl AppDelegate {
             //macos 14 and up
             view.setAutomaticallyReconfiguresDisplay(true);
 
-            let origin = CGPoint::new(10.0, 10.0);
-            let size = CGSize::new(1024.0, 768.0);
+            let origin = NSPoint::new(10.0, 10.0);
+            let size = NSSize::new(1024.0, 768.0);
             let rect = NSRect::new(origin, size);
             let window = NSWindow::initWithContentRect_styleMask_backing_defer(
                 mtm.alloc(),
@@ -140,7 +132,7 @@ impl AppDelegate {
                     | NSWindowStyleMask::Closable
                     | NSWindowStyleMask::Miniaturizable
                     | NSWindowStyleMask::Resizable,
-                NSBackingStoreType::NSBackingStoreBuffered,
+                NSBackingStoreType::Buffered,
                 false,
             );
 
@@ -149,7 +141,7 @@ impl AppDelegate {
             window.setDelegate(Some(object));
             window.setContentView(Some(view.as_super()));
             window.setInitialFirstResponder(Some(view.as_super()));
-            window.setTitleVisibility(NSWindowTitleVisibility::NSWindowTitleHidden);
+            window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
             window.center();
 
             // create menu
@@ -157,9 +149,8 @@ impl AppDelegate {
             window.setReleasedWhenClosed(false);
 
             if !NSRunningApplication::currentApplication().isActive() {
-                NSRunningApplication::currentApplication().activateWithOptions(
-                    NSApplicationActivationOptions::NSApplicationActivateAllWindows,
-                );
+                NSRunningApplication::currentApplication()
+                    .activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
             }
         }
     }

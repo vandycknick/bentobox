@@ -1,8 +1,7 @@
 use std::{ffi::c_void, ptr};
 
 use objc2::{
-    declare_class, msg_send_id, mutability, rc::Retained, runtime::AnyObject, ClassType,
-    DeclaredClass,
+    define_class, msg_send, rc::Retained, runtime::AnyObject, AllocAnyThread, DeclaredClass,
 };
 use objc2_foundation::{
     ns_string, NSCopying, NSDictionary, NSKeyValueChangeKey, NSKeyValueObservingOptions, NSNumber,
@@ -15,22 +14,14 @@ pub(crate) struct Ivars {
     handler: Box<dyn Fn(Option<f64>) + 'static>,
 }
 
-declare_class!(
-    #[derive(Debug)]
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "NSProgressFractionCompletedObserver"]
+    #[ivars = Ivars]
     pub(crate) struct NSProgressFractionCompletedObserver;
 
-    unsafe impl ClassType for NSProgressFractionCompletedObserver {
-        type Super = NSObject;
-        type Mutability = mutability::InteriorMutable;
-        const NAME: &'static str = "NSProgressFractionCompletedObserver";
-    }
-
-    impl DeclaredClass for NSProgressFractionCompletedObserver {
-        type Ivars = Ivars;
-    }
-
-    unsafe impl NSProgressFractionCompletedObserver {
-        #[method(observeValueForKeyPath:ofObject:change:context:)]
+    impl NSProgressFractionCompletedObserver {
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
         unsafe fn observe_value_for_key_path(
             &self,
             _key_path: Option<&NSString>,
@@ -39,10 +30,8 @@ declare_class!(
             _context: *mut c_void,
         ) {
             if let Some(change) = change {
-                let state = change.get(&NSString::from_str("new"));
-                let ptr: *const AnyObject = state.unwrap();
-                let value: *const NSNumber = ptr.cast();
-                let p = value.as_ref().unwrap_unchecked();
+                let state = change.objectForKey(ns_string!("new"));
+                let p = state.unwrap().downcast::<NSNumber>().unwrap();
                 (self.ivars().handler)(Some(p.as_f64()));
             } else {
                 (self.ivars().handler)(None);
@@ -58,14 +47,14 @@ impl NSProgressFractionCompletedObserver {
         object: Retained<NSProgress>,
         handler: impl Fn(Option<f64>) + 'static + Send + Sync,
     ) -> Retained<Self> {
-        let options = NSKeyValueObservingOptions::NSKeyValueObservingOptionNew;
+        let options = NSKeyValueObservingOptions::New;
         let key_path = ns_string!("fractionCompleted");
         let observer = Self::alloc().set_ivars(Ivars {
             object,
             key_path: key_path.copy(),
             handler: Box::new(handler),
         });
-        let observer: Retained<Self> = unsafe { msg_send_id![super(observer), init] };
+        let observer: Retained<Self> = unsafe { msg_send![super(observer), init] };
 
         // SAFETY: We make sure to un-register the observer before it's deallocated.
         //
