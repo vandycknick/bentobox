@@ -1,6 +1,6 @@
 #!/bin/busybox sh
 
-echo "Installing busybix"
+echo "Installing busybox"
 /bin/busybox --install -s /bin
 /bin/busybox --install -s /sbin
 
@@ -37,18 +37,28 @@ for i in $(cat /proc/cmdline); do
     esac
 done
 
-# Mount the root device
-mkdir -p /mnt/root
-mount "${root}" /mnt/root
-
 # Unmount all other mounts so that the ram used by
 # the initramfs can be cleared after switch_root
 umount /proc
 umount /sys
 
-# Switch to the new root and execute init
-exec switch_root /mnt/root "${init}"
+# Mount target root
+mkdir -p /mnt/root
+if ! mount "${root}" /mnt/root; then
+    echo "mount ${root} -> /mnt/root failed"
+    exec sh
+fi
 
-# This will only be run if the exec above failed
-echo "Failed to switch_root, dropping to a shell"
-exec sh
+# Must be a mountpoint for switch_root
+if ! mountpoint -q /mnt/root; then
+    echo "/mnt/root is not a mountpoint"
+    exec sh
+fi
+
+# NEW_INIT must exist in new root
+if [ ! -x "/mnt/root${init}" ]; then
+    echo "init not executable: /mnt/root${init}"
+    exec sh
+fi
+
+exec switch_root /mnt/root "${init}"

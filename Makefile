@@ -9,9 +9,8 @@ build-kernel: .tmp/boxos-builder
 		-e KERNEL_ROOT=/kernel \
 		-v $(shell pwd)/boxos:/boxos \
 		-v $(shell pwd)/target:/target \
-		--entrypoint bash \
-		boxos-builder
-		# kernel
+		boxos-builder \
+		kernel
 
 .PHONY: build-initramfs
 build-initramfs: .tmp/boxos-builder .tmp/busybox

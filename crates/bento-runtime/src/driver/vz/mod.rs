@@ -1,0 +1,216 @@
+use std::io::stdout;
+use std::os::fd::AsRawFd;
+use std::process::Stdio;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use crossbeam::channel::bounded;
+use objc2::AllocAnyThread;
+use objc2::{rc::Retained, ClassType};
+use objc2_foundation::{ns_string, NSArray, NSFileHandle, NSNumber, NSString, NSURL};
+use objc2_virtualization::{
+    VZFileHandleSerialPortAttachment, VZFileSerialPortAttachment, VZGenericPlatformConfiguration,
+    VZLinuxBootLoader, VZVirtioConsoleDeviceConfiguration,
+    VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioConsolePortConfiguration,
+    VZVirtioEntropyDeviceConfiguration, VZVirtioSocketDeviceConfiguration,
+    VZVirtioTraditionalMemoryBalloonDeviceConfiguration, VZVirtualMachine,
+    VZVirtualMachineConfiguration, VZVirtualMachineState,
+};
+
+use crate::driver::vz::dispatch::Queue;
+use crate::driver::vz::vm::get_machine_identifier;
+use crate::driver::vz::vz::VZVirtualMachineExt;
+use crate::{
+    driver::{vz::utils::vz_nested_virtualization_is_supported, Driver, DriverError},
+    instance::{Instance, InstanceConfig, InstanceFile},
+};
+
+mod dispatch;
+mod utils;
+mod vm;
+mod vz;
+
+use vm::VirtualMachine;
+pub use vm::VirtualMachineError;
+
+#[derive(Debug)]
+pub struct VzDriver {
+    instance: Instance,
+    vm: Option<VirtualMachine>,
+}
+
+impl VzDriver {
+    pub fn new(instance: Instance) -> Self {
+        Self { instance, vm: None }
+    }
+}
+
+impl Driver for VzDriver {
+    fn validate(&self) -> Result<(), DriverError> {
+        if !utils::is_os_version_at_least(11, 0, 0) {
+            return Err(DriverError::Backend(
+                "Virtualization.framework requires macOS 11+".into(),
+            ));
+        }
+
+        if !utils::vz_virtual_machine_is_supported() {
+            return Err(DriverError::Backend(
+                "Virtualization.framework is not supported on this system.".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn create(&self) -> Result<(), DriverError> {
+        let _ = get_machine_identifier(&self.instance)?;
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), DriverError> {
+        self.validate()?;
+
+        unsafe {
+            let config = create_vm_config(&self.instance)?;
+            let vm = start_vm(config)?;
+            self.vm = Some(vm);
+        }
+
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), DriverError> {
+        self.vm.as_ref().map(|vm| vm.stop());
+        Ok(())
+    }
+}
+
+unsafe fn start_vm(
+    config: Retained<VZVirtualMachineConfiguration>,
+) -> Result<VirtualMachine, DriverError> {
+    let vm = VirtualMachine::new(config);
+
+    vm.start()?;
+
+    let events = vm.subscribe_state();
+    let startup_timeout = Duration::from_mins(5);
+
+    loop {
+        let e = match events.recv_timeout(startup_timeout) {
+            Ok(event) => event,
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                return Err(DriverError::Backend(format!(
+                    "timed out after {:?} waiting for VM to enter running state (current state: {})",
+                    startup_timeout,
+                    vm.state()
+                )));
+            }
+            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                return Err(DriverError::Backend(
+                    "VM state subscription disconnected while waiting for startup".to_string(),
+                ));
+            }
+        };
+
+        match e {
+            vm::VirtualMachineState::Stopped => {
+                return Err(DriverError::Backend(
+                    "VM stopped unexpectedly during startup".to_string(),
+                ));
+            }
+            vm::VirtualMachineState::Running => return Ok(vm),
+            // TODO: add some trace logging here
+            _ => continue,
+        }
+    }
+}
+
+unsafe fn create_vm_config(
+    inst: &Instance,
+) -> Result<Retained<VZVirtualMachineConfiguration>, DriverError> {
+    let config = &inst.config;
+    let machine_id = get_machine_identifier(&inst)?;
+
+    let bootloader = VZLinuxBootLoader::new();
+
+    // FIX: at this point I should always have a path to a valid kernel
+    let kernel = inst.config.kernel_path.as_ref().unwrap();
+
+    let kernel = NSString::from_str(&kernel.to_string_lossy());
+    let kernel_url = NSURL::initFileURLWithPath(NSURL::alloc(), &kernel);
+    bootloader.setKernelURL(&kernel_url);
+
+    let initramfs = NSString::from_str("/Users/nickvd/Projects/bentobox/target/boxos/initramfs");
+    let initramfs_url = NSURL::initFileURLWithPath(NSURL::alloc(), &initramfs);
+    bootloader.setInitialRamdiskURL(Some(&initramfs_url));
+
+    // FIX: How should I handle this?
+    let command_line = "console=hvc0 rd.break=initqueue root=/dev/vda";
+    bootloader.setCommandLine(&NSString::from_str(&command_line));
+
+    // TODO: rename this var, can't be config because otherwise I'll shadow
+    let c = VZVirtualMachineConfiguration::new();
+    c.setBootLoader(Some(&bootloader));
+
+    // FIX: should be usize in the InstanceConfig
+    c.setCPUCount(config.cpus.unwrap_or(2) as usize);
+    c.setMemorySize(2147483648);
+
+    // NOTE: Attach platform configuration
+    let platform_config = VZGenericPlatformConfiguration::new();
+    platform_config.setMachineIdentifier(&machine_id);
+
+    if config.nested_virtualization.unwrap_or(false) {
+        if !utils::is_os_version_at_least(15, 0, 0) {
+            return Err(DriverError::Backend(
+                "nested virtualization requires macOS 15 or newer".to_string(),
+            ));
+        }
+
+        if !vz_nested_virtualization_is_supported() {
+            return Err(DriverError::Backend(
+                "nested virtualization is not supported on this device".to_string(),
+            ));
+        }
+
+        platform_config.setNestedVirtualizationEnabled(true);
+    }
+
+    c.setPlatform(&platform_config);
+
+    // NOTE: Attach serial configuration
+    let s = NSString::from_str(&inst.file(InstanceFile::SerialLog).to_string_lossy());
+    let serial_url = NSURL::initFileURLWithPath(NSURL::alloc(), &s);
+    let attachment = VZFileSerialPortAttachment::initWithURL_append_error(
+        VZFileSerialPortAttachment::alloc(),
+        &serial_url,
+        false,
+    )
+    .map_err(|nse| DriverError::Backend(nse.to_string()))?;
+
+    let console = VZVirtioConsoleDeviceSerialPortConfiguration::new();
+    console.setAttachment(Some(&attachment));
+    let serial_ports = NSArray::from_slice(&[console.as_super()]);
+    c.setSerialPorts(&serial_ports);
+
+    attach_devices(&c);
+
+    c.validateWithError()
+        .map_err(|nse| DriverError::Backend(nse.to_string()))?;
+
+    return Ok(c);
+}
+
+unsafe fn attach_devices(config: &Retained<VZVirtualMachineConfiguration>) {
+    let entropy = VZVirtioEntropyDeviceConfiguration::new();
+    let devices = NSArray::from_slice(&[entropy.as_super()]);
+    config.setEntropyDevices(&devices);
+
+    let balloon = VZVirtioTraditionalMemoryBalloonDeviceConfiguration::new();
+    let devices = NSArray::from_slice(&[balloon.as_super()]);
+    config.setMemoryBalloonDevices(&devices);
+
+    let socket = VZVirtioSocketDeviceConfiguration::new();
+    let devices = NSArray::from_slice(&[socket.as_super()]);
+    config.setSocketDevices(&devices);
+}

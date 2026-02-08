@@ -1,0 +1,20 @@
+[package]
+name = "bentoctl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.89"
+bento-runtime = { path = "../bento-runtime" }
+clap = { version = "4.5.31", features = ["derive"] }
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.149"
+serde_yaml_ng = "0.10.0"
+libc = "0.2.169"
+signal-hook = "0.3.17"
+time = { version = "0.3.36", features = ["formatting"] }
+chrono = "0.4.43"
+eyre = "0.6.12"
+
+[dev-dependencies]
+tempfile = "3.24.0"

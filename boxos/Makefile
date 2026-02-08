@@ -12,7 +12,7 @@ endif
 .PHONY: kernel
 kernel: download-kernel
 	@cd $(KERNEL_ROOT) && \
-		$(MAKE) O=/target/boxos -j$(nproc)
+		$(MAKE) O=/target/boxos -j2
 
 .PHONY: initramfs
 initramfs:

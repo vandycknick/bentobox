@@ -1,0 +1,9 @@
+[target.aarch64-apple-darwin]
+runner = "scripts/cargo-run-macos-sign-bentoctl.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/cargo-run-macos-sign-bentoctl.sh"
+
+[alias]
+sign-bin = "!scripts/sign-bin.sh"
+build-signed-bentoctl = "!cargo build -p bentoctl && scripts/sign-bin.sh target/debug/bentoctl"
