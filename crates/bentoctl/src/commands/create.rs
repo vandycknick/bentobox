@@ -11,8 +11,12 @@ pub struct Cmd {
     pub name: String,
     #[arg(long, default_value_t = 1, help = "number of virtual CPUs")]
     pub cpus: u8,
-    #[arg(long, help = "virtual machine RAM size in mibibytes")]
-    pub memory: Option<u32>,
+    #[arg(
+        long,
+        default_value_t = 512,
+        help = "virtual machine RAM size in mibibytes"
+    )]
+    pub memory: u32,
     #[arg(long, help = "Path to a custom kernel, only works for Linux.")]
     pub kernel: Option<PathBuf>,
 }
