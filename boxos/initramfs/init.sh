@@ -4,8 +4,6 @@ echo "Installing busybox"
 /bin/busybox --install -s /bin
 /bin/busybox --install -s /sbin
 
-ls -alh /dev
-
 mount -t devtmpfs  devtmpfs  /dev
 mount -t proc      proc      /proc
 mount -t sysfs     sysfs     /sys
@@ -23,7 +21,7 @@ get_opt() {
 }
 
 init="/sbin/init"
-root="/dev/sda"
+root="/dev/vda"
 
 #Process command line options
 for i in $(cat /proc/cmdline); do
@@ -37,14 +35,9 @@ for i in $(cat /proc/cmdline); do
     esac
 done
 
-# Unmount all other mounts so that the ram used by
-# the initramfs can be cleared after switch_root
-umount /proc
-umount /sys
-
 # Mount target root
 mkdir -p /mnt/root
-if ! mount "${root}" /mnt/root; then
+if ! mount -o subvol=@ "${root}" /mnt/root; then
     echo "mount ${root} -> /mnt/root failed"
     exec sh
 fi
@@ -60,5 +53,10 @@ if [ ! -x "/mnt/root${init}" ]; then
     echo "init not executable: /mnt/root${init}"
     exec sh
 fi
+
+# Unmount all other mounts so that the ram used by
+# the initramfs can be cleared after switch_root
+umount /proc
+umount /sys
 
 exec switch_root /mnt/root "${init}"
