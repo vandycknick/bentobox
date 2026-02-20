@@ -2,7 +2,7 @@ use std::io;
 
 use thiserror::Error;
 
-use crate::{instance::Instance, instance::InstanceConfig};
+use crate::instance::Instance;
 
 #[cfg(target_os = "macos")]
 pub mod vz;
@@ -22,6 +22,9 @@ pub enum DriverError {
 
     #[error(transparent)]
     Io(#[from] io::Error),
+
+    #[error(transparent)]
+    InstanceDisk(#[from] crate::instance::InstanceDiskError),
 }
 
 pub trait Driver {

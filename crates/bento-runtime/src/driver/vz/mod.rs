@@ -1,28 +1,20 @@
-use std::io::stdout;
-use std::os::fd::AsRawFd;
-use std::process::Stdio;
-use std::sync::Mutex;
 use std::time::Duration;
 
-use crossbeam::channel::bounded;
 use objc2::AllocAnyThread;
 use objc2::{rc::Retained, ClassType};
-use objc2_foundation::{ns_string, NSArray, NSFileHandle, NSNumber, NSString, NSURL};
+use objc2_foundation::{NSArray, NSString, NSURL};
 use objc2_virtualization::{
-    VZFileHandleSerialPortAttachment, VZFileSerialPortAttachment, VZGenericPlatformConfiguration,
-    VZLinuxBootLoader, VZVirtioConsoleDeviceConfiguration,
-    VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioConsolePortConfiguration,
-    VZVirtioEntropyDeviceConfiguration, VZVirtioSocketDeviceConfiguration,
-    VZVirtioTraditionalMemoryBalloonDeviceConfiguration, VZVirtualMachine,
-    VZVirtualMachineConfiguration, VZVirtualMachineState,
+    VZDiskImageStorageDeviceAttachment, VZFileSerialPortAttachment, VZGenericPlatformConfiguration,
+    VZLinuxBootLoader, VZVirtioBlockDeviceConfiguration,
+    VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
+    VZVirtioSocketDeviceConfiguration, VZVirtioTraditionalMemoryBalloonDeviceConfiguration,
+    VZVirtualMachineConfiguration,
 };
 
-use crate::driver::vz::dispatch::Queue;
 use crate::driver::vz::vm::get_machine_identifier;
-use crate::driver::vz::vz::VZVirtualMachineExt;
 use crate::{
     driver::{vz::utils::vz_nested_virtualization_is_supported, Driver, DriverError},
-    instance::{Instance, InstanceConfig, InstanceFile},
+    instance::{Instance, InstanceFile},
 };
 
 mod dispatch;
@@ -194,6 +186,7 @@ unsafe fn create_vm_config(
     c.setSerialPorts(&serial_ports);
 
     attach_devices(&c);
+    attach_storage_devices(&c, inst)?;
 
     c.validateWithError()
         .map_err(|nse| DriverError::Backend(nse.to_string()))?;
@@ -213,4 +206,64 @@ unsafe fn attach_devices(config: &Retained<VZVirtualMachineConfiguration>) {
     let socket = VZVirtioSocketDeviceConfiguration::new();
     let devices = NSArray::from_slice(&[socket.as_super()]);
     config.setSocketDevices(&devices);
+}
+
+unsafe fn attach_storage_devices(
+    config: &Retained<VZVirtualMachineConfiguration>,
+    inst: &Instance,
+) -> Result<(), DriverError> {
+    let mut disks = Vec::new();
+    if let Some(root_disk) = inst.root_disk()? {
+        disks.push(root_disk);
+    }
+    disks.extend(inst.data_disks()?);
+
+    if disks.is_empty() {
+        return Ok(());
+    }
+
+    let mut storage_configs = Vec::with_capacity(disks.len());
+    for disk in disks {
+        let metadata = std::fs::metadata(&disk.path).map_err(|err| {
+            DriverError::Backend(format!(
+                "failed to access disk image {}: {err}",
+                disk.path.display()
+            ))
+        })?;
+
+        if !metadata.is_file() {
+            return Err(DriverError::Backend(format!(
+                "disk image path is not a file: {}",
+                disk.path.display()
+            )));
+        }
+
+        let disk_path = NSString::from_str(&disk.path.to_string_lossy());
+        let disk_url = NSURL::initFileURLWithPath(NSURL::alloc(), &disk_path);
+
+        let attachment = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
+            VZDiskImageStorageDeviceAttachment::alloc(),
+            &disk_url,
+            disk.read_only,
+        )
+        .map_err(|nse| {
+            DriverError::Backend(format!(
+                "failed to initialize disk image attachment {}: {}",
+                disk.path.display(),
+                nse
+            ))
+        })?;
+
+        let storage = VZVirtioBlockDeviceConfiguration::initWithAttachment(
+            VZVirtioBlockDeviceConfiguration::alloc(),
+            &attachment,
+        );
+        storage_configs.push(storage);
+    }
+
+    let storage_refs: Vec<_> = storage_configs.iter().map(|cfg| cfg.as_super()).collect();
+    let storage_devices = NSArray::from_slice(&storage_refs);
+    config.setStorageDevices(&storage_devices);
+
+    Ok(())
 }

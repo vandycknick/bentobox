@@ -26,6 +26,7 @@
         {
           default = pkgs.mkShell {
             packages = [
+              pkgs.docker
               pkgs.vfkit
             ];
             # shellHook = ''
