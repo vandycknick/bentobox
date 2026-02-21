@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 
 pub mod create;
 pub mod delete;
+pub mod images;
 pub mod instanced;
 pub mod start;
 pub mod status;
@@ -30,6 +31,8 @@ pub enum Command {
     Delete(delete::Cmd),
     Status(status::Cmd),
     Instanced(instanced::Cmd),
+    #[command(name = "images", alias = "image")]
+    Images(images::Cmd),
 }
 
 impl Display for Command {
@@ -41,6 +44,7 @@ impl Display for Command {
             Command::Delete(cmd) => write!(f, "delete {}", cmd),
             Command::Status(cmd) => write!(f, "status {}", cmd),
             Command::Instanced(cmd) => write!(f, "instanced {}", cmd),
+            Command::Images(cmd) => write!(f, "images {}", cmd),
         }
     }
 }
@@ -59,6 +63,8 @@ impl BentoCtlCmd {
             Command::Status(cmd) => cmd.run(),
 
             Command::Instanced(cmd) => cmd.run(),
+
+            Command::Images(cmd) => cmd.run(),
         }
     }
 }

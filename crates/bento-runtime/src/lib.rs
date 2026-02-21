@@ -1,5 +1,6 @@
 pub mod directories;
 pub mod driver;
+pub mod image_store;
 pub mod instance;
 pub mod instance_daemon;
 pub mod instance_manager;

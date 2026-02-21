@@ -1,23 +1,9 @@
 #![allow(non_snake_case)]
-use std::ffi::c_void;
-use std::io::ErrorKind;
-use std::{fs, ptr};
 
-use eyre::Context;
-use objc2::{extern_class, extern_methods, DefinedClass};
-use objc2::{AllocAnyThread, __framework_prelude::*, define_class, msg_send};
-// use objc2_app_kit::{
-//     NSAccessibility, NSAccessibilityElementProtocol, NSAnimatablePropertyContainer,
-//     NSAppearanceCustomization, NSDraggingDestination, NSResponder,
-//     NSUserInterfaceItemIdentification, NSView,
-// };
+use objc2::{__framework_prelude::*, msg_send};
+use objc2::{extern_class, extern_methods};
 use objc2_foundation::*;
-use objc2_virtualization::{
-    VZGenericMachineIdentifier, VZVirtualMachine, VZVirtualMachineConfiguration,
-};
-
-use crate::driver::DriverError;
-use crate::instance::{Instance, InstanceFile};
+use objc2_virtualization::{VZVirtualMachine, VZVirtualMachineConfiguration};
 
 use super::dispatch::ffi::dispatch_queue_t;
 

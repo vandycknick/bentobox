@@ -5,7 +5,7 @@
 Create an image:
 
 ```sh
-truncate -s 20G arch.img
+truncate -s 20G archlinux.img
 ```
 
 Boot kernel with ArchBoot:
@@ -16,7 +16,7 @@ vfkit \
   --cpus 4 \
   --memory 4096 \
     --bootloader "linux,kernel=./images/Image,initrd=./images/initrd-aarch64.img,cmdline=root=/dev/vda rw console=hvc0" \
-  --device virtio-blk,path=./arch.img \
+  --device virtio-blk,path=./images/arch.img \
   --device virtio-net,nat \
   --device virtio-serial,stdio
 stty isig
@@ -52,15 +52,23 @@ systemctl enable systemd-resolved
 systemctl enable sshd
 systemctl enable cloud-init
 
-echo archy > /etc/hostname
+echo archlinux > /etc/hostname
 
 passwd
+exit
 ```
 
-Exit
+Shrink disk
 
 ```sh
-exit
+btrfs filesystem usage /mnt
+
+
+```
+
+Cleanup
+
+```sh
 umount -R /mnt
 ```
 

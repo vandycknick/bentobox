@@ -1,3 +1,5 @@
+use bento_runtime::image_store::ImageStore;
+use bento_runtime::instance::InstanceFile;
 use bento_runtime::instance_manager::{InstanceCreateOptions, InstanceManager, NixDaemon};
 use clap::Args;
 use eyre::Context;
@@ -19,6 +21,8 @@ pub struct Cmd {
     pub memory: u32,
     #[arg(long, help = "Path to a custom kernel, only works for Linux.")]
     pub kernel: Option<PathBuf>,
+    #[arg(long, help = "Base image name or OCI reference")]
+    pub image: Option<String>,
 }
 
 impl Display for Cmd {
@@ -31,6 +35,7 @@ impl Cmd {
     pub fn run(&self) -> eyre::Result<()> {
         let daemon = NixDaemon::new("123");
         let manager = InstanceManager::new(daemon);
+        let mut store = ImageStore::open()?;
 
         let kernel_path = match &self.kernel {
             Some(path) => {
@@ -51,7 +56,22 @@ impl Cmd {
             .with_cpus(self.cpus)
             .with_kernel(kernel_path);
 
-        manager.create(&self.name, options)?;
+        let selected_image = self
+            .image
+            .as_deref()
+            .map(|image_arg| -> eyre::Result<_> {
+                Ok(match store.resolve(image_arg)? {
+                    Some(image) => image,
+                    None => store.pull(image_arg, None)?,
+                })
+            })
+            .transpose()?;
+
+        let inst = manager.create(&self.name, options)?;
+
+        if let Some(image) = selected_image {
+            store.clone_base_image(&image, &inst.file(InstanceFile::RootDisk))?;
+        }
 
         println!("created {}", self.name);
         Ok(())
