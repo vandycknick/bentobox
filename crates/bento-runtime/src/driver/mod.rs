@@ -25,6 +25,9 @@ pub enum DriverError {
 
     #[error(transparent)]
     InstanceDisk(#[from] crate::instance::InstanceDiskError),
+
+    #[error(transparent)]
+    InstanceBoot(#[from] crate::instance::InstanceBootError),
 }
 
 pub trait Driver {
@@ -47,7 +50,7 @@ pub fn get_driver_for(inst: &Instance) -> Result<Box<dyn Driver>, DriverError> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn get_driver_for(inst: Instance) -> Result<Box<dyn Driver>, DriverError> {
+pub fn get_driver_for(inst: &Instance) -> Result<Box<dyn Driver>, DriverError> {
     match inst.engine() {
         crate::instance::EngineType::VZ => Err(DriverError::Backend(
             "VZ driver is only supported on macOS hosts".to_string(),

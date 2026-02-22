@@ -122,17 +122,15 @@ unsafe fn create_vm_config(
 ) -> Result<Retained<VZVirtualMachineConfiguration>, DriverError> {
     let config = &inst.config;
     let machine_id = get_machine_identifier(&inst)?;
+    let boot_assets = inst.boot_assets()?;
 
     let bootloader = VZLinuxBootLoader::new();
 
-    // FIX: at this point I should always have a path to a valid kernel
-    let kernel = inst.config.kernel_path.as_ref().unwrap();
-
-    let kernel = NSString::from_str(&kernel.to_string_lossy());
+    let kernel = NSString::from_str(&boot_assets.kernel.to_string_lossy());
     let kernel_url = NSURL::initFileURLWithPath(NSURL::alloc(), &kernel);
     bootloader.setKernelURL(&kernel_url);
 
-    let initramfs = NSString::from_str("/Users/nickvd/Projects/bentobox/target/boxos/initramfs");
+    let initramfs = NSString::from_str(&boot_assets.initramfs.to_string_lossy());
     let initramfs_url = NSURL::initFileURLWithPath(NSURL::alloc(), &initramfs);
     bootloader.setInitialRamdiskURL(Some(&initramfs_url));
 
@@ -144,9 +142,21 @@ unsafe fn create_vm_config(
     let c = VZVirtualMachineConfiguration::new();
     c.setBootLoader(Some(&bootloader));
 
-    // FIX: should be usize in the InstanceConfig
-    c.setCPUCount(config.cpus.unwrap_or(2) as usize);
-    c.setMemorySize(2147483648);
+    let cpu_count = config.cpus.unwrap_or(2);
+    if cpu_count <= 0 {
+        return Err(DriverError::Backend(format!(
+            "invalid CPU count in instance config: {cpu_count}"
+        )));
+    }
+    c.setCPUCount(cpu_count as usize);
+
+    let memory_mib = config.memory.unwrap_or(2048);
+    if memory_mib <= 0 {
+        return Err(DriverError::Backend(format!(
+            "invalid memory size in MiB in instance config: {memory_mib}"
+        )));
+    }
+    c.setMemorySize((memory_mib as u64) * 1024 * 1024);
 
     // NOTE: Attach platform configuration
     let platform_config = VZGenericPlatformConfiguration::new();

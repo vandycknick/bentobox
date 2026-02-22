@@ -3,7 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io,
     os::unix::process::CommandExt,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -165,7 +165,11 @@ impl<D: Daemon> InstanceManager<D> {
         // TODO: Find a better way to build an InstanceConfig from options.
         let options = options.into();
         let mut config = InstanceConfig::new();
-        config.kernel_path = options.kernel_path;
+        config.cpus = Some(options.cpus as i32);
+        config.memory = Some(options.memory as i32);
+        config.kernel_path = options
+            .kernel_path
+            .map(|path| path_relative_to(&app_home, &path));
 
         let config_path = app_home.join(InstanceFile::Config.as_str());
         let config_yaml = serde_yaml_ng::to_string(&config).map_err(|source| {
@@ -339,10 +343,21 @@ impl<D: Daemon> InstanceManager<D> {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct InstanceCreateOptions {
     pub cpus: u8,
+    pub memory: u32,
     pub kernel_path: Option<PathBuf>,
+}
+
+impl Default for InstanceCreateOptions {
+    fn default() -> Self {
+        Self {
+            cpus: 1,
+            memory: 512,
+            kernel_path: None,
+        }
+    }
 }
 
 impl InstanceCreateOptions {
@@ -352,8 +367,54 @@ impl InstanceCreateOptions {
     }
 
     pub fn with_kernel(mut self, path: Option<PathBuf>) -> Self {
-        self.kernel_path = path.into();
+        self.kernel_path = path;
         self
+    }
+
+    pub fn with_memory(mut self, memory: u32) -> Self {
+        self.memory = memory;
+        self
+    }
+}
+
+fn path_relative_to(base: &Path, target: &Path) -> PathBuf {
+    // Return a path from `base` to `target`.
+    // If either path is non-absolute, keep `target` unchanged.
+    if !base.is_absolute() || !target.is_absolute() {
+        return target.to_path_buf();
+    }
+
+    let base_components: Vec<Component<'_>> = base.components().collect();
+    let target_components: Vec<Component<'_>> = target.components().collect();
+
+    // Find the longest shared prefix between both absolute paths.
+    let mut common_len = 0usize;
+    while common_len < base_components.len()
+        && common_len < target_components.len()
+        && base_components[common_len] == target_components[common_len]
+    {
+        common_len += 1;
+    }
+
+    let mut relative = PathBuf::new();
+
+    // For each remaining normal segment in `base`, go up one directory.
+    for comp in &base_components[common_len..] {
+        if matches!(comp, Component::Normal(_)) {
+            relative.push("..");
+        }
+    }
+
+    // Then descend into the remaining suffix of `target`.
+    for comp in &target_components[common_len..] {
+        relative.push(comp.as_os_str());
+    }
+
+    // Use "." as the canonical relative path when both inputs are identical.
+    if relative.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        relative
     }
 }
 

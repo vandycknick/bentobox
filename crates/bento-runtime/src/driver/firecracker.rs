@@ -1,33 +1,31 @@
-use std::path::PathBuf;
-
 use crate::{
-    config::InstanceConfig,
     driver::{Driver, DriverError},
+    instance::Instance,
 };
 
 #[derive(Debug, Clone)]
 pub struct FirecrackerDriver {
-    _instance_dir: PathBuf,
+    _instance: Instance,
 }
 
 impl FirecrackerDriver {
-    pub fn new(instance_dir: PathBuf) -> Self {
+    pub fn new(instance: Instance) -> Self {
         Self {
-            _instance_dir: instance_dir,
+            _instance: instance,
         }
     }
 }
 
 impl Driver for FirecrackerDriver {
-    fn name(&self) -> &'static str {
-        "firecracker"
-    }
-
-    fn create(&mut self, _config: &InstanceConfig) -> Result<(), DriverError> {
+    fn validate(&self) -> Result<(), DriverError> {
         Ok(())
     }
 
-    fn start(&mut self, _config: &InstanceConfig) -> Result<(), DriverError> {
+    fn create(&self) -> Result<(), DriverError> {
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<(), DriverError> {
         Ok(())
     }
 

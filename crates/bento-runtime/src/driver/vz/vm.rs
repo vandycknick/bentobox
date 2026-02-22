@@ -221,11 +221,13 @@ impl VirtualMachine {
             .map_err(|_| VirtualMachineError::completion_channel_closed("stop"))?
     }
 
+    #[expect(dead_code, reason = "kept for upcoming VM control surface")]
     pub fn can_start(&self) -> bool {
         let machine = self.machine.clone();
         self.run_on_queue(move || unsafe { machine.canStart() })
     }
 
+    #[expect(dead_code, reason = "kept for upcoming VM control surface")]
     pub fn can_stop(&self) -> bool {
         let machine = self.machine.clone();
         self.run_on_queue(move || unsafe { machine.canStop() })
@@ -250,6 +252,7 @@ impl VirtualMachine {
         self.run_on_queue(move || unsafe { machine.canRequestStop() })
     }
 
+    #[expect(dead_code, reason = "kept for upcoming VM control surface")]
     pub fn request_stop(&self) -> Result<(), VirtualMachineError> {
         let machine = self.machine.clone();
 

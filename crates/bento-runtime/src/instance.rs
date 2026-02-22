@@ -7,6 +7,8 @@ use std::{
 };
 use thiserror::Error;
 
+use crate::directories::Directory;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum GuestOs {
@@ -42,10 +44,28 @@ pub struct InstanceDisk {
     pub read_only: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BootAssets {
+    pub kernel: PathBuf,
+    pub initramfs: PathBuf,
+}
+
 #[derive(Debug, Error)]
 pub enum InstanceDiskError {
     #[error("only one root disk can be configured, found {count}")]
     MultipleRootDisks { count: usize },
+}
+
+#[derive(Debug, Error)]
+pub enum InstanceBootError {
+    #[error("kernel path is not a file: {path}")]
+    KernelNotAFile { path: PathBuf },
+
+    #[error("initramfs path is not a file: {path}")]
+    InitramfsNotAFile { path: PathBuf },
+
+    #[error("unable to resolve default kernel bundle path from XDG_DATA_HOME or $HOME")]
+    DefaultBundleRootUnavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -63,6 +83,9 @@ pub struct InstanceConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_path: Option<PathBuf>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initramfs_path: Option<PathBuf>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nested_virtualization: Option<bool>,
@@ -165,6 +188,34 @@ impl Instance {
             .collect())
     }
 
+    pub fn boot_assets(&self) -> Result<BootAssets, InstanceBootError> {
+        let default_root = || {
+            Directory::with_prefix("kernels")
+                .get_data_home()
+                .ok_or(InstanceBootError::DefaultBundleRootUnavailable)
+                .map(|path| path.join("default"))
+        };
+
+        let kernel = match self.config.kernel_path.as_ref() {
+            Some(path) => self.resolve_config_path(path),
+            None => default_root()?.join("kernel"),
+        };
+        let initramfs = match self.config.initramfs_path.as_ref() {
+            Some(path) => self.resolve_config_path(path),
+            None => default_root()?.join("initramfs"),
+        };
+
+        if !kernel.is_file() {
+            return Err(InstanceBootError::KernelNotAFile { path: kernel });
+        }
+
+        if !initramfs.is_file() {
+            return Err(InstanceBootError::InitramfsNotAFile { path: initramfs });
+        }
+
+        Ok(BootAssets { kernel, initramfs })
+    }
+
     fn partition_disks(
         &self,
     ) -> Result<(Option<&DiskConfig>, Vec<&DiskConfig>), InstanceDiskError> {
@@ -192,15 +243,19 @@ impl Instance {
     }
 
     fn resolve_config_disk(&self, disk: &DiskConfig) -> InstanceDisk {
-        let path = if disk.path.is_absolute() {
-            disk.path.clone()
-        } else {
-            self.dir.join(&disk.path)
-        };
+        let path = self.resolve_config_path(&disk.path);
 
         InstanceDisk {
             path,
             read_only: disk.read_only.unwrap_or(false),
+        }
+    }
+
+    fn resolve_config_path(&self, path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.dir.join(path)
         }
     }
 }
@@ -363,5 +418,26 @@ mod tests {
         let root = inst.root_disk().expect("root disk lookup should succeed");
 
         assert!(root.is_none());
+    }
+
+    #[test]
+    fn boot_assets_resolve_relative_paths_from_instance_dir() {
+        let dir = temp_instance_dir("boot-assets-relative");
+        fs::create_dir_all(&dir).expect("test dir should be creatable");
+        fs::create_dir_all(dir.join("boot")).expect("boot dir should be creatable");
+        fs::write(dir.join("boot/kernel"), b"kernel").expect("kernel should be writable");
+        fs::write(dir.join("boot/initramfs"), b"initramfs").expect("initramfs should be writable");
+
+        let mut cfg = InstanceConfig::new();
+        cfg.kernel_path = Some(PathBuf::from("boot/kernel"));
+        cfg.initramfs_path = Some(PathBuf::from("boot/initramfs"));
+
+        let inst = Instance::new("vm1".to_string(), dir.clone(), cfg);
+        let assets = inst.boot_assets().expect("boot assets should resolve");
+
+        assert_eq!(assets.kernel, dir.join("boot/kernel"));
+        assert_eq!(assets.initramfs, dir.join("boot/initramfs"));
+
+        fs::remove_dir_all(dir).expect("test dir should be removable");
     }
 }

@@ -4,11 +4,10 @@ use serde::{Deserialize, Serialize};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::Signals;
 use std::path::PathBuf;
-use std::time::Duration;
-use std::{fs, io, thread};
+use std::{fs, io};
 use std::{fs::OpenOptions, io::Write, path::Path};
 
-use crate::driver::{self, DriverError};
+use crate::driver::{self};
 use crate::{
     instance::InstanceFile,
     instance_manager::{Daemon, InstanceManager},

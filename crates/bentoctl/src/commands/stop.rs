@@ -15,8 +15,7 @@ impl Display for Cmd {
 
 impl Cmd {
     pub fn run(&self) -> eyre::Result<()> {
-        let mut manager = InstanceManager::new(NixDaemon::new("123"));
-
+        let manager = InstanceManager::new(NixDaemon::new("123"));
         let inst = manager.inspect(&self.name)?;
         manager.stop(&inst)?;
         Ok(())

@@ -54,6 +54,7 @@ impl Cmd {
 
         let options = InstanceCreateOptions::default()
             .with_cpus(self.cpus)
+            .with_memory(self.memory)
             .with_kernel(kernel_path);
 
         let selected_image = self
