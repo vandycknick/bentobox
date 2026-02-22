@@ -11,7 +11,7 @@ use std::{
 
 use nix::{
     sys::signal::{self, Signal},
-    unistd::Pid,
+    unistd::{setsid, Pid},
 };
 use thiserror::Error;
 
@@ -39,10 +39,9 @@ impl NixDaemon {
         let mut command = Command::new(exe.as_ref());
         unsafe {
             command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
+                setsid()
+                    .map(|_| ())
+                    .map_err(|errno| io::Error::from_raw_os_error(errno as i32))
             });
         }
 

@@ -62,6 +62,9 @@
 - Avoid `pub use` on imports unless you are re-exposing a dependency so downstream consumers do not have to depend on it directly.
 - Skip global state via `lazy_static!`, `Once`, or similar; prefer passing explicit context structs for any shared state.
 - Prefer strong types over strings, use enums and newtypes when the domain is closed or needs validation.
+- Prefer `nix` crate APIs over direct `libc` calls for Unix/syscall interactions.
+- Use direct `libc` only when the required call is not available in `nix` (for example, macOS `clonefile`).
+- If you must use direct `libc`, add a short code comment explaining why `nix` is insufficient for that call.
 
 #### Rust Workflow Checklist
 

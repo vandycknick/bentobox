@@ -1,5 +1,10 @@
 use std::{fs, io, num::NonZeroI32, path::Path};
 
+use libc::pid_t;
+use nix::errno::Errno;
+use nix::sys::signal;
+use nix::unistd::Pid;
+
 /// Read PID file and verify liveness.
 ///
 /// Returns:
@@ -13,7 +18,7 @@ pub fn read_pid_file(path: &Path) -> io::Result<Option<NonZeroI32>> {
         Err(err) => return Err(err),
     };
 
-    let pid: i32 = raw.trim().parse().map_err(|err| {
+    let pid: pid_t = raw.trim().parse().map_err(|err| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("invalid pid in {}: {err}", path.display()),
@@ -27,22 +32,17 @@ pub fn read_pid_file(path: &Path) -> io::Result<Option<NonZeroI32>> {
         )
     })?;
 
-    // SAFETY: libc::kill is called with primitive integer arguments.
-    let rc = unsafe { libc::kill(pid.get(), 0) };
-    if rc == 0 {
-        return Ok(Some(pid));
-    }
-    let err = io::Error::last_os_error();
-    match err.raw_os_error() {
-        Some(code) if code == libc::ESRCH => {
+    match signal::kill(Pid::from_raw(pid.get()), None) {
+        Ok(()) => Ok(Some(pid)),
+        Err(Errno::ESRCH) => {
             // Process does not exist, clean stale pid file.
             let _ = fs::remove_file(path);
             Ok(None)
         }
-        Some(code) if code == libc::EPERM => {
+        Err(Errno::EPERM) => {
             // No permission to signal, process still exists.
             Ok(Some(pid))
         }
-        _ => Err(err),
+        Err(errno) => Err(io::Error::from_raw_os_error(errno as i32)),
     }
 }
