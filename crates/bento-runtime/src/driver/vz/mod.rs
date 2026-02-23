@@ -1,3 +1,4 @@
+use std::os::fd::OwnedFd;
 use std::time::Duration;
 
 use objc2::AllocAnyThread;
@@ -74,6 +75,14 @@ impl Driver for VzDriver {
     fn stop(&mut self) -> Result<(), DriverError> {
         self.vm.as_ref().map(|vm| vm.stop());
         Ok(())
+    }
+
+    fn open_vsock_stream(&self, port: u32) -> Result<OwnedFd, DriverError> {
+        let vm = self.vm.as_ref().ok_or_else(|| {
+            DriverError::Backend("cannot open vsock stream because VM is not running".to_string())
+        })?;
+
+        vm.open_vsock_stream(port).map_err(DriverError::from)
     }
 }
 

@@ -271,6 +271,7 @@ pub enum InstanceStatus {
 pub enum InstanceFile {
     Config,
     InstancedPid,
+    InstancedSocket,
     InstancedStdoutLog,
     InstancedSterrLog,
     AppleMachineIdentifier,
@@ -283,6 +284,7 @@ impl InstanceFile {
         match self {
             Self::Config => "config.yaml",
             Self::InstancedPid => "id.pid",
+            Self::InstancedSocket => "id.sock",
             Self::InstancedStdoutLog => "id.stdout.log",
             Self::InstancedSterrLog => "id.stder.log",
             Self::AppleMachineIdentifier => "apple-machine-id",

@@ -1,4 +1,5 @@
 use std::io;
+use std::os::fd::OwnedFd;
 
 use thiserror::Error;
 
@@ -38,6 +39,12 @@ pub trait Driver {
     fn start(&mut self) -> Result<(), DriverError>;
 
     fn stop(&mut self) -> Result<(), DriverError>;
+
+    fn open_vsock_stream(&self, _port: u32) -> Result<OwnedFd, DriverError> {
+        Err(DriverError::Backend(
+            "driver does not support opening vsock streams".to_string(),
+        ))
+    }
 }
 
 #[cfg(target_os = "macos")]

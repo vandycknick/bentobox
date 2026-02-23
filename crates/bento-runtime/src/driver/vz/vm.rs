@@ -3,6 +3,7 @@ use std::{
     fmt::{Debug, Display},
     fs,
     io::ErrorKind,
+    os::fd::{BorrowedFd, OwnedFd},
     ptr,
     sync::{mpsc::sync_channel, Arc, Mutex},
 };
@@ -24,9 +25,10 @@ use crate::{
 };
 
 use super::dispatch::{Queue, QueueAttribute};
+use nix::unistd::dup;
 use objc2_virtualization::{
-    VZGenericMachineIdentifier, VZVirtualMachine, VZVirtualMachineConfiguration,
-    VZVirtualMachineState,
+    VZGenericMachineIdentifier, VZVirtioSocketConnection, VZVirtioSocketDevice, VZVirtualMachine,
+    VZVirtualMachineConfiguration, VZVirtualMachineState,
 };
 use thiserror::Error;
 
@@ -219,6 +221,89 @@ impl VirtualMachine {
         receiver
             .recv()
             .map_err(|_| VirtualMachineError::completion_channel_closed("stop"))?
+    }
+
+    pub fn open_vsock_stream(&self, port: u32) -> Result<OwnedFd, VirtualMachineError> {
+        let machine = self.machine.clone();
+        let (sender, receiver) = sync_channel(0);
+
+        self.queue
+            .exec_block_async(&StackBlock::new(move || unsafe {
+                let devices = machine.socketDevices();
+                let Some(device) = devices.firstObject() else {
+                    let _ = sender.send(Err(VirtualMachineError {
+                        domain: "bento.vsock".to_string(),
+                        code: -1,
+                        description: "no socket device configured in VM".to_string(),
+                        failure_reason: String::new(),
+                        recovery_suggestion: String::new(),
+                    }));
+                    return;
+                };
+
+                let Some(vsock) = device.downcast_ref::<VZVirtioSocketDevice>() else {
+                    let _ = sender.send(Err(VirtualMachineError {
+                        domain: "bento.vsock".to_string(),
+                        code: -1,
+                        description: "socket device is not a virtio socket device".to_string(),
+                        failure_reason: String::new(),
+                        recovery_suggestion: String::new(),
+                    }));
+                    return;
+                };
+
+                let sender = sender.clone();
+                let completion_handler = StackBlock::new(
+                    move |conn: *mut VZVirtioSocketConnection, err: *mut NSError| {
+                        let err = err.as_ref();
+
+                        let result = if let Some(error) = err {
+                            Err(VirtualMachineError::from_nserror(error))
+                        } else if let Some(conn) = conn.as_ref() {
+                            let raw_fd = conn.fileDescriptor();
+                            if raw_fd < 0 {
+                                Err(VirtualMachineError {
+                                    domain: "bento.vsock".to_string(),
+                                    code: -1,
+                                    description:
+                                        "vsock connection returned invalid file descriptor"
+                                            .to_string(),
+                                    failure_reason: String::new(),
+                                    recovery_suggestion: String::new(),
+                                })
+                            } else {
+                                let borrowed = BorrowedFd::borrow_raw(raw_fd);
+                                dup(borrowed).map_err(|errno| VirtualMachineError {
+                                    domain: "bento.vsock".to_string(),
+                                    code: errno as isize,
+                                    description: format!(
+                                        "failed to duplicate vsock connection fd: {errno}"
+                                    ),
+                                    failure_reason: String::new(),
+                                    recovery_suggestion: String::new(),
+                                })
+                            }
+                        } else {
+                            Err(VirtualMachineError {
+                                domain: "bento.vsock".to_string(),
+                                code: -1,
+                                description: "vsock connect callback returned no connection"
+                                    .to_string(),
+                                failure_reason: String::new(),
+                                recovery_suggestion: String::new(),
+                            })
+                        };
+
+                        let _ = sender.send(result);
+                    },
+                );
+
+                vsock.connectToPort_completionHandler(port, &completion_handler);
+            }));
+
+        receiver
+            .recv()
+            .map_err(|_| VirtualMachineError::completion_channel_closed("open_vsock_stream"))?
     }
 
     #[expect(dead_code, reason = "kept for upcoming VM control surface")]

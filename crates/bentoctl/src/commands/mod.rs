@@ -6,6 +6,8 @@ pub mod delete;
 pub mod images;
 pub mod instanced;
 pub mod list;
+pub mod shell;
+pub mod shell_proxy;
 pub mod start;
 pub mod status;
 pub mod stop;
@@ -29,12 +31,15 @@ pub enum Command {
     Create(create::Cmd),
     Start(start::Cmd),
     Stop(stop::Cmd),
+    Shell(shell::Cmd),
     Delete(delete::Cmd),
     List(list::Cmd),
     Status(status::Cmd),
     Instanced(instanced::Cmd),
     #[command(name = "images", alias = "image")]
     Images(images::Cmd),
+    #[command(hide = true)]
+    ShellProxy(shell_proxy::Cmd),
 }
 
 impl Display for Command {
@@ -43,11 +48,13 @@ impl Display for Command {
             Command::Create(cmd) => write!(f, "create {}", cmd),
             Command::Start(cmd) => write!(f, "start {}", cmd),
             Command::Stop(cmd) => write!(f, "stop {}", cmd),
+            Command::Shell(cmd) => write!(f, "shell {}", cmd),
             Command::Delete(cmd) => write!(f, "delete {}", cmd),
             Command::List(_) => write!(f, "list"),
             Command::Status(cmd) => write!(f, "status {}", cmd),
             Command::Instanced(cmd) => write!(f, "instanced {}", cmd),
             Command::Images(cmd) => write!(f, "images {}", cmd),
+            Command::ShellProxy(cmd) => write!(f, "shell-proxy {}", cmd),
         }
     }
 }
@@ -62,6 +69,7 @@ impl BentoCtlCmd {
             Command::Create(cmd) => cmd.run(),
             Command::Start(cmd) => cmd.run(),
             Command::Stop(cmd) => cmd.run(),
+            Command::Shell(cmd) => cmd.run(),
             Command::Delete(cmd) => cmd.run(),
             Command::List(cmd) => cmd.run(),
             Command::Status(cmd) => cmd.run(),
@@ -69,6 +77,7 @@ impl BentoCtlCmd {
             Command::Instanced(cmd) => cmd.run(),
 
             Command::Images(cmd) => cmd.run(),
+            Command::ShellProxy(cmd) => cmd.run(),
         }
     }
 }
