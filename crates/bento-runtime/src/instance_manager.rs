@@ -239,6 +239,45 @@ impl<D: Daemon> InstanceManager<D> {
         Ok(inst)
     }
 
+    pub fn list(&self) -> Result<Vec<Instance>, InstanceError> {
+        let root = Directory::with_prefix("").get_data_home().ok_or_else(|| {
+            InstanceError::GenericError {
+                reason:
+                    "Users data home from $XDG_DATA_HOME or $HOME/.local/share can't be located"
+                        .to_string(),
+            }
+        })?;
+
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+
+        let mut instances = Vec::new();
+
+        for entry in entries {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            let name = match entry.file_name().into_string() {
+                Ok(name) => name,
+                Err(_) => continue,
+            };
+
+            if let Ok(instance) = self.inspect(&name) {
+                instances.push(instance);
+            }
+        }
+
+        instances.sort_by(|a, b| a.name.cmp(&b.name));
+
+        Ok(instances)
+    }
+
     pub fn start(&mut self, inst: &Instance) -> Result<(), InstanceError> {
         if inst.status() == InstanceStatus::Running {
             return Err(InstanceError::InstanceAlreadyRunning {
@@ -452,7 +491,6 @@ pub fn wait_for_instanced_start(ha_pid_path: &Path, ha_stderr_path: &Path) -> io
         }
 
         if Instant::now() >= deadline {
-            println!("over deadline");
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(

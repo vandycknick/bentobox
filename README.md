@@ -16,6 +16,7 @@ WORK IN PROGRESS
 - `bentoctl images import <path-to-oci-layout-or-archive>`
 - `bentoctl images pack --image <path-to-rootfs.img> --os <os> --arch <arch> [--out <artifact.oci.tar>] <name>`
 - `bentoctl create <name> --image <name-or-oci-ref>`
+- `bentoctl list`
 
 ### Manual Disk Expansion
 

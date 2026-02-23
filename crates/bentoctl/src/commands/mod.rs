@@ -5,6 +5,7 @@ pub mod create;
 pub mod delete;
 pub mod images;
 pub mod instanced;
+pub mod list;
 pub mod start;
 pub mod status;
 pub mod stop;
@@ -29,6 +30,7 @@ pub enum Command {
     Start(start::Cmd),
     Stop(stop::Cmd),
     Delete(delete::Cmd),
+    List(list::Cmd),
     Status(status::Cmd),
     Instanced(instanced::Cmd),
     #[command(name = "images", alias = "image")]
@@ -42,6 +44,7 @@ impl Display for Command {
             Command::Start(cmd) => write!(f, "start {}", cmd),
             Command::Stop(cmd) => write!(f, "stop {}", cmd),
             Command::Delete(cmd) => write!(f, "delete {}", cmd),
+            Command::List(_) => write!(f, "list"),
             Command::Status(cmd) => write!(f, "status {}", cmd),
             Command::Instanced(cmd) => write!(f, "instanced {}", cmd),
             Command::Images(cmd) => write!(f, "images {}", cmd),
@@ -60,6 +63,7 @@ impl BentoCtlCmd {
             Command::Start(cmd) => cmd.run(),
             Command::Stop(cmd) => cmd.run(),
             Command::Delete(cmd) => cmd.run(),
+            Command::List(cmd) => cmd.run(),
             Command::Status(cmd) => cmd.run(),
 
             Command::Instanced(cmd) => cmd.run(),
