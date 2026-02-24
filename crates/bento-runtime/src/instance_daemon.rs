@@ -3,7 +3,7 @@ use eyre::Context;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::flag;
-use std::io::Read;
+use std::collections::BTreeMap;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -20,7 +20,8 @@ use crate::driver::{self};
 use crate::{
     instance::InstanceFile,
     instance_control::{
-        ControlRequest, ControlResponse, CONTROL_OP_OPEN_VSOCK, CONTROL_PROTOCOL_VERSION,
+        ControlErrorCode, ControlRequest, ControlRequestBody, ControlResponse, ServiceDescriptor,
+        CONTROL_PROTOCOL_VERSION, SERVICE_SSH,
     },
     instance_manager::{Daemon, InstanceManager},
 };
@@ -116,6 +117,7 @@ impl InstanceDaemon {
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(50));
                 }
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
                 Err(err) => {
                     eprintln!("[instanced] control socket accept error: {err}");
                     thread::sleep(Duration::from_millis(250));
@@ -149,9 +151,9 @@ pub fn bind_socket(path: &Path) -> eyre::Result<SocketGuard> {
     }
 
     let listener = UnixListener::bind(path).context(format!("bind socket {}", path.display()))?;
-    // listener
-    //     .set_nonblocking(true)
-    //     .context("set control socket nonblocking")?;
+    listener
+        .set_nonblocking(true)
+        .context("set control socket nonblocking")?;
 
     Ok(SocketGuard {
         path: path.to_path_buf(),
@@ -160,99 +162,138 @@ pub fn bind_socket(path: &Path) -> eyre::Result<SocketGuard> {
 }
 
 fn handle_client(mut stream: UnixStream, driver: &dyn crate::driver::Driver) -> eyre::Result<()> {
-    let request = read_control_request(&mut stream)?;
+    let request = ControlRequest::read_from(&mut stream).context("read control request")?;
+    let service_registry = ServiceRegistry::default();
 
     if request.version != CONTROL_PROTOCOL_VERSION {
-        let response = ControlResponse::error(
+        let response = ControlResponse::v1_error(
             request.id,
-            "unsupported_version",
+            ControlErrorCode::UnsupportedVersion,
             format!(
                 "control protocol version {} is unsupported",
                 request.version
             ),
         );
-        write_control_response(&mut stream, &response)?;
+        response
+            .write_to(&mut stream)
+            .context("write control response")?;
         return Ok(());
     }
 
-    if request.op != CONTROL_OP_OPEN_VSOCK {
-        let response = ControlResponse::error(request.id, "unsupported_op", "unsupported op");
-        write_control_response(&mut stream, &response)?;
-        return Ok(());
-    }
-
-    let Some(port) = request.port else {
-        let response = ControlResponse::error(request.id, "missing_port", "port is required");
-        write_control_response(&mut stream, &response)?;
-        return Ok(());
-    };
-
-    let id = request.id;
-    match driver.open_vsock_stream(port) {
-        Ok(vsock_fd) => {
-            write_control_response(&mut stream, &ControlResponse::ok(id))?;
-            spawn_tunnel(stream, vsock_fd);
+    match request.body {
+        ControlRequestBody::ListServices => {
+            let response = ControlResponse::v1_services(request.id, service_registry.describe());
+            response
+                .write_to(&mut stream)
+                .context("write control response")?;
         }
-        Err(err) => {
-            let response = ControlResponse::error(
-                id,
-                "guest_port_unreachable",
-                format!("failed to open guest vsock port {port}: {err}"),
-            );
-            write_control_response(&mut stream, &response)?;
+        ControlRequestBody::OpenService { service } => {
+            let id = request.id;
+            let target = match service_registry.resolve(&service) {
+                Some(target) => target,
+                None => {
+                    let response = ControlResponse::v1_error(
+                        id,
+                        ControlErrorCode::UnknownService,
+                        format!("service '{service}' is not registered"),
+                    );
+                    response
+                        .write_to(&mut stream)
+                        .context("write control response")?;
+                    return Ok(());
+                }
+            };
+
+            match target {
+                ServiceTarget::VsockPort(port) => {
+                    let mut last_err = None;
+
+                    for attempt in 1..=SERVICE_OPEN_MAX_ATTEMPTS {
+                        match driver.open_vsock_stream(port) {
+                            Ok(vsock_fd) => {
+                                ControlResponse::v1_opened(id.clone())
+                                    .write_to(&mut stream)
+                                    .context("write control response")?;
+                                spawn_tunnel(stream, vsock_fd);
+                                return Ok(());
+                            }
+                            Err(err) => {
+                                last_err = Some(err);
+
+                                if attempt < SERVICE_OPEN_MAX_ATTEMPTS {
+                                    ControlResponse::v1_starting(
+                                        id.clone(),
+                                        attempt,
+                                        SERVICE_OPEN_MAX_ATTEMPTS,
+                                        SERVICE_OPEN_RETRY_DELAY_SECS,
+                                    )
+                                    .write_to(&mut stream)
+                                    .context("write control response")?;
+
+                                    thread::sleep(Duration::from_secs(
+                                        SERVICE_OPEN_RETRY_DELAY_SECS,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+
+                    let err_text = last_err
+                        .map(|err| err.to_string())
+                        .unwrap_or_else(|| "unknown startup error".to_string());
+
+                    ControlResponse::v1_error(
+                        id,
+                        ControlErrorCode::ServiceUnavailable,
+                        format!(
+                            "failed to open service '{service}' on vsock port {port} after {} attempts: {err_text}",
+                            SERVICE_OPEN_MAX_ATTEMPTS
+                        ),
+                    )
+                    .write_to(&mut stream)
+                    .context("write control response")?;
+                }
+            }
         }
     }
 
     Ok(())
 }
 
-fn read_control_request(stream: &mut UnixStream) -> eyre::Result<ControlRequest> {
-    let line = read_json_line(stream).context("read control request")?;
-    if line.is_empty() {
-        return Err(eyre::eyre!("control request stream closed before request"));
+#[derive(Debug, Clone, Copy)]
+enum ServiceTarget {
+    VsockPort(u32),
+}
+
+#[derive(Debug)]
+struct ServiceRegistry {
+    by_name: BTreeMap<String, ServiceTarget>,
+}
+
+impl ServiceRegistry {
+    fn resolve(&self, name: &str) -> Option<ServiceTarget> {
+        self.by_name.get(name).copied()
     }
 
-    let req =
-        serde_json::from_str::<ControlRequest>(&line).context("parse control request json")?;
-    Ok(req)
-}
-
-fn read_json_line(stream: &mut UnixStream) -> io::Result<String> {
-    let mut buf = Vec::new();
-    let mut byte = [0u8; 1];
-
-    loop {
-        let n = stream.read(&mut byte)?;
-        if n == 0 {
-            break;
-        }
-
-        if byte[0] == b'\n' {
-            break;
-        }
-
-        buf.push(byte[0]);
-        if buf.len() > 16 * 1024 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "control line exceeded 16KiB",
-            ));
-        }
+    fn describe(&self) -> Vec<ServiceDescriptor> {
+        self.by_name
+            .keys()
+            .map(|name| ServiceDescriptor { name: name.clone() })
+            .collect()
     }
-
-    String::from_utf8(buf)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "control line was not utf-8"))
 }
 
-fn write_control_response(stream: &mut UnixStream, response: &ControlResponse) -> eyre::Result<()> {
-    let mut payload = serde_json::to_vec(response).context("serialize control response")?;
-    payload.push(b'\n');
-    stream
-        .write_all(&payload)
-        .context("write control response")?;
-    stream.flush().context("flush control response")?;
-    Ok(())
+impl Default for ServiceRegistry {
+    fn default() -> Self {
+        let mut by_name = BTreeMap::new();
+        by_name.insert(SERVICE_SSH.to_string(), ServiceTarget::VsockPort(2222));
+
+        Self { by_name }
+    }
 }
+
+const SERVICE_OPEN_MAX_ATTEMPTS: u8 = 5;
+const SERVICE_OPEN_RETRY_DELAY_SECS: u64 = 2;
 
 fn spawn_tunnel(stream: UnixStream, vsock_fd: OwnedFd) {
     thread::spawn(move || {

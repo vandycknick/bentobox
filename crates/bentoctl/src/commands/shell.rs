@@ -40,7 +40,7 @@ impl Cmd {
             .with_file_name("known_hosts");
 
         let proxy_command = format!(
-            "{} shell-proxy --name {} --port 2222",
+            "{} shell-proxy --name {} --service ssh",
             shell_quote(&exe.to_string_lossy()),
             shell_quote(&self.name)
         );

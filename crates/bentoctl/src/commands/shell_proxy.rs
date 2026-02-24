@@ -1,12 +1,13 @@
 use std::fmt::{Display, Formatter};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use bento_runtime::instance::InstanceFile;
 use bento_runtime::instance_control::{
-    ControlRequest, ControlResponse, CONTROL_OP_OPEN_VSOCK, CONTROL_PROTOCOL_VERSION,
+    ControlErrorCode, ControlRequest, ControlResponse, ControlResponseBody,
+    CONTROL_PROTOCOL_VERSION, SERVICE_SSH,
 };
 use bento_runtime::instance_manager::{InstanceManager, NixDaemon};
 use clap::Args;
@@ -18,13 +19,13 @@ pub struct Cmd {
     #[arg(long)]
     pub name: String,
 
-    #[arg(long, default_value_t = 2222)]
-    pub port: u32,
+    #[arg(long, default_value = SERVICE_SSH)]
+    pub service: String,
 }
 
 impl Display for Cmd {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "--name {} --port {}", self.name, self.port)
+        write!(f, "--name {} --service {}", self.name, self.service)
     }
 }
 
@@ -34,21 +35,30 @@ impl Cmd {
         let inst = manager.inspect(&self.name)?;
         let socket_path = inst.file(InstanceFile::InstancedSocket);
 
-        let mut stream = match UnixStream::connect(&socket_path) {
+        let client = ControlClient::connect(&socket_path)?;
+        let stream = client.open_service(&self.service)?;
+
+        proxy_stdio(stream)
+    }
+}
+
+struct ControlClient {
+    stream: UnixStream,
+}
+
+impl ControlClient {
+    fn connect(path: &std::path::Path) -> eyre::Result<Self> {
+        let stream = match UnixStream::connect(path) {
             Ok(stream) => stream,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 bail!(
                     "instanced_unreachable: control socket {} is missing, make sure the VM is running",
-                    socket_path.display()
+                    path.display()
                 )
             }
-            Err(err) => {
-                return Err(err).context(format!("connect {}", socket_path.display()));
-            }
+            Err(err) => return Err(err).context(format!("connect {}", path.display())),
         };
-        stream
-            .set_nonblocking(false)
-            .context("set control socket blocking")?;
+
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .context("set control socket read timeout")?;
@@ -56,89 +66,77 @@ impl Cmd {
             .set_write_timeout(Some(Duration::from_secs(5)))
             .context("set control socket write timeout")?;
 
-        let request = ControlRequest {
-            version: CONTROL_PROTOCOL_VERSION,
-            id: "shell-proxy".to_string(),
-            op: CONTROL_OP_OPEN_VSOCK.to_string(),
-            port: Some(self.port),
-        };
-        let mut payload = serde_json::to_vec(&request).context("serialize shell request")?;
-        payload.push(b'\n');
-        stream.write_all(&payload).context("write shell request")?;
-        stream.flush().context("flush shell request")?;
+        Ok(Self { stream })
+    }
 
-        let line = read_json_line(&mut stream).context("read shell response")?;
-        if line.is_empty() {
-            bail!("instanced closed control socket before sending response");
+    fn open_service(mut self, service: &str) -> eyre::Result<UnixStream> {
+        let request = ControlRequest::v1_open_service("shell-proxy", service);
+        request
+            .write_to(&mut self.stream)
+            .context("write shell request")?;
+
+        loop {
+            let response =
+                ControlResponse::read_from(&mut self.stream).context("read shell response")?;
+
+            if response.version != CONTROL_PROTOCOL_VERSION {
+                bail!(
+                    "unsupported_version: daemon returned protocol version {}, expected {}",
+                    response.version,
+                    CONTROL_PROTOCOL_VERSION
+                );
+            }
+
+            match response.body {
+                ControlResponseBody::Opened => {
+                    self.stream
+                        .set_read_timeout(None)
+                        .context("clear control socket read timeout")?;
+                    self.stream
+                        .set_write_timeout(None)
+                        .context("clear control socket write timeout")?;
+                    return Ok(self.stream);
+                }
+                ControlResponseBody::Starting { .. } => {
+                    continue;
+                }
+                ControlResponseBody::Error { code, message } => {
+                    bail!("{}", render_control_error(&code, &message))
+                }
+                ControlResponseBody::Services { .. } => {
+                    bail!("invalid_response: expected opened response for service request")
+                }
+            }
         }
-
-        let response =
-            serde_json::from_str::<ControlResponse>(&line).context("parse shell response")?;
-        if !response.ok {
-            let code = response.code.unwrap_or_else(|| "unknown_error".to_string());
-            let msg = response
-                .message
-                .unwrap_or_else(|| "shell request rejected".to_string());
-            bail!("{}", render_control_error(&code, &msg));
-        }
-
-        stream
-            .set_read_timeout(None)
-            .context("clear control socket read timeout")?;
-        stream
-            .set_write_timeout(None)
-            .context("clear control socket write timeout")?;
-
-        proxy_stdio(stream)
     }
 }
 
-fn render_control_error(code: &str, message: &str) -> String {
+fn render_control_error(code: &ControlErrorCode, message: &str) -> String {
     match code {
-        "guest_port_unreachable" => {
-            format!(
-                "guest_port_unreachable: {message}. ensure the guest VSOCK bridge service is running"
-            )
+        ControlErrorCode::ServiceUnavailable => {
+            format!("service_unavailable: {message}. ensure guest service is running")
         }
-        "unsupported_version" => {
+        ControlErrorCode::UnknownService => {
+            format!("unknown_service: {message}. try a supported service like 'ssh'")
+        }
+        ControlErrorCode::UnsupportedVersion => {
             format!(
                 "unsupported_version: {message}. update bentoctl/instanced to matching versions"
             )
         }
-        "missing_port" | "unsupported_op" => format!("{code}: {message}"),
-        _ => format!("{code}: {message}"),
-    }
-}
-
-fn read_json_line(stream: &mut UnixStream) -> std::io::Result<String> {
-    let mut buf = Vec::new();
-    let mut byte = [0u8; 1];
-
-    loop {
-        let n = stream.read(&mut byte)?;
-        if n == 0 {
-            break;
+        ControlErrorCode::UnsupportedRequest => {
+            format!("unsupported_request: {message}")
         }
-
-        if byte[0] == b'\n' {
-            break;
+        ControlErrorCode::InstanceNotRunning => {
+            format!("instance_not_running: {message}")
         }
-
-        buf.push(byte[0]);
-        if buf.len() > 16 * 1024 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "control line exceeded 16KiB",
-            ));
+        ControlErrorCode::PermissionDenied => {
+            format!("permission_denied: {message}")
+        }
+        ControlErrorCode::Internal => {
+            format!("internal_error: {message}")
         }
     }
-
-    String::from_utf8(buf).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "control line was not utf-8",
-        )
-    })
 }
 
 fn proxy_stdio(mut stream: UnixStream) -> eyre::Result<()> {
