@@ -3,8 +3,9 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use bento_runtime::instance::{InstanceFile, InstanceStatus};
+use bento_runtime::instance::InstanceStatus;
 use bento_runtime::instance_manager::{InstanceError, InstanceManager, NixDaemon};
+use bento_runtime::{host_user, ssh_keys};
 use clap::Args;
 use eyre::{bail, Context};
 
@@ -12,13 +13,16 @@ use eyre::{bail, Context};
 pub struct Cmd {
     pub name: String,
 
-    #[arg(long, short = 'u', default_value = "root")]
-    pub user: String,
+    #[arg(long, short = 'u')]
+    pub user: Option<String>,
 }
 
 impl Display for Cmd {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} --user {}", self.name, self.user)
+        match self.user.as_deref() {
+            Some(user) => write!(f, "{} --user {}", self.name, user),
+            None => write!(f, "{}", self.name),
+        }
     }
 }
 
@@ -35,30 +39,39 @@ impl Cmd {
         }
 
         let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
-        let known_hosts = inst
-            .file(InstanceFile::InstancedSocket)
-            .with_file_name("known_hosts");
 
         let proxy_command = format!(
             "{} shell-proxy --name {} --service ssh",
             shell_quote(&exe.to_string_lossy()),
             shell_quote(&self.name)
         );
+        let host_user = host_user::current_host_user().context("resolve current host user")?;
+        let ssh_user = self.user.as_deref().unwrap_or(host_user.name.as_str());
+        let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure bento SSH keys")?;
 
         let err = Command::new("ssh")
-            // Do not read ~/.ssh/config or custom host stanzas. Keeps behavior deterministic.
+            // Do not read ~/.ssh/config or custom host stanzas. Keeps behaviour deterministic.
             .arg("-F")
             .arg("/dev/null")
+            // Auth + identity
+            .arg("-o")
+            .arg(format!(
+                "IdentityFile={}",
+                user_keys.private_key_path.to_string_lossy()
+            ))
+            .arg("-o")
+            .arg("PreferredAuthentications=publickey") // Try key auth first/only preferred method.
+            .arg("-o")
+            .arg("BatchMode=yes") // Noninteractive mode, do not prompt for passwords/passphrases.
+            .arg("-o")
+            .arg("IdentitiesOnly=yes") // Only use the specified identity file, do not spray all agent keys.
+            .arg("-o")
+            .arg("GSSAPIAuthentication=no") //Disable Kerberos/GSSAPI attempts, avoids slow or noisy fallback paths.
             // ProxyCommand
             .arg("-o")
             .arg(format!("ProxyCommand={proxy_command}"))
             .arg("-o")
             .arg(format!("HostKeyAlias=bento/{}", self.name))
-            .arg("-o")
-            .arg(format!(
-                "UserKnownHostsFile={}",
-                known_hosts.to_string_lossy()
-            ))
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg("-o")
@@ -76,7 +89,7 @@ impl Cmd {
             .arg("SendEnv=COLORTERM")
             // Remote endpoint and identity
             .arg("-o")
-            .arg(format!("User={}", self.user))
+            .arg(format!("User={ssh_user}"))
             .arg(self.name.clone())
             .exec();
 

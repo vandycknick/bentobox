@@ -1,9 +1,13 @@
+pub mod cidata;
+mod cidata_iso9660;
 pub mod directories;
 pub mod driver;
+pub mod host_user;
 pub mod image_store;
 pub mod instance;
 pub mod instance_control;
 pub mod instance_daemon;
 pub mod instance_manager;
 pub mod log_watcher;
+pub mod ssh_keys;
 pub mod utils;

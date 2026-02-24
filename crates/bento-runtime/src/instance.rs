@@ -181,10 +181,18 @@ impl Instance {
     }
 
     pub fn data_disks(&self) -> Result<Vec<InstanceDisk>, InstanceDiskError> {
-        let (_, data_disks) = self.partition_disks()?;
-        Ok(data_disks
-            .iter()
+        let (_, disks) = self.partition_disks()?;
+        let cidata_iso = self.file(InstanceFile::CidataIso);
+
+        let cidata_disk = cidata_iso.is_file().then_some(InstanceDisk {
+            path: cidata_iso,
+            read_only: true,
+        });
+
+        Ok(disks
+            .into_iter()
             .map(|disk| self.resolve_config_disk(disk))
+            .chain(cidata_disk)
             .collect())
     }
 
@@ -277,6 +285,7 @@ pub enum InstanceFile {
     AppleMachineIdentifier,
     SerialLog,
     RootDisk,
+    CidataIso,
 }
 
 impl InstanceFile {
@@ -290,6 +299,7 @@ impl InstanceFile {
             Self::AppleMachineIdentifier => "apple-machine-id",
             Self::SerialLog => "serial.log",
             Self::RootDisk => "rootfs.img",
+            Self::CidataIso => "cidata.iso",
         }
     }
 }

@@ -16,10 +16,13 @@ use nix::{
 use thiserror::Error;
 
 use crate::{
+    cidata,
     directories::Directory,
     driver::get_driver_for,
+    host_user,
     instance::{Instance, InstanceConfig, InstanceFile, InstanceStatus},
     log_watcher::{LogWatcher, StreamKind, WatchError},
+    ssh_keys,
     utils::read_pid_file,
 };
 
@@ -110,7 +113,7 @@ pub enum InstanceError {
         source: eyre::Report,
     },
 
-    #[error("generic instance create error")]
+    #[error("generic instance create error: {reason}")]
     GenericError { reason: String },
 
     #[error(transparent)]
@@ -185,6 +188,21 @@ impl<D: Daemon> InstanceManager<D> {
 
         driver.validate()?;
         driver.create()?;
+
+        let host_user =
+            host_user::current_host_user().map_err(|err| InstanceError::GenericError {
+                reason: format!("resolve current host user failed: {err}"),
+            })?;
+        let user_keys =
+            ssh_keys::ensure_user_ssh_keys().map_err(|err| InstanceError::GenericError {
+                reason: format!("ensure user SSH keys failed: {err}"),
+            })?;
+
+        cidata::build_cidata_iso(&inst, &host_user, &user_keys.public_key_openssh).map_err(
+            |err| InstanceError::GenericError {
+                reason: format!("build cidata ISO failed: {err}"),
+            },
+        )?;
 
         Ok(inst)
     }

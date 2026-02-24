@@ -25,6 +25,9 @@ stty isig
 # Inside the VM run the following commands:
 
 ```sh
+rm -f /var/lib/pacman/sync/*.db
+pacman -Syy
+
 mkfs.btrfs -f /dev/vda
 mount /dev/vda /mnt
 
@@ -36,8 +39,8 @@ mount -o subvol=@ /dev/vda /mnt
 mkdir /mnt/home
 mount -o subvol=@home /dev/vda /mnt/home
 
-pacman -Sy arch-install-scripts
-pacstrap /mnt base systemd btrfs-progs cloud-init openssh sudo socat
+pacman -Syy arch-install-scripts
+pacstrap /mnt base systemd btrfs-progs cloud-init openssh sudo socat vim
 
 genfstab -U /mnt >> /mnt/etc/fstab
 ```
@@ -47,25 +50,21 @@ Chroot inside Linux VM.
 ```sh
 arch-chroot /mnt
 
-systemctl enable systemd-networkd
-systemctl enable systemd-resolved
-systemctl enable sshd
-systemctl enable cloud-init
+systemctl enable systemd-networkd.service
+systemctl enable systemd-resolved.service
+systemctl enable sshd.service
+systemctl enable cloud-init-local.service cloud-init-network.service cloud-init-main.service
 
 passwd -d root
 
-cat > /etc/ssh/sshd_config.d/10-bento.conf <<'EOF'
-ListenAddress 127.0.0.1
-PasswordAuthentication yes
-KbdInteractiveAuthentication no
-PubkeyAuthentication no
-PermitRootLogin yes
-PermitEmptyPasswords yes
-ChallengeResponseAuthentication no
-UsePAM no
+cat > /etc/cloud/cloud.cfg.d/99-datasource.cfg  <<'EOF'
+datasource_list: [ NoCloud, None ]
 EOF
 
 echo archlinux > /etc/hostname
+
+truncate -s 0 /etc/machine-id
+rm -f /var/lib/dbus/machine-id
 
 passwd
 exit
@@ -105,8 +104,6 @@ Shrink disk
 
 ```sh
 btrfs filesystem usage /mnt
-
-
 ```
 
 Cleanup
@@ -118,10 +115,5 @@ umount -R /mnt
 Package
 
 ```sh
-cargo run -- images pack ghcr.io/vandycknick/bento-arch:v2.0.0 --image ./builders/images/archlinux.img --out ./builders/images/arch.iso.tar --os linux --arch arm64
+cargo run -- images pack archlinux:202602 --image ./builders/images/archlinux.img --out ./builders/images/arch.iso.tar --os linux --arch arm64
 ```
-
-# TODO
-
-- [ ] Fix kernel build args, it still missing some settings that allows systemd to boot.
-- [ ] Fix arch build process, I can just use pacstrap and btrfs, I just need to add some smarts to my initramfs

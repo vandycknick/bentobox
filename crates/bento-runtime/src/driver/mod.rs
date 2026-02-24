@@ -13,7 +13,7 @@ pub mod firecracker;
 
 #[derive(Debug, Error)]
 pub enum DriverError {
-    #[error("some backend error")]
+    #[error("backend error: {0}")]
     Backend(String),
 
     // TODO:I don't want to leak this
