@@ -12,6 +12,7 @@ pub fn build_cidata_iso(
 ) -> eyre::Result<()> {
     let user_data = render_user_data(host_user, ssh_public_key)?;
     let meta_data = render_meta_data(inst)?;
+    let _network_config = render_network_config()?;
     let iso_path = inst.file(InstanceFile::CidataIso);
     let files = vec![
         CidataEntry {
@@ -22,6 +23,12 @@ pub fn build_cidata_iso(
             name: "meta-data".to_string(),
             contents: meta_data.into_bytes(),
         },
+        // TODO: only add this when needed
+        //
+        // CidataEntry {
+        //     name: "network-config".to_string(),
+        //     contents: network_config.into_bytes(),
+        // },
     ];
 
     write_cidata_iso(&iso_path, "CIDATA", &files)
@@ -33,12 +40,6 @@ pub fn build_cidata_iso(
 #[derive(Serialize)]
 struct CloudConfig {
     users: Vec<CloudUser>,
-    network: CloudNetwork,
-}
-
-#[derive(Serialize)]
-struct CloudNetwork {
-    config: String,
 }
 
 #[derive(Serialize)]
@@ -61,6 +62,25 @@ struct MetaData {
     local_hostname: String,
 }
 
+#[derive(Serialize)]
+struct NetworkConfigV2 {
+    version: u8,
+    ethernets: std::collections::BTreeMap<String, EthernetConfigV2>,
+}
+
+#[derive(Serialize)]
+struct EthernetConfigV2 {
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    match_cfg: Option<MatchByName>,
+    dhcp4: bool,
+    dhcp6: bool,
+}
+
+#[derive(Serialize)]
+struct MatchByName {
+    name: String,
+}
+
 fn render_user_data(host_user: &HostUser, ssh_public_key: &str) -> eyre::Result<String> {
     let user = CloudUser {
         name: host_user.name.clone(),
@@ -73,17 +93,32 @@ fn render_user_data(host_user: &HostUser, ssh_public_key: &str) -> eyre::Result<
         ssh_authorized_keys: vec![ssh_public_key.trim().to_string()],
     };
 
-    let cloud_config = CloudConfig {
-        users: vec![user],
-        network: CloudNetwork {
-            config: "disabled".to_string(),
-        },
-    };
+    let cloud_config = CloudConfig { users: vec![user] };
     let mut yaml = String::from("#cloud-config\n");
     yaml.push_str(
         &serde_yaml_ng::to_string(&cloud_config).context("serialize cloud-init user-data")?,
     );
     Ok(yaml)
+}
+
+fn render_network_config() -> eyre::Result<String> {
+    let mut ethernets = std::collections::BTreeMap::new();
+    ethernets.insert(
+        "default".to_string(),
+        EthernetConfigV2 {
+            match_cfg: Some(MatchByName {
+                name: "e*".to_string(),
+            }),
+            dhcp4: true,
+            dhcp6: false,
+        },
+    );
+
+    let cfg = NetworkConfigV2 {
+        version: 2,
+        ethernets,
+    };
+    serde_yaml_ng::to_string(&cfg).context("serialize cloud-init network-config")
 }
 
 fn render_meta_data(inst: &Instance) -> eyre::Result<String> {
@@ -117,7 +152,14 @@ mod tests {
         assert!(user_data.contains("uid: 504"));
         assert!(user_data.contains("homedir: /home/nickvd"));
         assert!(user_data.contains("ssh_authorized_keys"));
-        assert!(user_data.contains("network:"));
-        assert!(user_data.contains("config: disabled"));
+        assert!(!user_data.contains("network:"));
+    }
+
+    #[test]
+    fn network_config_is_v2_dhcp() {
+        let net = render_network_config().expect("render network-config");
+        assert!(net.contains("version: 2"));
+        assert!(net.contains("ethernets:"));
+        assert!(net.contains("dhcp4: true"));
     }
 }
