@@ -260,10 +260,6 @@ impl Instance {
             return Ok(Some(self.resolve_config_disk(root)));
         }
 
-        if !self.config.disks.is_empty() {
-            return Ok(None);
-        }
-
         let default_root = self.file(InstanceFile::RootDisk);
         let exists = fs::metadata(&default_root)
             .map(|meta| meta.is_file())
@@ -529,6 +525,31 @@ mod tests {
         let root = inst.root_disk().expect("root disk lookup should succeed");
 
         assert!(root.is_none());
+    }
+
+    #[test]
+    fn data_only_disks_still_use_default_root_disk_when_present() {
+        let dir = temp_instance_dir("root-default-with-data");
+        fs::create_dir_all(&dir).expect("test dir should be creatable");
+        fs::write(dir.join(InstanceFile::RootDisk.as_str()), b"disk")
+            .expect("root disk file should be creatable");
+
+        let mut cfg = InstanceConfig::new();
+        cfg.disks = vec![DiskConfig {
+            path: PathBuf::from("data.img"),
+            role: Some(DiskRole::Data),
+            read_only: None,
+        }];
+
+        let inst = Instance::new("vm1".to_string(), dir.clone(), cfg);
+        let root = inst
+            .root_disk()
+            .expect("root disk lookup should succeed")
+            .expect("root disk should exist");
+
+        assert_eq!(root.path, dir.join("rootfs.img"));
+
+        fs::remove_dir_all(dir).expect("test dir should be removable");
     }
 
     #[test]

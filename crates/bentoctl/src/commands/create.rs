@@ -29,6 +29,12 @@ pub struct Cmd {
     pub initramfs: Option<PathBuf>,
     #[arg(long, help = "Base image name or OCI reference")]
     pub image: Option<String>,
+    #[arg(
+        long = "disk",
+        value_name = "PATH",
+        help = "Path to an existing disk image"
+    )]
+    pub disks: Vec<PathBuf>,
     #[arg(long = "mount", value_name = "PATH:ro|rw", value_parser = parse_mount_arg)]
     pub mounts: Vec<MountConfig>,
     #[arg(long, value_name = "MODE", value_parser = parse_network_mode)]
@@ -49,12 +55,14 @@ impl Cmd {
 
         let kernel_path = resolve_optional_path(self.kernel.as_deref(), "kernel")?;
         let initramfs_path = resolve_optional_path(self.initramfs.as_deref(), "initramfs")?;
+        let disk_paths = resolve_existing_paths(&self.disks, "disk")?;
 
         let options = InstanceCreateOptions::default()
             .with_cpus(self.cpus)
             .with_memory(self.memory)
             .with_kernel(kernel_path)
             .with_initramfs(initramfs_path)
+            .with_disks(disk_paths)
             .with_mounts(self.mounts.clone())
             .with_network(self.network.map(|mode| NetworkConfig { mode }));
 
@@ -85,6 +93,17 @@ fn resolve_optional_path(path: Option<&Path>, kind: &str) -> eyre::Result<Option
         return Ok(None);
     };
 
+    Ok(Some(resolve_existing_path(path, kind)?))
+}
+
+fn resolve_existing_paths(paths: &[PathBuf], kind: &str) -> eyre::Result<Vec<PathBuf>> {
+    paths
+        .iter()
+        .map(|path| resolve_existing_path(path, kind))
+        .collect()
+}
+
+fn resolve_existing_path(path: &Path, kind: &str) -> eyre::Result<PathBuf> {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -94,7 +113,7 @@ fn resolve_optional_path(path: Option<&Path>, kind: &str) -> eyre::Result<Option
     let abs = std::fs::canonicalize(&abs)
         .context(format!("{kind} path does not exist: {}", abs.display()))?;
 
-    Ok(Some(abs))
+    Ok(abs)
 }
 
 fn parse_mount_arg(input: &str) -> Result<MountConfig, String> {
@@ -206,5 +225,13 @@ mod tests {
         let canonical_file =
             std::fs::canonicalize(file).expect("test initramfs file should canonicalize");
         assert_eq!(resolved, canonical_file);
+    }
+
+    #[test]
+    fn resolve_existing_paths_rejects_missing_path() {
+        let err = resolve_existing_paths(&[PathBuf::from("/definitely/not/here/disk.img")], "disk")
+            .expect_err("missing disk should fail");
+
+        assert!(err.to_string().contains("disk path does not exist"));
     }
 }

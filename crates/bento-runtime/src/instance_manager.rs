@@ -3,7 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io,
     os::unix::process::CommandExt,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -21,8 +21,8 @@ use crate::{
     driver::get_driver_for,
     host_user,
     instance::{
-        resolve_mount_location, validate_network_mode, Instance, InstanceConfig, InstanceFile,
-        InstanceStatus, MountConfig, NetworkConfig,
+        resolve_mount_location, validate_network_mode, DiskConfig, DiskRole, Instance,
+        InstanceConfig, InstanceFile, InstanceStatus, MountConfig, NetworkConfig,
     },
     log_watcher::{LogWatcher, StreamKind, WatchError},
     ssh_keys,
@@ -171,16 +171,7 @@ impl<D: Daemon> InstanceManager<D> {
         // TODO: Find a better way to build an InstanceConfig from options.
         let options = options.into();
         let mut config = InstanceConfig::new();
-        config.cpus = Some(options.cpus as i32);
-        config.memory = Some(options.memory as i32);
-        config.kernel_path = options
-            .kernel
-            .map(|path| path_relative_to(&app_home, &path));
-        config.initramfs_path = options
-            .initramfs
-            .map(|path| path_relative_to(&app_home, &path));
-        config.mounts = normalize_mounts(&options.mounts)?;
-        config.network = options.network;
+        apply_create_options(&mut config, options)?;
         validate_network_mode(
             config.engine.unwrap_or(crate::instance::EngineType::VZ),
             config.network.as_ref(),
@@ -422,6 +413,7 @@ pub struct InstanceCreateOptions {
     pub memory: u32,
     pub kernel: Option<PathBuf>,
     pub initramfs: Option<PathBuf>,
+    pub disks: Vec<PathBuf>,
     pub mounts: Vec<MountConfig>,
     pub network: Option<NetworkConfig>,
 }
@@ -433,6 +425,7 @@ impl Default for InstanceCreateOptions {
             memory: 512,
             kernel: None,
             initramfs: None,
+            disks: Vec::new(),
             mounts: Vec::new(),
             network: None,
         }
@@ -455,6 +448,11 @@ impl InstanceCreateOptions {
         self
     }
 
+    pub fn with_disks(mut self, disks: Vec<PathBuf>) -> Self {
+        self.disks = disks;
+        self
+    }
+
     pub fn with_memory(mut self, memory: u32) -> Self {
         self.memory = memory;
         self
@@ -469,6 +467,29 @@ impl InstanceCreateOptions {
         self.network = network;
         self
     }
+}
+
+fn apply_create_options(
+    config: &mut InstanceConfig,
+    options: InstanceCreateOptions,
+) -> Result<(), InstanceError> {
+    config.cpus = Some(options.cpus as i32);
+    config.memory = Some(options.memory as i32);
+    config.kernel_path = options.kernel;
+    config.initramfs_path = options.initramfs;
+    config.disks = options
+        .disks
+        .iter()
+        .map(|path| DiskConfig {
+            path: path.clone(),
+            role: Some(DiskRole::Data),
+            read_only: Some(false),
+        })
+        .collect();
+    config.mounts = normalize_mounts(&options.mounts)?;
+    config.network = options.network;
+
+    Ok(())
 }
 
 fn normalize_mounts(mounts: &[MountConfig]) -> Result<Vec<MountConfig>, InstanceError> {
@@ -556,47 +577,6 @@ fn is_tilde_mount_path(path: &Path) -> Result<bool, InstanceError> {
     }
 
     Ok(false)
-}
-
-fn path_relative_to(base: &Path, target: &Path) -> PathBuf {
-    // Return a path from `base` to `target`.
-    // If either path is non-absolute, keep `target` unchanged.
-    if !base.is_absolute() || !target.is_absolute() {
-        return target.to_path_buf();
-    }
-
-    let base_components: Vec<Component<'_>> = base.components().collect();
-    let target_components: Vec<Component<'_>> = target.components().collect();
-
-    // Find the longest shared prefix between both absolute paths.
-    let mut common_len = 0usize;
-    while common_len < base_components.len()
-        && common_len < target_components.len()
-        && base_components[common_len] == target_components[common_len]
-    {
-        common_len += 1;
-    }
-
-    let mut relative = PathBuf::new();
-
-    // For each remaining normal segment in `base`, go up one directory.
-    for comp in &base_components[common_len..] {
-        if matches!(comp, Component::Normal(_)) {
-            relative.push("..");
-        }
-    }
-
-    // Then descend into the remaining suffix of `target`.
-    for comp in &target_components[common_len..] {
-        relative.push(comp.as_os_str());
-    }
-
-    // Use "." as the canonical relative path when both inputs are identical.
-    if relative.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        relative
-    }
 }
 
 pub fn validate_name(name: &str) -> Result<(), InstanceError> {
@@ -713,10 +693,39 @@ mod tests {
     }
 
     #[test]
-    fn instance_create_options_with_initrd_sets_path() {
-        let initrd = PathBuf::from("/tmp/custom-initramfs.img");
-        let options = InstanceCreateOptions::default().with_initramfs(Some(initrd.clone()));
+    fn instance_create_options_with_initramfs_sets_path() {
+        let initramfs = PathBuf::from("/tmp/custom-initramfs.img");
+        let options = InstanceCreateOptions::default().with_initramfs(Some(initramfs.clone()));
 
-        assert_eq!(options.initramfs, Some(initrd));
+        assert_eq!(options.initramfs, Some(initramfs));
+    }
+
+    #[test]
+    fn instance_create_options_with_disks_sets_paths() {
+        let disks = vec![
+            PathBuf::from("/tmp/data-a.img"),
+            PathBuf::from("/tmp/data-b.img"),
+        ];
+        let options = InstanceCreateOptions::default().with_disks(disks.clone());
+
+        assert_eq!(options.disks, disks);
+    }
+
+    #[test]
+    fn apply_create_options_keeps_absolute_paths_in_config() {
+        let mut config = InstanceConfig::new();
+        let options = InstanceCreateOptions::default()
+            .with_kernel(Some(PathBuf::from("/tmp/kernel")))
+            .with_initramfs(Some(PathBuf::from("/tmp/initramfs")))
+            .with_disks(vec![PathBuf::from("/tmp/disk.img")]);
+
+        apply_create_options(&mut config, options).expect("apply options should succeed");
+
+        assert_eq!(config.kernel_path, Some(PathBuf::from("/tmp/kernel")));
+        assert_eq!(config.initramfs_path, Some(PathBuf::from("/tmp/initramfs")));
+        assert_eq!(config.disks.len(), 1);
+        assert_eq!(config.disks[0].path, PathBuf::from("/tmp/disk.img"));
+        assert_eq!(config.disks[0].role, Some(DiskRole::Data));
+        assert_eq!(config.disks[0].read_only, Some(false));
     }
 }
