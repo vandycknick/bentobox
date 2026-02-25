@@ -38,6 +38,12 @@ pub struct DiskConfig {
     pub read_only: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MountConfig {
+    pub location: PathBuf,
+    pub writable: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceDisk {
     pub path: PathBuf,
@@ -92,6 +98,9 @@ pub struct InstanceConfig {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disks: Vec<DiskConfig>,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<MountConfig>,
 }
 
 impl InstanceConfig {
@@ -111,6 +120,35 @@ impl InstanceConfig {
             .wrap_err_with(|| format!("read instance config at {}", path.display()))?;
         Self::from_str(&input)
     }
+}
+
+pub fn resolve_mount_location(path: &Path) -> Result<PathBuf, String> {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return home_dir().ok_or_else(|| "failed to resolve home directory for '~' mount".into());
+    }
+
+    if let Some(rest) = raw.strip_prefix("~/") {
+        let mut home = home_dir()
+            .ok_or_else(|| "failed to resolve home directory for '~' mount".to_string())?;
+        if !rest.is_empty() {
+            home.push(rest);
+        }
+        return Ok(home);
+    }
+
+    if raw.starts_with('~') {
+        return Err(format!(
+            "invalid mount path '{}': only '~' and '~/...' are supported",
+            path.display()
+        ));
+    }
+
+    Ok(path.to_path_buf())
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 #[derive(Debug, Clone)]
@@ -451,5 +489,25 @@ mod tests {
         assert_eq!(assets.initramfs, dir.join("boot/initramfs"));
 
         fs::remove_dir_all(dir).expect("test dir should be removable");
+    }
+
+    #[test]
+    fn resolve_mount_location_expands_tilde_forms() {
+        let home = std::env::var_os("HOME").expect("HOME should be set");
+        let home = PathBuf::from(home);
+
+        let resolved_home = resolve_mount_location(Path::new("~")).expect("~ should resolve");
+        assert_eq!(resolved_home, home);
+
+        let resolved_subdir =
+            resolve_mount_location(Path::new("~/code")).expect("~/code should resolve");
+        assert_eq!(resolved_subdir, home.join("code"));
+    }
+
+    #[test]
+    fn resolve_mount_location_rejects_invalid_tilde_prefix() {
+        let err = resolve_mount_location(Path::new("~nickvd/code"))
+            .expect_err("invalid tilde path should fail");
+        assert!(err.contains("only '~' and '~/...' are supported"));
     }
 }

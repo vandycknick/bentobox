@@ -5,17 +5,18 @@ use objc2::AllocAnyThread;
 use objc2::{rc::Retained, ClassType};
 use objc2_foundation::{NSArray, NSString, NSURL};
 use objc2_virtualization::{
-    VZDiskImageStorageDeviceAttachment, VZFileSerialPortAttachment, VZGenericPlatformConfiguration,
-    VZLinuxBootLoader, VZVirtioBlockDeviceConfiguration,
+    VZDirectorySharingDeviceConfiguration, VZDiskImageStorageDeviceAttachment,
+    VZFileSerialPortAttachment, VZGenericPlatformConfiguration, VZLinuxBootLoader,
+    VZSharedDirectory, VZSingleDirectoryShare, VZVirtioBlockDeviceConfiguration,
     VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
-    VZVirtioSocketDeviceConfiguration, VZVirtioTraditionalMemoryBalloonDeviceConfiguration,
-    VZVirtualMachineConfiguration,
+    VZVirtioFileSystemDeviceConfiguration, VZVirtioSocketDeviceConfiguration,
+    VZVirtioTraditionalMemoryBalloonDeviceConfiguration, VZVirtualMachineConfiguration,
 };
 
 use crate::driver::vz::vm::get_machine_identifier;
 use crate::{
     driver::{vz::utils::vz_nested_virtualization_is_supported, Driver, DriverError},
-    instance::{Instance, InstanceFile},
+    instance::{resolve_mount_location, Instance, InstanceFile},
 };
 
 mod dispatch;
@@ -206,11 +207,68 @@ unsafe fn create_vm_config(
 
     attach_devices(&c);
     attach_storage_devices(&c, inst)?;
+    attach_directory_shares(&c, inst)?;
 
     c.validateWithError()
         .map_err(|nse| DriverError::Backend(nse.to_string()))?;
 
     return Ok(c);
+}
+
+unsafe fn attach_directory_shares(
+    config: &Retained<VZVirtualMachineConfiguration>,
+    inst: &Instance,
+) -> Result<(), DriverError> {
+    if inst.config.mounts.is_empty() {
+        return Ok(());
+    }
+
+    let mut share_configs = Vec::with_capacity(inst.config.mounts.len());
+    for (index, mount) in inst.config.mounts.iter().enumerate() {
+        let host_location = resolve_mount_location(&mount.location)
+            .map_err(|reason| DriverError::Backend(format!("invalid mount location: {reason}")))?;
+
+        let metadata = std::fs::metadata(&host_location).map_err(|err| {
+            DriverError::Backend(format!(
+                "failed to access shared directory {}: {err}",
+                host_location.display()
+            ))
+        })?;
+        if !metadata.is_dir() {
+            return Err(DriverError::Backend(format!(
+                "shared directory path is not a directory: {}",
+                host_location.display()
+            )));
+        }
+
+        let host = NSString::from_str(&host_location.to_string_lossy());
+        let host_url = NSURL::initFileURLWithPath(NSURL::alloc(), &host);
+
+        let shared_directory = VZSharedDirectory::initWithURL_readOnly(
+            VZSharedDirectory::alloc(),
+            &host_url,
+            !mount.writable,
+        );
+        let share = VZSingleDirectoryShare::initWithDirectory(
+            VZSingleDirectoryShare::alloc(),
+            &shared_directory,
+        );
+
+        let tag = NSString::from_str(&format!("mount{index}"));
+        let fs = VZVirtioFileSystemDeviceConfiguration::initWithTag(
+            VZVirtioFileSystemDeviceConfiguration::alloc(),
+            &tag,
+        );
+        fs.setShare(Some(&share));
+        share_configs.push(fs);
+    }
+
+    let refs: Vec<&VZDirectorySharingDeviceConfiguration> =
+        share_configs.iter().map(|cfg| cfg.as_super()).collect();
+    let devices = NSArray::from_slice(&refs);
+    config.setDirectorySharingDevices(&devices);
+
+    Ok(())
 }
 
 unsafe fn attach_devices(config: &Retained<VZVirtualMachineConfiguration>) {

@@ -20,7 +20,9 @@ use crate::{
     directories::Directory,
     driver::get_driver_for,
     host_user,
-    instance::{Instance, InstanceConfig, InstanceFile, InstanceStatus},
+    instance::{
+        resolve_mount_location, Instance, InstanceConfig, InstanceFile, InstanceStatus, MountConfig,
+    },
     log_watcher::{LogWatcher, StreamKind, WatchError},
     ssh_keys,
     utils::read_pid_file,
@@ -173,6 +175,7 @@ impl<D: Daemon> InstanceManager<D> {
         config.kernel_path = options
             .kernel_path
             .map(|path| path_relative_to(&app_home, &path));
+        config.mounts = normalize_mounts(&options.mounts)?;
 
         let config_path = app_home.join(InstanceFile::Config.as_str());
         let config_yaml = serde_yaml_ng::to_string(&config).map_err(|source| {
@@ -405,6 +408,7 @@ pub struct InstanceCreateOptions {
     pub cpus: u8,
     pub memory: u32,
     pub kernel_path: Option<PathBuf>,
+    pub mounts: Vec<MountConfig>,
 }
 
 impl Default for InstanceCreateOptions {
@@ -413,6 +417,7 @@ impl Default for InstanceCreateOptions {
             cpus: 1,
             memory: 512,
             kernel_path: None,
+            mounts: Vec::new(),
         }
     }
 }
@@ -432,6 +437,98 @@ impl InstanceCreateOptions {
         self.memory = memory;
         self
     }
+
+    pub fn with_mounts(mut self, mounts: Vec<MountConfig>) -> Self {
+        self.mounts = mounts;
+        self
+    }
+}
+
+fn normalize_mounts(mounts: &[MountConfig]) -> Result<Vec<MountConfig>, InstanceError> {
+    if mounts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let cwd = std::env::current_dir().map_err(|err| InstanceError::GenericError {
+        reason: format!("resolve current working directory failed: {err}"),
+    })?;
+
+    let mut normalized = Vec::with_capacity(mounts.len());
+    let mut seen = std::collections::HashSet::with_capacity(mounts.len());
+
+    for mount in mounts {
+        let preserve_tilde = is_tilde_mount_path(&mount.location)?;
+        let runtime_path = resolve_mount_location(&mount.location).map_err(|reason| {
+            InstanceError::GenericError {
+                reason: format!(
+                    "invalid mount location {}: {reason}",
+                    mount.location.display()
+                ),
+            }
+        })?;
+
+        let absolute = if runtime_path.is_absolute() {
+            runtime_path
+        } else {
+            cwd.join(&runtime_path)
+        };
+
+        let canonical =
+            std::fs::canonicalize(&absolute).map_err(|err| InstanceError::GenericError {
+                reason: format!(
+                    "mount location {} does not exist: {err}",
+                    absolute.display()
+                ),
+            })?;
+
+        let metadata =
+            std::fs::metadata(&canonical).map_err(|err| InstanceError::GenericError {
+                reason: format!(
+                    "inspect mount location {} failed: {err}",
+                    canonical.display()
+                ),
+            })?;
+        if !metadata.is_dir() {
+            return Err(InstanceError::GenericError {
+                reason: format!("mount location is not a directory: {}", canonical.display()),
+            });
+        }
+
+        if !seen.insert(canonical.clone()) {
+            return Err(InstanceError::GenericError {
+                reason: format!("duplicate mount location: {}", canonical.display()),
+            });
+        }
+
+        normalized.push(MountConfig {
+            location: if preserve_tilde {
+                mount.location.clone()
+            } else {
+                canonical
+            },
+            writable: mount.writable,
+        });
+    }
+
+    Ok(normalized)
+}
+
+fn is_tilde_mount_path(path: &Path) -> Result<bool, InstanceError> {
+    let path = path.to_string_lossy();
+    if path == "~" || path.starts_with("~/") {
+        return Ok(true);
+    }
+
+    if path.starts_with('~') {
+        return Err(InstanceError::GenericError {
+            reason: format!(
+                "invalid mount path '{}': only '~' and '~/...' are supported",
+                path
+            ),
+        });
+    }
+
+    Ok(false)
 }
 
 fn path_relative_to(base: &Path, target: &Path) -> PathBuf {
@@ -521,5 +618,70 @@ pub fn wait_for_instanced_start(ha_pid_path: &Path, ha_stderr_path: &Path) -> io
         }
 
         thread::sleep(poll_interval);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_dir(base: &Path, prefix: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        base.join(format!("bento-{prefix}-{}-{now}", std::process::id()))
+    }
+
+    #[test]
+    fn normalize_mounts_makes_relative_paths_absolute() {
+        let old_cwd = std::env::current_dir().expect("cwd should resolve");
+        let base = unique_dir(&std::env::temp_dir(), "mount-cwd");
+        let mount_dir = base.join("share");
+        std::fs::create_dir_all(&mount_dir).expect("mount dir should be created");
+        std::env::set_current_dir(&base).expect("set cwd should succeed");
+
+        let mounts = vec![MountConfig {
+            location: PathBuf::from("share"),
+            writable: true,
+        }];
+
+        let normalized = normalize_mounts(&mounts).expect("normalize mounts should succeed");
+
+        std::env::set_current_dir(&old_cwd).expect("restore cwd should succeed");
+
+        assert_eq!(normalized.len(), 1);
+        assert!(normalized[0].location.is_absolute());
+        assert!(normalized[0].writable);
+
+        std::fs::remove_dir_all(&base).expect("temp dir should be removable");
+    }
+
+    #[test]
+    fn normalize_mounts_preserves_tilde_paths_in_config() {
+        let home = std::env::var_os("HOME").expect("HOME should be set");
+        let home = PathBuf::from(home);
+        let leaf = format!(
+            "bento-mount-tilde-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        );
+        let host_dir = home.join(&leaf);
+        std::fs::create_dir_all(&host_dir).expect("host dir should be created");
+
+        let mounts = vec![MountConfig {
+            location: PathBuf::from(format!("~/{leaf}")),
+            writable: false,
+        }];
+
+        let normalized = normalize_mounts(&mounts).expect("normalize mounts should succeed");
+        assert_eq!(normalized[0].location, PathBuf::from(format!("~/{leaf}")));
+        assert!(!normalized[0].writable);
+
+        std::fs::remove_dir_all(&host_dir).expect("host dir should be removable");
     }
 }
