@@ -5,7 +5,7 @@ use clap::Args;
 use eyre::Context;
 use std::{
     fmt::{Display, Formatter},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 #[derive(Args, Debug)]
@@ -21,6 +21,12 @@ pub struct Cmd {
     pub memory: u32,
     #[arg(long, help = "Path to a custom kernel, only works for Linux.")]
     pub kernel: Option<PathBuf>,
+    #[arg(
+        long = "initramfs",
+        visible_alias = "initrd",
+        help = "Path to a custom initramfs image, only works for Linux."
+    )]
+    pub initramfs: Option<PathBuf>,
     #[arg(long, help = "Base image name or OCI reference")]
     pub image: Option<String>,
     #[arg(long = "mount", value_name = "PATH:ro|rw", value_parser = parse_mount_arg)]
@@ -41,25 +47,14 @@ impl Cmd {
         let manager = InstanceManager::new(daemon);
         let mut store = ImageStore::open()?;
 
-        let kernel_path = match &self.kernel {
-            Some(path) => {
-                let abs = if path.is_absolute() {
-                    path.clone()
-                } else {
-                    std::env::current_dir()?.join(path)
-                };
-
-                let abs = std::fs::canonicalize(&abs)
-                    .context(format!("kernel path does not exist: {}", abs.display()))?;
-                Some(abs)
-            }
-            None => None,
-        };
+        let kernel_path = resolve_optional_path(self.kernel.as_deref(), "kernel")?;
+        let initramfs_path = resolve_optional_path(self.initramfs.as_deref(), "initramfs")?;
 
         let options = InstanceCreateOptions::default()
             .with_cpus(self.cpus)
             .with_memory(self.memory)
             .with_kernel(kernel_path)
+            .with_initramfs(initramfs_path)
             .with_mounts(self.mounts.clone())
             .with_network(self.network.map(|mode| NetworkConfig { mode }));
 
@@ -83,6 +78,23 @@ impl Cmd {
         println!("created {}", self.name);
         Ok(())
     }
+}
+
+fn resolve_optional_path(path: Option<&Path>, kind: &str) -> eyre::Result<Option<PathBuf>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+
+    let abs = std::fs::canonicalize(&abs)
+        .context(format!("{kind} path does not exist: {}", abs.display()))?;
+
+    Ok(Some(abs))
 }
 
 fn parse_mount_arg(input: &str) -> Result<MountConfig, String> {
@@ -125,6 +137,7 @@ fn parse_network_mode(input: &str) -> Result<NetworkMode, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn parse_mount_arg_accepts_ro_and_rw() {
@@ -167,5 +180,31 @@ mod tests {
     #[test]
     fn parse_network_mode_rejects_invalid_value() {
         assert!(parse_network_mode("default").is_err());
+    }
+
+    #[test]
+    fn resolve_optional_path_returns_none_when_unset() {
+        let resolved = resolve_optional_path(None, "kernel").expect("unset path should resolve");
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    fn resolve_optional_path_canonicalizes_relative_paths() {
+        let old_cwd = std::env::current_dir().expect("cwd should resolve");
+        let tmp = TempDir::new().expect("temp dir should be creatable");
+        let nested = tmp.path().join("boot");
+        std::fs::create_dir_all(&nested).expect("nested dir should be creatable");
+        let file = nested.join("initramfs.img");
+        std::fs::write(&file, b"initramfs").expect("initramfs file should be creatable");
+
+        std::env::set_current_dir(tmp.path()).expect("set cwd should succeed");
+        let resolved = resolve_optional_path(Some(Path::new("boot/./initramfs.img")), "initramfs")
+            .expect("relative path should resolve")
+            .expect("path should be present");
+        std::env::set_current_dir(old_cwd).expect("restore cwd should succeed");
+
+        let canonical_file =
+            std::fs::canonicalize(file).expect("test initramfs file should canonicalize");
+        assert_eq!(resolved, canonical_file);
     }
 }

@@ -174,7 +174,10 @@ impl<D: Daemon> InstanceManager<D> {
         config.cpus = Some(options.cpus as i32);
         config.memory = Some(options.memory as i32);
         config.kernel_path = options
-            .kernel_path
+            .kernel
+            .map(|path| path_relative_to(&app_home, &path));
+        config.initramfs_path = options
+            .initramfs
             .map(|path| path_relative_to(&app_home, &path));
         config.mounts = normalize_mounts(&options.mounts)?;
         config.network = options.network;
@@ -417,7 +420,8 @@ impl<D: Daemon> InstanceManager<D> {
 pub struct InstanceCreateOptions {
     pub cpus: u8,
     pub memory: u32,
-    pub kernel_path: Option<PathBuf>,
+    pub kernel: Option<PathBuf>,
+    pub initramfs: Option<PathBuf>,
     pub mounts: Vec<MountConfig>,
     pub network: Option<NetworkConfig>,
 }
@@ -427,7 +431,8 @@ impl Default for InstanceCreateOptions {
         Self {
             cpus: 1,
             memory: 512,
-            kernel_path: None,
+            kernel: None,
+            initramfs: None,
             mounts: Vec::new(),
             network: None,
         }
@@ -441,7 +446,12 @@ impl InstanceCreateOptions {
     }
 
     pub fn with_kernel(mut self, path: Option<PathBuf>) -> Self {
-        self.kernel_path = path;
+        self.kernel = path;
+        self
+    }
+
+    pub fn with_initramfs(mut self, path: Option<PathBuf>) -> Self {
+        self.initramfs = path;
         self
     }
 
@@ -700,5 +710,13 @@ mod tests {
         assert!(!normalized[0].writable);
 
         std::fs::remove_dir_all(&host_dir).expect("host dir should be removable");
+    }
+
+    #[test]
+    fn instance_create_options_with_initrd_sets_path() {
+        let initrd = PathBuf::from("/tmp/custom-initramfs.img");
+        let options = InstanceCreateOptions::default().with_initramfs(Some(initrd.clone()));
+
+        assert_eq!(options.initramfs, Some(initrd));
     }
 }
