@@ -1,57 +1,87 @@
 # BentoBox 🍱
 
-WORK IN PROGRESS
+BentoBox is a microVM manager that boots a full Linux environment in seconds. It is highly configurable, so you can tune nearly every aspect of the system. Whether you want a WSL-like development environment on macOS, a fresh Docker Desktop alternative, or a secure sandbox for agentic workflows, BentoBox has you covered. Run it on your laptop, on servers, in the cloud, or wherever you need it.
 
-## Reading
+## Runtime Backends
 
-- vsock: https://archive.fosdem.org/2021/schedule/event/vai_virtio_vsock/attachments/slides/4419/export/events/attachments/vai_virtio_vsock/slides/4419/FOSDEM_2021_vsock.pdf
+- macOS: Apple `Virtualization.framework`
+- Linux: Firecracker backend (**work in progress**)
 
 ## Inspiration
+
+BentoBox draws inspiration from these projects, which helped shape its architecture and developer experience:
 
 - [macosvm](https://github.com/s-u/macosvm)
 - [UTM](https://github.com/utmapp/UTM)
 - [Lima](https://github.com/lima-vm/lima)
 - [vfkit](https://github.com/crc-org/vfkit)
 
-## Image Management (V1)
+## Getting Started
 
-- `bentoctl images list` (alias: `bentoctl image list`)
-- `bentoctl images pull <oci-ref> [--name <alias>]`
-- `bentoctl images import <path-to-oci-layout-or-archive>`
-- `bentoctl images pack --image <path-to-rootfs.img> --os <os> --arch <arch> [--out <artifact.oci.tar>] <name>`
-- `bentoctl create <name> --image <name-or-oci-ref> [--initramfs <path>] [--disk <path>]...` (`--initrd` alias)
-- `bentoctl list`
-
-## Shell Access (VSOCK)
-
-- `bentoctl shell <name>` opens an SSH shell through the instance daemon over VSOCK.
-- `bentoctl shell <name> --user <user>` selects the SSH user (defaults to `root`).
-- Guest requirement: run a VSOCK bridge service that forwards `VSOCK:2222` to `127.0.0.1:22` (see `builders/README.md`).
-
-### Common Failures
-
-- `instance_not_found`: instance name does not exist.
-- `instance_not_running`: start the VM first with `bentoctl start <name>`.
-- `instanced_unreachable`: control socket is missing, usually the instance daemon is not running.
-- `guest_port_unreachable`: guest bridge is not running, or guest `sshd` is not reachable on loopback.
-- ``ssh` command not found`: install OpenSSH client on the host.
-
-### Troubleshooting
-
-- Set `BENTO_SHELL_DEBUG=1` to print relay byte counters from `shell-proxy` and `instanced`.
-- Check daemon logs in `~/.local/share/bento/<name>/id.stder.log` and serial logs in `~/.local/share/bento/<name>/serial.log`.
-
-### Manual Disk Expansion
-
-Grow the instance root disk file on the host:
+Install with Nix profile:
 
 ```bash
-truncate -s +10G /path/to/instance/rootfs.img
+nix profile install .#bentoctl
 ```
 
-Then grow the filesystem inside the guest (example for ext4 on `/dev/vda1`):
+Or build locally with Nix:
 
 ```bash
-sudo growpart /dev/vda 1
-sudo resize2fs /dev/vda1
+nix build .#bentoctl
+./result/bin/bentoctl --help
+```
+
+## Usage
+
+```text
+Bentobox instance lifecycle control
+
+Usage: bentoctl [OPTIONS] <COMMAND>
+
+Commands:
+  create
+  start
+  stop
+  shell
+  delete
+  list
+  status
+  instanced
+  images
+
+Options:
+  -v, --verbose...
+  -h, --help        Print help
+```
+
+## Quick VM Lifecycle
+
+Create a VM from an image:
+
+```bash
+bentoctl create dev --image <name-or-oci-ref>
+```
+
+Start it:
+
+```bash
+bentoctl start dev
+```
+
+Open a shell:
+
+```bash
+bentoctl shell dev
+```
+
+Stop it:
+
+```bash
+bentoctl stop dev
+```
+
+List instances:
+
+```bash
+bentoctl list
 ```
