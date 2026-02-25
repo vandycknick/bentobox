@@ -1,5 +1,5 @@
 use bento_runtime::image_store::ImageStore;
-use bento_runtime::instance::{InstanceFile, MountConfig};
+use bento_runtime::instance::{InstanceFile, MountConfig, NetworkConfig, NetworkMode};
 use bento_runtime::instance_manager::{InstanceCreateOptions, InstanceManager, NixDaemon};
 use clap::Args;
 use eyre::Context;
@@ -25,6 +25,8 @@ pub struct Cmd {
     pub image: Option<String>,
     #[arg(long = "mount", value_name = "PATH:ro|rw", value_parser = parse_mount_arg)]
     pub mounts: Vec<MountConfig>,
+    #[arg(long, value_name = "MODE", value_parser = parse_network_mode)]
+    pub network: Option<NetworkMode>,
 }
 
 impl Display for Cmd {
@@ -58,7 +60,8 @@ impl Cmd {
             .with_cpus(self.cpus)
             .with_memory(self.memory)
             .with_kernel(kernel_path)
-            .with_mounts(self.mounts.clone());
+            .with_mounts(self.mounts.clone())
+            .with_network(self.network.map(|mode| NetworkConfig { mode }));
 
         let selected_image = self
             .image
@@ -107,6 +110,18 @@ fn parse_mount_arg(input: &str) -> Result<MountConfig, String> {
     })
 }
 
+fn parse_network_mode(input: &str) -> Result<NetworkMode, String> {
+    match input {
+        "vznat" => Ok(NetworkMode::VzNat),
+        "none" => Ok(NetworkMode::None),
+        "bridged" => Ok(NetworkMode::Bridged),
+        "cni" => Ok(NetworkMode::Cni),
+        _ => Err(format!(
+            "invalid network mode '{input}', expected one of: vznat, none, bridged, cni"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +142,30 @@ mod tests {
         assert!(parse_mount_arg("/tmp/data").is_err());
         assert!(parse_mount_arg(":rw").is_err());
         assert!(parse_mount_arg("/tmp/data:readwrite").is_err());
+    }
+
+    #[test]
+    fn parse_network_mode_accepts_expected_values() {
+        assert_eq!(
+            parse_network_mode("vznat").expect("vznat should parse"),
+            NetworkMode::VzNat
+        );
+        assert_eq!(
+            parse_network_mode("none").expect("none should parse"),
+            NetworkMode::None
+        );
+        assert_eq!(
+            parse_network_mode("bridged").expect("bridged should parse"),
+            NetworkMode::Bridged
+        );
+        assert_eq!(
+            parse_network_mode("cni").expect("cni should parse"),
+            NetworkMode::Cni
+        );
+    }
+
+    #[test]
+    fn parse_network_mode_rejects_invalid_value() {
+        assert!(parse_network_mode("default").is_err());
     }
 }

@@ -7,16 +7,18 @@ use objc2_foundation::{NSArray, NSString, NSURL};
 use objc2_virtualization::{
     VZDirectorySharingDeviceConfiguration, VZDiskImageStorageDeviceAttachment,
     VZFileSerialPortAttachment, VZGenericPlatformConfiguration, VZLinuxBootLoader,
-    VZSharedDirectory, VZSingleDirectoryShare, VZVirtioBlockDeviceConfiguration,
+    VZNATNetworkDeviceAttachment, VZNetworkDeviceConfiguration, VZSharedDirectory,
+    VZSingleDirectoryShare, VZVirtioBlockDeviceConfiguration,
     VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
-    VZVirtioFileSystemDeviceConfiguration, VZVirtioSocketDeviceConfiguration,
-    VZVirtioTraditionalMemoryBalloonDeviceConfiguration, VZVirtualMachineConfiguration,
+    VZVirtioFileSystemDeviceConfiguration, VZVirtioNetworkDeviceConfiguration,
+    VZVirtioSocketDeviceConfiguration, VZVirtioTraditionalMemoryBalloonDeviceConfiguration,
+    VZVirtualMachineConfiguration,
 };
 
 use crate::driver::vz::vm::get_machine_identifier;
 use crate::{
     driver::{vz::utils::vz_nested_virtualization_is_supported, Driver, DriverError},
-    instance::{resolve_mount_location, Instance, InstanceFile},
+    instance::{resolve_mount_location, Instance, InstanceFile, NetworkMode},
 };
 
 mod dispatch;
@@ -206,6 +208,7 @@ unsafe fn create_vm_config(
     c.setSerialPorts(&serial_ports);
 
     attach_devices(&c);
+    attach_network_devices(&c, inst)?;
     attach_storage_devices(&c, inst)?;
     attach_directory_shares(&c, inst)?;
 
@@ -213,6 +216,31 @@ unsafe fn create_vm_config(
         .map_err(|nse| DriverError::Backend(nse.to_string()))?;
 
     return Ok(c);
+}
+
+unsafe fn attach_network_devices(
+    config: &Retained<VZVirtualMachineConfiguration>,
+    inst: &Instance,
+) -> Result<(), DriverError> {
+    match inst.resolved_network_mode() {
+        NetworkMode::VzNat => {
+            let network = VZVirtioNetworkDeviceConfiguration::new();
+            let attachment = VZNATNetworkDeviceAttachment::new();
+            network.setAttachment(Some(attachment.as_super()));
+
+            let refs: [&VZNetworkDeviceConfiguration; 1] = [network.as_super()];
+            let devices = NSArray::from_slice(&refs);
+            config.setNetworkDevices(&devices);
+            Ok(())
+        }
+        NetworkMode::None => Ok(()),
+        NetworkMode::Bridged => Err(DriverError::Backend(
+            "network mode 'bridged' is not implemented yet".into(),
+        )),
+        NetworkMode::Cni => Err(DriverError::Backend(
+            "network mode 'cni' is not implemented yet".into(),
+        )),
+    }
 }
 
 unsafe fn attach_directory_shares(

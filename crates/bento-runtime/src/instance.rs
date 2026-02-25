@@ -44,6 +44,21 @@ pub struct MountConfig {
     pub writable: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkMode {
+    #[serde(rename = "vznat")]
+    VzNat,
+    None,
+    Bridged,
+    Cni,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkConfig {
+    pub mode: NetworkMode,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceDisk {
     pub path: PathBuf,
@@ -101,6 +116,9 @@ pub struct InstanceConfig {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<MountConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkConfig>,
 }
 
 impl InstanceConfig {
@@ -151,6 +169,41 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+pub fn default_network_mode_for_engine(engine: EngineType) -> NetworkMode {
+    match engine {
+        EngineType::VZ => NetworkMode::VzNat,
+    }
+}
+
+pub fn resolve_network_mode(engine: EngineType, network: Option<&NetworkConfig>) -> NetworkMode {
+    network
+        .map(|config| config.mode)
+        .unwrap_or_else(|| default_network_mode_for_engine(engine))
+}
+
+pub fn validate_network_mode(
+    engine: EngineType,
+    network: Option<&NetworkConfig>,
+) -> Result<(), String> {
+    let mode = resolve_network_mode(engine, network);
+    match mode {
+        NetworkMode::None => Ok(()),
+        NetworkMode::VzNat => {
+            if !matches!(engine, EngineType::VZ) {
+                return Err("network mode 'vznat' is only supported with the VZ driver".to_string());
+            }
+
+            if !cfg!(target_os = "macos") {
+                return Err("network mode 'vznat' is only supported on macOS hosts".to_string());
+            }
+
+            Ok(())
+        }
+        NetworkMode::Bridged => Err("network mode 'bridged' is not implemented yet".to_string()),
+        NetworkMode::Cni => Err("network mode 'cni' is not implemented yet".to_string()),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Instance {
     pub name: String,
@@ -190,6 +243,14 @@ impl Instance {
         } else {
             InstanceStatus::Stopped
         }
+    }
+
+    pub fn resolved_network_mode(&self) -> NetworkMode {
+        resolve_network_mode(self.engine(), self.config.network.as_ref())
+    }
+
+    pub fn validate_network_mode(&self) -> Result<(), String> {
+        validate_network_mode(self.engine(), self.config.network.as_ref())
     }
 
     pub fn root_disk(&self) -> Result<Option<InstanceDisk>, InstanceDiskError> {
@@ -509,5 +570,24 @@ mod tests {
         let err = resolve_mount_location(Path::new("~nickvd/code"))
             .expect_err("invalid tilde path should fail");
         assert!(err.contains("only '~' and '~/...' are supported"));
+    }
+
+    #[test]
+    fn resolve_network_mode_defaults_to_vznat_for_vz_engine() {
+        let mode = resolve_network_mode(EngineType::VZ, None);
+        assert_eq!(mode, NetworkMode::VzNat);
+    }
+
+    #[test]
+    fn validate_network_mode_rejects_unimplemented_modes() {
+        let err = validate_network_mode(
+            EngineType::VZ,
+            Some(&NetworkConfig {
+                mode: NetworkMode::Bridged,
+            }),
+        )
+        .expect_err("bridged should not be supported yet");
+
+        assert!(err.contains("not implemented"));
     }
 }

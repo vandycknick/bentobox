@@ -21,7 +21,8 @@ use crate::{
     driver::get_driver_for,
     host_user,
     instance::{
-        resolve_mount_location, Instance, InstanceConfig, InstanceFile, InstanceStatus, MountConfig,
+        resolve_mount_location, validate_network_mode, Instance, InstanceConfig, InstanceFile,
+        InstanceStatus, MountConfig, NetworkConfig,
     },
     log_watcher::{LogWatcher, StreamKind, WatchError},
     ssh_keys,
@@ -176,6 +177,12 @@ impl<D: Daemon> InstanceManager<D> {
             .kernel_path
             .map(|path| path_relative_to(&app_home, &path));
         config.mounts = normalize_mounts(&options.mounts)?;
+        config.network = options.network;
+        validate_network_mode(
+            config.engine.unwrap_or(crate::instance::EngineType::VZ),
+            config.network.as_ref(),
+        )
+        .map_err(|reason| InstanceError::GenericError { reason })?;
 
         let config_path = app_home.join(InstanceFile::Config.as_str());
         let config_yaml = serde_yaml_ng::to_string(&config).map_err(|source| {
@@ -300,6 +307,9 @@ impl<D: Daemon> InstanceManager<D> {
     }
 
     pub fn start(&mut self, inst: &Instance) -> Result<(), InstanceError> {
+        inst.validate_network_mode()
+            .map_err(|reason| InstanceError::GenericError { reason })?;
+
         if inst.status() == InstanceStatus::Running {
             return Err(InstanceError::InstanceAlreadyRunning {
                 name: inst.name.clone(),
@@ -409,6 +419,7 @@ pub struct InstanceCreateOptions {
     pub memory: u32,
     pub kernel_path: Option<PathBuf>,
     pub mounts: Vec<MountConfig>,
+    pub network: Option<NetworkConfig>,
 }
 
 impl Default for InstanceCreateOptions {
@@ -418,6 +429,7 @@ impl Default for InstanceCreateOptions {
             memory: 512,
             kernel_path: None,
             mounts: Vec::new(),
+            network: None,
         }
     }
 }
@@ -440,6 +452,11 @@ impl InstanceCreateOptions {
 
     pub fn with_mounts(mut self, mounts: Vec<MountConfig>) -> Self {
         self.mounts = mounts;
+        self
+    }
+
+    pub fn with_network(mut self, network: Option<NetworkConfig>) -> Self {
+        self.network = network;
         self
     }
 }

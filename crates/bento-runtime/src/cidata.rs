@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::cidata_iso9660::{write_cidata_iso, CidataEntry};
 use crate::host_user::HostUser;
-use crate::instance::{resolve_mount_location, Instance, InstanceFile};
+use crate::instance::{resolve_mount_location, Instance, InstanceFile, NetworkMode};
 
 pub fn build_cidata_iso(
     inst: &Instance,
@@ -12,9 +12,9 @@ pub fn build_cidata_iso(
 ) -> eyre::Result<()> {
     let user_data = render_user_data(inst, host_user, ssh_public_key)?;
     let meta_data = render_meta_data(inst)?;
-    let _network_config = render_network_config()?;
+    let network_config = render_network_config_for_instance(inst)?;
     let iso_path = inst.file(InstanceFile::CidataIso);
-    let files = vec![
+    let mut files = vec![
         CidataEntry {
             name: "user-data".to_string(),
             contents: user_data.into_bytes(),
@@ -23,13 +23,14 @@ pub fn build_cidata_iso(
             name: "meta-data".to_string(),
             contents: meta_data.into_bytes(),
         },
-        // TODO: only add this when needed
-        //
-        // CidataEntry {
-        //     name: "network-config".to_string(),
-        //     contents: network_config.into_bytes(),
-        // },
     ];
+
+    if let Some(network_config) = network_config {
+        files.push(CidataEntry {
+            name: "network-config".to_string(),
+            contents: network_config.into_bytes(),
+        });
+    }
 
     write_cidata_iso(&iso_path, "CIDATA", &files)
         .with_context(|| format!("build cidata ISO at {}", iso_path.display()))?;
@@ -72,15 +73,8 @@ struct NetworkConfigV2 {
 
 #[derive(Serialize)]
 struct EthernetConfigV2 {
-    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
-    match_cfg: Option<MatchByName>,
     dhcp4: bool,
     dhcp6: bool,
-}
-
-#[derive(Serialize)]
-struct MatchByName {
-    name: String,
 }
 
 fn render_user_data(
@@ -132,11 +126,8 @@ fn render_user_data(
 fn render_network_config() -> eyre::Result<String> {
     let mut ethernets = std::collections::BTreeMap::new();
     ethernets.insert(
-        "default".to_string(),
+        "enp0s1".to_string(),
         EthernetConfigV2 {
-            match_cfg: Some(MatchByName {
-                name: "e*".to_string(),
-            }),
             dhcp4: true,
             dhcp6: false,
         },
@@ -147,6 +138,15 @@ fn render_network_config() -> eyre::Result<String> {
         ethernets,
     };
     serde_yaml_ng::to_string(&cfg).context("serialize cloud-init network-config")
+}
+
+fn render_network_config_for_instance(inst: &Instance) -> eyre::Result<Option<String>> {
+    match inst.resolved_network_mode() {
+        NetworkMode::VzNat => render_network_config().map(Some),
+        NetworkMode::None => Ok(None),
+        NetworkMode::Bridged => Err(eyre::eyre!("network mode 'bridged' is not implemented yet")),
+        NetworkMode::Cni => Err(eyre::eyre!("network mode 'cni' is not implemented yet")),
+    }
 }
 
 fn render_meta_data(inst: &Instance) -> eyre::Result<String> {
@@ -160,7 +160,7 @@ fn render_meta_data(inst: &Instance) -> eyre::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instance::{InstanceConfig, MountConfig};
+    use crate::instance::{InstanceConfig, MountConfig, NetworkConfig};
     use std::path::PathBuf;
 
     fn instance_with_mounts(mounts: Vec<MountConfig>) -> Instance {
@@ -251,5 +251,33 @@ mod tests {
 
         assert!(user_data.contains("- mount0"));
         assert!(user_data.contains(&format!("- {}", home.display())));
+    }
+
+    #[test]
+    fn network_config_is_generated_for_vznat() {
+        let mut config = InstanceConfig::new();
+        config.network = Some(NetworkConfig {
+            mode: NetworkMode::VzNat,
+        });
+        let inst = Instance::new("vm1".to_string(), PathBuf::from("/tmp/vm1"), config);
+
+        let network_config =
+            render_network_config_for_instance(&inst).expect("network config should render");
+        let rendered = network_config.expect("vznat should emit network-config");
+        assert!(rendered.contains("version: 2"));
+        assert!(rendered.contains("dhcp4: true"));
+    }
+
+    #[test]
+    fn network_config_is_omitted_for_none_mode() {
+        let mut config = InstanceConfig::new();
+        config.network = Some(NetworkConfig {
+            mode: NetworkMode::None,
+        });
+        let inst = Instance::new("vm1".to_string(), PathBuf::from("/tmp/vm1"), config);
+
+        let network_config =
+            render_network_config_for_instance(&inst).expect("none mode should be valid");
+        assert!(network_config.is_none());
     }
 }
