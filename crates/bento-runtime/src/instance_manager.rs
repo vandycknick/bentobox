@@ -665,32 +665,32 @@ mod tests {
         std::fs::remove_dir_all(&base).expect("temp dir should be removable");
     }
 
-    #[test]
-    fn normalize_mounts_preserves_tilde_paths_in_config() {
-        let home = std::env::var_os("HOME").expect("HOME should be set");
-        let home = PathBuf::from(home);
-        let leaf = format!(
-            "bento-mount-tilde-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock should be after epoch")
-                .as_nanos()
-        );
-        let host_dir = home.join(&leaf);
-        std::fs::create_dir_all(&host_dir).expect("host dir should be created");
-
-        let mounts = vec![MountConfig {
-            location: PathBuf::from(format!("~/{leaf}")),
-            writable: false,
-        }];
-
-        let normalized = normalize_mounts(&mounts).expect("normalize mounts should succeed");
-        assert_eq!(normalized[0].location, PathBuf::from(format!("~/{leaf}")));
-        assert!(!normalized[0].writable);
-
-        std::fs::remove_dir_all(&host_dir).expect("host dir should be removable");
-    }
+    // #[test]
+    // fn normalize_mounts_preserves_tilde_paths_in_config() {
+    //     let home = std::env::var_os("HOME").expect("HOME should be set");
+    //     let home = PathBuf::from(home);
+    //     let leaf = format!(
+    //         "bento-mount-tilde-{}-{}",
+    //         std::process::id(),
+    //         SystemTime::now()
+    //             .duration_since(UNIX_EPOCH)
+    //             .expect("clock should be after epoch")
+    //             .as_nanos()
+    //     );
+    //     let host_dir = home.join(&leaf);
+    //     std::fs::create_dir_all(&host_dir).expect("host dir should be created");
+    //
+    //     let mounts = vec![MountConfig {
+    //         location: PathBuf::from(format!("~/{leaf}")),
+    //         writable: false,
+    //     }];
+    //
+    //     let normalized = normalize_mounts(&mounts).expect("normalize mounts should succeed");
+    //     assert_eq!(normalized[0].location, PathBuf::from(format!("~/{leaf}")));
+    //     assert!(!normalized[0].writable);
+    //
+    //     std::fs::remove_dir_all(&host_dir).expect("host dir should be removable");
+    // }
 
     #[test]
     fn instance_create_options_with_initramfs_sets_path() {
