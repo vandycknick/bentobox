@@ -40,11 +40,28 @@ pub trait Driver {
 
     fn stop(&mut self) -> Result<(), DriverError>;
 
-    fn open_vsock_stream(&self, _port: u32) -> Result<OwnedFd, DriverError> {
+    fn open_device(&self, _request: OpenDeviceRequest) -> Result<OpenDeviceResponse, DriverError> {
         Err(DriverError::Backend(
-            "driver does not support opening vsock streams".to_string(),
+            "driver does not support opening devices".to_string(),
         ))
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum OpenDeviceRequest {
+    Vsock { port: u32 },
+    Serial,
+}
+
+#[derive(Debug)]
+pub enum OpenDeviceResponse {
+    Vsock {
+        stream: OwnedFd,
+    },
+    Serial {
+        guest_input: OwnedFd,
+        guest_output: OwnedFd,
+    },
 }
 
 #[cfg(target_os = "macos")]

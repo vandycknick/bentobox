@@ -1,10 +1,12 @@
 use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 pub const CONTROL_PROTOCOL_VERSION: u16 = 1;
 const MAX_CONTROL_LINE_BYTES: usize = 16 * 1024;
 pub const SERVICE_SSH: &str = "ssh";
+pub const SERVICE_SERIAL: &str = "serial";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControlRequest {
@@ -17,7 +19,11 @@ pub struct ControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequestBody {
-    OpenService { service: String },
+    OpenService {
+        service: String,
+        #[serde(default, skip_serializing_if = "Map::is_empty")]
+        options: Map<String, Value>,
+    },
     ListServices,
 }
 
@@ -66,11 +72,20 @@ pub enum ControlErrorCode {
 
 impl ControlRequest {
     pub fn v1_open_service(id: impl Into<String>, service: impl Into<String>) -> Self {
+        Self::v1_open_service_with_options(id, service, Map::new())
+    }
+
+    pub fn v1_open_service_with_options(
+        id: impl Into<String>,
+        service: impl Into<String>,
+        options: Map<String, Value>,
+    ) -> Self {
         Self {
             version: CONTROL_PROTOCOL_VERSION,
             id: id.into(),
             body: ControlRequestBody::OpenService {
                 service: service.into(),
+                options,
             },
         }
     }

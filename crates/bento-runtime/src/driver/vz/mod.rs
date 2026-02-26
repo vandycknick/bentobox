@@ -1,12 +1,13 @@
-use std::os::fd::OwnedFd;
+use std::os::fd::{IntoRawFd, OwnedFd};
 use std::time::Duration;
 
+use nix::unistd::pipe;
 use objc2::AllocAnyThread;
 use objc2::{rc::Retained, ClassType};
-use objc2_foundation::{NSArray, NSString, NSURL};
+use objc2_foundation::{NSArray, NSFileHandle, NSString, NSURL};
 use objc2_virtualization::{
     VZDirectorySharingDeviceConfiguration, VZDiskImageStorageDeviceAttachment,
-    VZFileSerialPortAttachment, VZGenericPlatformConfiguration, VZLinuxBootLoader,
+    VZFileHandleSerialPortAttachment, VZGenericPlatformConfiguration, VZLinuxBootLoader,
     VZNATNetworkDeviceAttachment, VZNetworkDeviceConfiguration, VZSharedDirectory,
     VZSingleDirectoryShare, VZVirtioBlockDeviceConfiguration,
     VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
@@ -17,8 +18,11 @@ use objc2_virtualization::{
 
 use crate::driver::vz::vm::get_machine_identifier;
 use crate::{
-    driver::{vz::utils::vz_nested_virtualization_is_supported, Driver, DriverError},
-    instance::{resolve_mount_location, Instance, InstanceFile, NetworkMode},
+    driver::{
+        vz::utils::vz_nested_virtualization_is_supported, Driver, DriverError, OpenDeviceRequest,
+        OpenDeviceResponse,
+    },
+    instance::{resolve_mount_location, Instance, NetworkMode},
 };
 
 mod dispatch;
@@ -28,6 +32,16 @@ mod vz;
 
 use vm::VirtualMachine;
 pub use vm::VirtualMachineError;
+
+struct SerialHostPipes {
+    guest_input: OwnedFd,
+    guest_output: OwnedFd,
+}
+
+struct VmBootstrap {
+    config: Retained<VZVirtualMachineConfiguration>,
+    serial: SerialHostPipes,
+}
 
 #[derive(Debug)]
 pub struct VzDriver {
@@ -80,19 +94,33 @@ impl Driver for VzDriver {
         Ok(())
     }
 
-    fn open_vsock_stream(&self, port: u32) -> Result<OwnedFd, DriverError> {
+    fn open_device(&self, request: OpenDeviceRequest) -> Result<OpenDeviceResponse, DriverError> {
         let vm = self.vm.as_ref().ok_or_else(|| {
-            DriverError::Backend("cannot open vsock stream because VM is not running".to_string())
+            DriverError::Backend("cannot open device because VM is not running".to_string())
         })?;
 
-        vm.open_vsock_stream(port).map_err(DriverError::from)
+        match request {
+            OpenDeviceRequest::Vsock { port } => vm
+                .open_vsock_stream(port)
+                .map(|stream| OpenDeviceResponse::Vsock { stream })
+                .map_err(DriverError::from),
+            OpenDeviceRequest::Serial => vm
+                .open_serial_fds()
+                .map(|(guest_input, guest_output)| OpenDeviceResponse::Serial {
+                    guest_input,
+                    guest_output,
+                })
+                .map_err(DriverError::from),
+        }
     }
 }
 
-unsafe fn start_vm(
-    config: Retained<VZVirtualMachineConfiguration>,
-) -> Result<VirtualMachine, DriverError> {
-    let vm = VirtualMachine::new(config);
+unsafe fn start_vm(bootstrap: VmBootstrap) -> Result<VirtualMachine, DriverError> {
+    let vm = VirtualMachine::new(
+        bootstrap.config,
+        bootstrap.serial.guest_input,
+        bootstrap.serial.guest_output,
+    );
 
     vm.start()?;
 
@@ -129,11 +157,9 @@ unsafe fn start_vm(
     }
 }
 
-unsafe fn create_vm_config(
-    inst: &Instance,
-) -> Result<Retained<VZVirtualMachineConfiguration>, DriverError> {
+unsafe fn create_vm_config(inst: &Instance) -> Result<VmBootstrap, DriverError> {
     let config = &inst.config;
-    let machine_id = get_machine_identifier(&inst)?;
+    let machine_id = get_machine_identifier(inst)?;
     let boot_assets = inst.boot_assets()?;
 
     let bootloader = VZLinuxBootLoader::new();
@@ -148,7 +174,7 @@ unsafe fn create_vm_config(
 
     // FIX: How should I handle this?
     let command_line = "console=hvc0 rd.break=initqueue root=/dev/vda";
-    bootloader.setCommandLine(&NSString::from_str(&command_line));
+    bootloader.setCommandLine(&NSString::from_str(command_line));
 
     // TODO: rename this var, can't be config because otherwise I'll shadow
     let c = VZVirtualMachineConfiguration::new();
@@ -193,14 +219,31 @@ unsafe fn create_vm_config(
     c.setPlatform(&platform_config);
 
     // NOTE: Attach serial configuration
-    let s = NSString::from_str(&inst.file(InstanceFile::SerialLog).to_string_lossy());
-    let serial_url = NSURL::initFileURLWithPath(NSURL::alloc(), &s);
-    let attachment = VZFileSerialPortAttachment::initWithURL_append_error(
-        VZFileSerialPortAttachment::alloc(),
-        &serial_url,
-        false,
-    )
-    .map_err(|nse| DriverError::Backend(nse.to_string()))?;
+    let (guest_serial_read, host_serial_write) =
+        pipe().map_err(|err| DriverError::Backend(format!("create serial input pipe: {err}")))?;
+    let (host_serial_read, guest_serial_write) =
+        pipe().map_err(|err| DriverError::Backend(format!("create serial output pipe: {err}")))?;
+
+    let guest_serial_read_fd = guest_serial_read.into_raw_fd();
+    let guest_serial_write_fd = guest_serial_write.into_raw_fd();
+
+    let serial_read_handle = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
+        NSFileHandle::alloc(),
+        guest_serial_read_fd,
+        true,
+    );
+    let serial_write_handle = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
+        NSFileHandle::alloc(),
+        guest_serial_write_fd,
+        true,
+    );
+
+    let attachment =
+        VZFileHandleSerialPortAttachment::initWithFileHandleForReading_fileHandleForWriting(
+            VZFileHandleSerialPortAttachment::alloc(),
+            Some(&serial_read_handle),
+            Some(&serial_write_handle),
+        );
 
     let console = VZVirtioConsoleDeviceSerialPortConfiguration::new();
     console.setAttachment(Some(&attachment));
@@ -215,7 +258,13 @@ unsafe fn create_vm_config(
     c.validateWithError()
         .map_err(|nse| DriverError::Backend(nse.to_string()))?;
 
-    return Ok(c);
+    Ok(VmBootstrap {
+        config: c,
+        serial: SerialHostPipes {
+            guest_input: host_serial_write,
+            guest_output: host_serial_read,
+        },
+    })
 }
 
 unsafe fn attach_network_devices(

@@ -3,7 +3,7 @@ use std::{
     fmt::{Debug, Display},
     fs,
     io::ErrorKind,
-    os::fd::{BorrowedFd, OwnedFd},
+    os::fd::{AsRawFd, BorrowedFd, OwnedFd},
     ptr,
     sync::{mpsc::sync_channel, Arc, Mutex},
 };
@@ -79,6 +79,8 @@ pub struct VirtualMachine {
     _observer: Retained<VirtualMachineStateObserver>,
     current_state: Arc<Mutex<VirtualMachineState>>,
     state_subscribers: Arc<Mutex<Vec<StateSubscriber>>>,
+    serial_guest_input: Arc<OwnedFd>,
+    serial_guest_output: Arc<OwnedFd>,
 }
 
 type StateSubscriber = (Sender<VirtualMachineState>, Receiver<VirtualMachineState>);
@@ -129,7 +131,11 @@ impl VirtualMachineError {
 }
 
 impl VirtualMachine {
-    pub fn new(config: Retained<VZVirtualMachineConfiguration>) -> Self {
+    pub fn new(
+        config: Retained<VZVirtualMachineConfiguration>,
+        serial_guest_input: OwnedFd,
+        serial_guest_output: OwnedFd,
+    ) -> Self {
         unsafe {
             let queue = Queue::create("codes.nvd.bentobox", QueueAttribute::Serial);
 
@@ -165,14 +171,16 @@ impl VirtualMachine {
                 subscribers.retain(|(tx, rx)| try_send_latest(tx, rx, state_msg));
             });
 
-            return VirtualMachine {
+            VirtualMachine {
                 queue,
                 machine,
                 _config: config,
                 _observer: observer,
                 current_state,
                 state_subscribers,
-            };
+                serial_guest_input: Arc::new(serial_guest_input),
+                serial_guest_output: Arc::new(serial_guest_output),
+            }
         }
     }
 
@@ -304,6 +312,31 @@ impl VirtualMachine {
         receiver
             .recv()
             .map_err(|_| VirtualMachineError::completion_channel_closed("open_vsock_stream"))?
+    }
+
+    pub fn open_serial_fds(&self) -> Result<(OwnedFd, OwnedFd), VirtualMachineError> {
+        let guest_input =
+            dup(unsafe { BorrowedFd::borrow_raw(self.serial_guest_input.as_raw_fd()) }).map_err(
+                |errno| VirtualMachineError {
+                    domain: "bento.serial".to_string(),
+                    code: errno as isize,
+                    description: format!("failed to duplicate serial input fd: {errno}"),
+                    failure_reason: String::new(),
+                    recovery_suggestion: String::new(),
+                },
+            )?;
+        let guest_output =
+            dup(unsafe { BorrowedFd::borrow_raw(self.serial_guest_output.as_raw_fd()) }).map_err(
+                |errno| VirtualMachineError {
+                    domain: "bento.serial".to_string(),
+                    code: errno as isize,
+                    description: format!("failed to duplicate serial output fd: {errno}"),
+                    failure_reason: String::new(),
+                    recovery_suggestion: String::new(),
+                },
+            )?;
+
+        Ok((guest_input, guest_output))
     }
 
     #[expect(dead_code, reason = "kept for upcoming VM control surface")]

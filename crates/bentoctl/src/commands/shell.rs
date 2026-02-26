@@ -38,60 +38,7 @@ impl Cmd {
             .into());
         }
 
-        let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
-
-        let proxy_command = format!(
-            "{} shell-proxy --name {} --service ssh",
-            shell_quote(&exe.to_string_lossy()),
-            shell_quote(&self.name)
-        );
-        let host_user = host_user::current_host_user().context("resolve current host user")?;
-        let ssh_user = self.user.as_deref().unwrap_or(host_user.name.as_str());
-        let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure bento SSH keys")?;
-
-        let err = Command::new("ssh")
-            // Do not read ~/.ssh/config or custom host stanzas. Keeps behaviour deterministic.
-            .arg("-F")
-            .arg("/dev/null")
-            // Auth + identity
-            .arg("-o")
-            .arg(format!(
-                "IdentityFile={}",
-                user_keys.private_key_path.to_string_lossy()
-            ))
-            .arg("-o")
-            .arg("PreferredAuthentications=publickey") // Try key auth first/only preferred method.
-            .arg("-o")
-            .arg("BatchMode=yes") // Noninteractive mode, do not prompt for passwords/passphrases.
-            .arg("-o")
-            .arg("IdentitiesOnly=yes") // Only use the specified identity file, do not spray all agent keys.
-            .arg("-o")
-            .arg("GSSAPIAuthentication=no") //Disable Kerberos/GSSAPI attempts, avoids slow or noisy fallback paths.
-            // ProxyCommand
-            .arg("-o")
-            .arg(format!("ProxyCommand={proxy_command}"))
-            .arg("-o")
-            .arg(format!("HostKeyAlias=bento/{}", self.name))
-            .arg("-o")
-            .arg("StrictHostKeyChecking=no")
-            .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
-            // Transport tuning
-            .arg("-o")
-            .arg("Compression=no") // Disable SSH compression (often faster locally)
-            .arg("-o")
-            .arg("Ciphers=\"^aes128-gcm@openssh.com,aes256-gcm@openssh.com\"") //Prefer AES-GCM ciphers first (the ^ means prepend preference order).
-            .arg("-o")
-            .arg("LogLevel=ERROR") // Suppress normal SSH chatter, only show real errors.
-            // TTY + env
-            .arg("-t")
-            .arg("-o")
-            .arg("SendEnv=COLORTERM")
-            // Remote endpoint and identity
-            .arg("-o")
-            .arg(format!("User={ssh_user}"))
-            .arg(self.name.clone())
-            .exec();
+        let err = build_ssh_command(&self.name, self.user.as_deref())?.exec();
 
         // Ignore user/global ssh config
         // - -F /dev/null
@@ -163,6 +110,59 @@ impl Cmd {
 
         bail!("failed to execute ssh: {err}")
     }
+}
+
+pub(crate) fn build_ssh_command(name: &str, user: Option<&str>) -> eyre::Result<Command> {
+    let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
+
+    let proxy_command = format!(
+        "{} shell-proxy --name {} --service ssh",
+        shell_quote(&exe.to_string_lossy()),
+        shell_quote(name)
+    );
+    let host_user = host_user::current_host_user().context("resolve current host user")?;
+    let ssh_user = user.unwrap_or(host_user.name.as_str());
+    let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure bento SSH keys")?;
+
+    let mut command = Command::new("ssh");
+    command
+        .arg("-F")
+        .arg("/dev/null")
+        .arg("-o")
+        .arg(format!(
+            "IdentityFile={}",
+            user_keys.private_key_path.to_string_lossy()
+        ))
+        .arg("-o")
+        .arg("PreferredAuthentications=publickey")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("IdentitiesOnly=yes")
+        .arg("-o")
+        .arg("GSSAPIAuthentication=no")
+        .arg("-o")
+        .arg(format!("ProxyCommand={proxy_command}"))
+        .arg("-o")
+        .arg(format!("HostKeyAlias=bento/{name}"))
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("Compression=no")
+        .arg("-o")
+        .arg("Ciphers=\"^aes128-gcm@openssh.com,aes256-gcm@openssh.com\"")
+        .arg("-o")
+        .arg("LogLevel=ERROR")
+        .arg("-t")
+        .arg("-o")
+        .arg("SendEnv=COLORTERM")
+        .arg("-o")
+        .arg(format!("User={ssh_user}"))
+        .arg(name);
+
+    Ok(command)
 }
 
 fn shell_quote(input: &str) -> String {
