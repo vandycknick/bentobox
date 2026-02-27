@@ -3,11 +3,14 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
+use bento_runtime::images::capabilities::Capability;
 use bento_runtime::instance::InstanceStatus;
 use bento_runtime::instance_manager::{InstanceError, InstanceManager, NixDaemon};
 use bento_runtime::{host_user, ssh_keys};
 use clap::Args;
 use eyre::{bail, Context};
+
+use crate::terminal;
 
 #[derive(Args, Debug)]
 pub struct Cmd {
@@ -36,6 +39,14 @@ impl Cmd {
                 name: self.name.clone(),
             }
             .into());
+        }
+
+        if !inst.capabilities().supports(Capability::Ssh) {
+            if self.user.is_some() {
+                eprintln!("[bentoctl] --user is ignored for serial attach");
+            }
+            eprintln!("[bentoctl] image has no ssh capability, using serial attach");
+            return terminal::attach_serial(&self.name);
         }
 
         let err = build_ssh_command(&self.name, self.user.as_deref())?.exec();
@@ -125,39 +136,45 @@ pub(crate) fn build_ssh_command(name: &str, user: Option<&str>) -> eyre::Result<
     let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure bento SSH keys")?;
 
     let mut command = Command::new("ssh");
+    // Do not read ~/.ssh/config or custom host stanzas. Keeps behaviour deterministic.
     command
         .arg("-F")
         .arg("/dev/null")
+        // Auth + identity
         .arg("-o")
         .arg(format!(
             "IdentityFile={}",
             user_keys.private_key_path.to_string_lossy()
         ))
         .arg("-o")
-        .arg("PreferredAuthentications=publickey")
+        .arg("PreferredAuthentications=publickey") // Try key auth first/only preferred method.
         .arg("-o")
-        .arg("BatchMode=yes")
+        .arg("BatchMode=yes") // Noninteractive mode, do not prompt for passwords/passphrases.
         .arg("-o")
-        .arg("IdentitiesOnly=yes")
+        .arg("IdentitiesOnly=yes") // Only use the specified identity file, do not spray all agent keys.
         .arg("-o")
-        .arg("GSSAPIAuthentication=no")
+        .arg("GSSAPIAuthentication=no") //Disable Kerberos/GSSAPI attempts, avoids slow or noisy fallback paths.
+        // ProxyCommand
         .arg("-o")
         .arg(format!("ProxyCommand={proxy_command}"))
         .arg("-o")
-        .arg(format!("HostKeyAlias=bento/{name}"))
+        .arg(format!("HostKeyAlias=bento/{}", name))
         .arg("-o")
         .arg("StrictHostKeyChecking=no")
         .arg("-o")
         .arg("UserKnownHostsFile=/dev/null")
+        // Transport tuning
         .arg("-o")
-        .arg("Compression=no")
+        .arg("Compression=no") // Disable SSH compression (often faster locally)
         .arg("-o")
-        .arg("Ciphers=\"^aes128-gcm@openssh.com,aes256-gcm@openssh.com\"")
+        .arg("Ciphers=\"^aes128-gcm@openssh.com,aes256-gcm@openssh.com\"") //Prefer AES-GCM ciphers first (the ^ means prepend preference order).
         .arg("-o")
-        .arg("LogLevel=ERROR")
+        .arg("LogLevel=ERROR") // Suppress normal SSH chatter, only show real errors.
+        // TTY + env
         .arg("-t")
         .arg("-o")
         .arg("SendEnv=COLORTERM")
+        // Remote endpoint and identity
         .arg("-o")
         .arg(format!("User={ssh_user}"))
         .arg(name);

@@ -1,4 +1,5 @@
 mod commands;
+mod terminal;
 
 use crate::commands::BentoCtlCmd;
 use std::process::ExitCode;

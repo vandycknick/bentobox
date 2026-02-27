@@ -1,27 +1,20 @@
 use std::fmt::{Display, Formatter};
-use std::io::Read;
-use std::io::Write;
-use std::os::fd::{AsFd, AsRawFd};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use bento_runtime::image_store::ImageStore;
+use bento_runtime::images::capabilities::GuestCapabilities;
+use bento_runtime::images::store::ImageStore;
 use bento_runtime::instance::{
     InstanceFile, InstanceStatus, MountConfig, NetworkConfig, NetworkMode,
-};
-use bento_runtime::instance_control::{
-    ControlErrorCode, ControlRequest, ControlResponse, ControlResponseBody,
-    CONTROL_PROTOCOL_VERSION, SERVICE_SERIAL,
 };
 use bento_runtime::instance_manager::{
     InstanceCreateOptions, InstanceError, InstanceManager, NixDaemon,
 };
 use clap::{Args, ValueEnum};
 use eyre::{bail, Context};
-use serde_json::Map;
 
 use crate::commands::shell;
+use crate::terminal;
 
 #[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
 pub enum AttachMode {
@@ -75,6 +68,9 @@ pub struct Cmd {
     #[arg(long = "mount", value_name = "PATH:ro|rw", value_parser = parse_mount_arg)]
     pub mounts: Vec<MountConfig>,
 
+    #[arg(long, value_name = "PATH", help = "Path to userdata file")]
+    pub userdata: Option<PathBuf>,
+
     #[arg(long, value_name = "MODE", value_parser = parse_network_mode)]
     pub network: Option<NetworkMode>,
 }
@@ -99,16 +95,8 @@ impl Cmd {
 
         let kernel_path = resolve_optional_path(self.kernel.as_deref(), "kernel")?;
         let initramfs_path = resolve_optional_path(self.initramfs.as_deref(), "initramfs")?;
+        let userdata_path = resolve_optional_path(self.userdata.as_deref(), "userdata")?;
         let disk_paths = resolve_existing_paths(&self.disks, "disk")?;
-
-        let options = InstanceCreateOptions::default()
-            .with_cpus(self.cpus)
-            .with_memory(self.memory)
-            .with_kernel(kernel_path)
-            .with_initramfs(initramfs_path)
-            .with_disks(disk_paths)
-            .with_mounts(self.mounts.clone())
-            .with_network(self.network.map(|mode| NetworkConfig { mode }));
 
         let selected_image = self
             .image
@@ -121,6 +109,21 @@ impl Cmd {
             })
             .transpose()?;
 
+        let capabilities = selected_image
+            .as_ref()
+            .map(|image| GuestCapabilities::from_annotations(&image.annotations))
+            .unwrap_or_default();
+
+        let options = InstanceCreateOptions::default()
+            .with_cpus(self.cpus)
+            .with_memory(self.memory)
+            .with_kernel(kernel_path)
+            .with_initramfs(initramfs_path)
+            .with_disks(disk_paths)
+            .with_network(self.network.map(|mode| NetworkConfig { mode }))
+            .with_capabilities(capabilities)
+            .with_userdata(userdata_path);
+
         let mut created = false;
         let mut started = false;
 
@@ -129,7 +132,7 @@ impl Cmd {
             created = true;
 
             if let Some(image) = &selected_image {
-                store.clone_base_image(&image, &inst.file(InstanceFile::RootDisk))?;
+                store.clone_base_image(image, &inst.file(InstanceFile::RootDisk))?;
             }
 
             manager.start(&inst)?;
@@ -138,7 +141,7 @@ impl Cmd {
 
             match self.attach {
                 AttachMode::Ssh => attach_ssh(&name, self.user.as_deref()),
-                AttachMode::Serial => attach_serial(&name),
+                AttachMode::Serial => terminal::attach_serial(&name),
             }
         })();
 
@@ -186,71 +189,6 @@ fn cleanup_run_instance(
     Ok(())
 }
 
-fn attach_serial(name: &str) -> eyre::Result<()> {
-    let manager = InstanceManager::new(NixDaemon::new("123"));
-    let inst = manager.inspect(name)?;
-    let socket_path = inst.file(InstanceFile::InstancedSocket);
-
-    let mut stream = match UnixStream::connect(&socket_path) {
-        Ok(stream) => stream,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            bail!(
-                "instanced_unreachable: control socket {} is missing, make sure the VM is running",
-                socket_path.display()
-            )
-        }
-        Err(err) => return Err(err).context(format!("connect {}", socket_path.display())),
-    };
-
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .context("set control socket read timeout")?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .context("set control socket write timeout")?;
-
-    let mut options = Map::new();
-    options.insert(
-        "access".to_string(),
-        serde_json::Value::String("interactive".to_string()),
-    );
-
-    ControlRequest::v1_open_service_with_options("run-serial", SERVICE_SERIAL, options)
-        .write_to(&mut stream)
-        .context("write serial request")?;
-
-    loop {
-        let response = ControlResponse::read_from(&mut stream).context("read serial response")?;
-
-        if response.version != CONTROL_PROTOCOL_VERSION {
-            bail!(
-                "unsupported_version: daemon returned protocol version {}, expected {}",
-                response.version,
-                CONTROL_PROTOCOL_VERSION
-            );
-        }
-
-        match response.body {
-            ControlResponseBody::Opened => {
-                stream
-                    .set_read_timeout(None)
-                    .context("clear control socket read timeout")?;
-                stream
-                    .set_write_timeout(None)
-                    .context("clear control socket write timeout")?;
-                return proxy_serial_stdio(stream);
-            }
-            ControlResponseBody::Starting { .. } => continue,
-            ControlResponseBody::Error { code, message } => {
-                bail!("{}", render_control_error(&code, &message))
-            }
-            ControlResponseBody::Services { .. } => {
-                bail!("invalid_response: expected opened response for service request")
-            }
-        }
-    }
-}
-
 fn attach_ssh(name: &str, user: Option<&str>) -> eyre::Result<()> {
     let mut command = shell::build_ssh_command(name, user)?;
     let status = command.status().context("run ssh client")?;
@@ -261,148 +199,6 @@ fn attach_ssh(name: &str, user: Option<&str>) -> eyre::Result<()> {
     match status.code() {
         Some(code) => bail!("ssh exited with status code {code}"),
         None => bail!("ssh terminated by signal"),
-    }
-}
-
-fn render_control_error(code: &ControlErrorCode, message: &str) -> String {
-    match code {
-        ControlErrorCode::ServiceUnavailable => {
-            format!("service_unavailable: {message}. ensure guest service is running")
-        }
-        ControlErrorCode::UnknownService => {
-            format!("unknown_service: {message}. try a supported service like 'serial'")
-        }
-        ControlErrorCode::UnsupportedVersion => {
-            format!(
-                "unsupported_version: {message}. update bentoctl/instanced to matching versions"
-            )
-        }
-        ControlErrorCode::UnsupportedRequest => {
-            format!("unsupported_request: {message}")
-        }
-        ControlErrorCode::InstanceNotRunning => {
-            format!("instance_not_running: {message}")
-        }
-        ControlErrorCode::PermissionDenied => {
-            format!("permission_denied: {message}")
-        }
-        ControlErrorCode::Internal => {
-            format!("internal_error: {message}")
-        }
-    }
-}
-
-fn proxy_serial_stdio(mut stream: UnixStream) -> eyre::Result<()> {
-    let _raw_terminal = RawTerminalGuard::new()?;
-
-    let mut stream_write = stream.try_clone().context("clone serial relay stream")?;
-    let input = std::thread::spawn(move || -> std::io::Result<()> {
-        let stdin_fd = std::io::stdin().as_fd().try_clone_to_owned()?;
-        let mut stdin_file = std::fs::File::from(stdin_fd);
-        let mut buf = [0u8; 1024];
-
-        loop {
-            let n = stdin_file.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-
-            let chunk = &buf[..n];
-            if chunk.contains(&0x1d) {
-                let filtered: Vec<u8> = chunk.iter().copied().filter(|b| *b != 0x1d).collect();
-                if !filtered.is_empty() {
-                    stream_write.write_all(&filtered)?;
-                }
-                let _ = stream_write.shutdown(std::net::Shutdown::Write);
-                break;
-            }
-
-            stream_write.write_all(chunk)?;
-        }
-
-        Ok(())
-    });
-
-    let stdout_fd = std::io::stdout()
-        .as_fd()
-        .try_clone_to_owned()
-        .context("dup stdout fd")?;
-    let mut stdout_file = std::fs::File::from(stdout_fd);
-    let _ = std::io::copy(&mut stream, &mut stdout_file).context("relay serial output")?;
-    stdout_file.flush().context("flush serial output")?;
-
-    match input.join() {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(err)) => Err(err).context("relay serial input"),
-        Err(_) => bail!("serial relay thread panicked"),
-    }
-}
-
-struct RawTerminalGuard {
-    fd: std::os::fd::OwnedFd,
-    original: libc::termios,
-    enabled: bool,
-}
-
-impl RawTerminalGuard {
-    fn new() -> eyre::Result<Self> {
-        let stdin = std::io::stdin();
-        let fd = stdin.as_fd().try_clone_to_owned().context("dup stdin fd")?;
-
-        if unsafe { libc::isatty(fd.as_raw_fd()) } == 0 {
-            return Ok(Self {
-                fd,
-                original: unsafe { std::mem::zeroed() },
-                enabled: false,
-            });
-        }
-
-        let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-        if unsafe { libc::tcgetattr(fd.as_raw_fd(), &mut original) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("tcgetattr stdin");
-        }
-
-        let mut raw = original;
-        raw.c_iflag &= !(libc::IGNBRK
-            | libc::BRKINT
-            | libc::PARMRK
-            | libc::ISTRIP
-            | libc::INLCR
-            | libc::IGNCR
-            | libc::ICRNL
-            | libc::IXON);
-        raw.c_oflag &= !libc::OPOST;
-        raw.c_lflag &= !(libc::ECHO | libc::ECHONL | libc::ICANON | libc::ISIG | libc::IEXTEN);
-        raw.c_cflag &= !(libc::CSIZE | libc::PARENB);
-        raw.c_cflag |= libc::CS8;
-        raw.c_cc[libc::VMIN] = 1;
-        raw.c_cc[libc::VTIME] = 0;
-
-        if unsafe { libc::tcsetattr(fd.as_raw_fd(), libc::TCSAFLUSH, &raw) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("tcsetattr stdin raw");
-        }
-
-        Ok(Self {
-            fd,
-            original,
-            enabled: true,
-        })
-    }
-}
-
-impl Drop for RawTerminalGuard {
-    fn drop(&mut self) {
-        if self.enabled {
-            let _ =
-                unsafe { libc::tcsetattr(self.fd.as_raw_fd(), libc::TCSAFLUSH, &self.original) };
-        }
-    }
-}
-
-fn unix_ts() -> u64 {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(duration) => duration.as_secs(),
-        Err(_) => 0,
     }
 }
 

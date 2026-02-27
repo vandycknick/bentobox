@@ -1,4 +1,5 @@
-use bento_runtime::image_store::ImageStore;
+use bento_runtime::images::capabilities::GuestCapabilities;
+use bento_runtime::images::store::ImageStore;
 use bento_runtime::instance::{InstanceFile, MountConfig, NetworkConfig, NetworkMode};
 use bento_runtime::instance_manager::{InstanceCreateOptions, InstanceManager, NixDaemon};
 use clap::Args;
@@ -29,6 +30,8 @@ pub struct Cmd {
     pub initramfs: Option<PathBuf>,
     #[arg(long, help = "Base image name or OCI reference")]
     pub image: Option<String>,
+    #[arg(long, value_name = "PATH", help = "Path to userdata file")]
+    pub userdata: Option<PathBuf>,
     #[arg(
         long = "disk",
         value_name = "PATH",
@@ -55,16 +58,8 @@ impl Cmd {
 
         let kernel_path = resolve_optional_path(self.kernel.as_deref(), "kernel")?;
         let initramfs_path = resolve_optional_path(self.initramfs.as_deref(), "initramfs")?;
+        let userdata_path = resolve_optional_path(self.userdata.as_deref(), "userdata")?;
         let disk_paths = resolve_existing_paths(&self.disks, "disk")?;
-
-        let options = InstanceCreateOptions::default()
-            .with_cpus(self.cpus)
-            .with_memory(self.memory)
-            .with_kernel(kernel_path)
-            .with_initramfs(initramfs_path)
-            .with_disks(disk_paths)
-            .with_mounts(self.mounts.clone())
-            .with_network(self.network.map(|mode| NetworkConfig { mode }));
 
         let selected_image = self
             .image
@@ -76,6 +71,22 @@ impl Cmd {
                 })
             })
             .transpose()?;
+
+        let capabilities = selected_image
+            .as_ref()
+            .map(|image| GuestCapabilities::from_annotations(&image.annotations))
+            .unwrap_or_default();
+
+        let options = InstanceCreateOptions::default()
+            .with_cpus(self.cpus)
+            .with_memory(self.memory)
+            .with_kernel(kernel_path)
+            .with_initramfs(initramfs_path)
+            .with_disks(disk_paths)
+            .with_mounts(self.mounts.clone())
+            .with_network(self.network.map(|mode| NetworkConfig { mode }))
+            .with_capabilities(capabilities)
+            .with_userdata(userdata_path);
 
         let inst = manager.create(&self.name, options)?;
 

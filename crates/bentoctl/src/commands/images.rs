@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::path::PathBuf;
 
-use bento_runtime::image_store::{
+use bento_runtime::images::store::{
     default_archive_name, human_size, image_size_bytes, ImageCompression, ImageStore,
 };
 use clap::{Args, Subcommand};

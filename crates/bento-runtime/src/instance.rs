@@ -8,6 +8,7 @@ use std::{
 use thiserror::Error;
 
 use crate::directories::Directory;
+use crate::images::capabilities::GuestCapabilities;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -119,6 +120,12 @@ pub struct InstanceConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userdata_path: Option<PathBuf>,
+
+    #[serde(default, skip_serializing_if = "GuestCapabilities::is_empty")]
+    pub capabilities: GuestCapabilities,
 }
 
 impl InstanceConfig {
@@ -251,6 +258,10 @@ impl Instance {
 
     pub fn validate_network_mode(&self) -> Result<(), String> {
         validate_network_mode(self.engine(), self.config.network.as_ref())
+    }
+
+    pub fn capabilities(&self) -> &GuestCapabilities {
+        &self.config.capabilities
     }
 
     pub fn root_disk(&self) -> Result<Option<InstanceDisk>, InstanceDiskError> {

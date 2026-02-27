@@ -1,11 +1,20 @@
-# stty -isig
+#! /usr/bin/env bash
+set -eou pipefail
 
-vfkit \
-  --cpus 4 \
-  --memory 4096 \
-    --bootloader "linux,kernel=../target/boxos/arch/arm64/boot/Image,initrd=../target/boxos/initramfs,cmdline=root=/dev/vda rw console=hvc0" \
-  --device virtio-blk,path=./arch.img \
-  --device virtio-net,nat \
-  --device virtio-serial,stdio
+host="root@192.168.64.204"
+opts="-i keys/arch-boot -o Port=11838 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlPath=".tmp/cm-%r@%h:%p""
 
-stty isig
+mkdir -p .tmp
+
+# Start (or ensure) a master connection
+ssh $opts -o ControlMaster=auto -o ControlPersist=10m -Nf $host
+
+trap 'ssh $opts -O exit $host 2>/dev/null' EXIT
+
+# Reuse it for commands (no re-auth)
+ssh $opts "$host" 'uname -a'
+ssh $opts "$host" 'id'
+
+ssh $opts $host "bash -s" < ./setup.sh
+
+# ssh $opts -O exit $host

@@ -3,7 +3,7 @@ mod cidata_iso9660;
 pub mod directories;
 pub mod driver;
 pub mod host_user;
-pub mod image_store;
+pub mod images;
 pub mod instance;
 pub mod instance_control;
 pub mod instance_daemon;

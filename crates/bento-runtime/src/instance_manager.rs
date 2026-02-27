@@ -20,6 +20,7 @@ use crate::{
     directories::Directory,
     driver::get_driver_for,
     host_user,
+    images::capabilities::{Capability, GuestCapabilities},
     instance::{
         resolve_mount_location, validate_network_mode, DiskConfig, DiskRole, Instance,
         InstanceConfig, InstanceFile, InstanceStatus, MountConfig, NetworkConfig,
@@ -193,20 +194,25 @@ impl<D: Daemon> InstanceManager<D> {
         driver.validate()?;
         driver.create()?;
 
-        let host_user =
-            host_user::current_host_user().map_err(|err| InstanceError::GenericError {
-                reason: format!("resolve current host user failed: {err}"),
-            })?;
-        let user_keys =
-            ssh_keys::ensure_user_ssh_keys().map_err(|err| InstanceError::GenericError {
-                reason: format!("ensure user SSH keys failed: {err}"),
-            })?;
+        let should_inject_cidata = inst.config.capabilities.supports(Capability::CloudInit)
+            || inst.config.userdata_path.is_some();
 
-        cidata::build_cidata_iso(&inst, &host_user, &user_keys.public_key_openssh).map_err(
-            |err| InstanceError::GenericError {
-                reason: format!("build cidata ISO failed: {err}"),
-            },
-        )?;
+        if should_inject_cidata {
+            let host_user =
+                host_user::current_host_user().map_err(|err| InstanceError::GenericError {
+                    reason: format!("resolve current host user failed: {err}"),
+                })?;
+            let user_keys =
+                ssh_keys::ensure_user_ssh_keys().map_err(|err| InstanceError::GenericError {
+                    reason: format!("ensure user SSH keys failed: {err}"),
+                })?;
+
+            cidata::build_cidata_iso(&inst, &host_user, &user_keys.public_key_openssh).map_err(
+                |err| InstanceError::GenericError {
+                    reason: format!("build cidata ISO failed: {err}"),
+                },
+            )?;
+        }
 
         Ok(inst)
     }
@@ -416,6 +422,8 @@ pub struct InstanceCreateOptions {
     pub disks: Vec<PathBuf>,
     pub mounts: Vec<MountConfig>,
     pub network: Option<NetworkConfig>,
+    pub capabilities: GuestCapabilities,
+    pub userdata_path: Option<PathBuf>,
 }
 
 impl Default for InstanceCreateOptions {
@@ -428,6 +436,8 @@ impl Default for InstanceCreateOptions {
             disks: Vec::new(),
             mounts: Vec::new(),
             network: None,
+            capabilities: GuestCapabilities::default(),
+            userdata_path: None,
         }
     }
 }
@@ -467,6 +477,16 @@ impl InstanceCreateOptions {
         self.network = network;
         self
     }
+
+    pub fn with_capabilities(mut self, capabilities: GuestCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
+    pub fn with_userdata(mut self, userdata_path: Option<PathBuf>) -> Self {
+        self.userdata_path = userdata_path;
+        self
+    }
 }
 
 fn apply_create_options(
@@ -488,6 +508,8 @@ fn apply_create_options(
         .collect();
     config.mounts = normalize_mounts(&options.mounts)?;
     config.network = options.network;
+    config.capabilities = options.capabilities;
+    config.userdata_path = options.userdata_path;
 
     Ok(())
 }

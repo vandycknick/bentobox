@@ -29,7 +29,9 @@ pub struct BentoCtlCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    Create(create::Cmd),
+    New(create::Cmd),
+    #[command(name = "create", hide = true)]
+    CreateAlias(create::Cmd),
     Start(start::Cmd),
     Stop(stop::Cmd),
     Shell(shell::Cmd),
@@ -47,7 +49,8 @@ pub enum Command {
 impl Display for Command {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Command::Create(cmd) => write!(f, "create {}", cmd),
+            Command::New(cmd) => write!(f, "new {}", cmd),
+            Command::CreateAlias(cmd) => write!(f, "new {}", cmd),
             Command::Start(cmd) => write!(f, "start {}", cmd),
             Command::Stop(cmd) => write!(f, "stop {}", cmd),
             Command::Shell(cmd) => write!(f, "shell {}", cmd),
@@ -69,7 +72,8 @@ impl BentoCtlCmd {
 
     fn invoke_sub_command(&self) -> eyre::Result<()> {
         match &self.cmd {
-            Command::Create(cmd) => cmd.run(),
+            Command::New(cmd) => cmd.run(),
+            Command::CreateAlias(cmd) => cmd.run(),
             Command::Start(cmd) => cmd.run(),
             Command::Stop(cmd) => cmd.run(),
             Command::Shell(cmd) => cmd.run(),
