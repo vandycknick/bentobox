@@ -1,15 +1,35 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
 use eyre::Context;
 use serde::Serialize;
 
-use crate::cidata_iso9660::{write_cidata_iso, CidataEntry};
+use crate::global_config::{ensure_guest_agent_binary, GlobalConfig};
 use crate::host_user::HostUser;
 use crate::instance::{resolve_mount_location, Instance, InstanceFile, NetworkMode};
+
+const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-instance-guest";
+const GUEST_AGENT_INSTALL_SCRIPT_ENTRY: &str = "bento-install-guest-agent.sh";
+const GUEST_AGENT_BOOTSTRAP_SCRIPT: &str = "/var/lib/cloud/scripts/per-boot/00-bento.bootstrap.sh";
+const GUEST_BOOTSTRAP_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-bootstrap.sh");
+const GUEST_INSTALL_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-install.sh");
+
+#[derive(Debug, Clone)]
+struct CidataEntry {
+    name: String,
+    contents: Vec<u8>,
+}
 
 pub fn build_cidata_iso(
     inst: &Instance,
     host_user: &HostUser,
     ssh_public_key: &str,
 ) -> eyre::Result<()> {
+    let global_config = GlobalConfig::load()?;
+    let agent_binary_path = ensure_guest_agent_binary(&global_config)?;
+    let guest_agent_binary = std::fs::read(agent_binary_path)
+        .with_context(|| format!("read guest agent binary {}", agent_binary_path.display()))?;
+
     let user_data = render_user_data(inst, host_user, ssh_public_key)?;
     let meta_data = render_meta_data(inst)?;
     let network_config = render_network_config_for_instance(inst)?;
@@ -23,6 +43,14 @@ pub fn build_cidata_iso(
             name: "meta-data".to_string(),
             contents: meta_data.into_bytes(),
         },
+        CidataEntry {
+            name: GUEST_AGENT_CIDATA_ENTRY.to_string(),
+            contents: guest_agent_binary,
+        },
+        CidataEntry {
+            name: GUEST_AGENT_INSTALL_SCRIPT_ENTRY.to_string(),
+            contents: GUEST_INSTALL_SCRIPT_CONTENT.as_bytes().to_vec(),
+        },
     ];
 
     if let Some(network_config) = network_config {
@@ -32,10 +60,93 @@ pub fn build_cidata_iso(
         });
     }
 
-    write_cidata_iso(&iso_path, "CIDATA", &files)
+    write_cidata_iso_hdiutil(&iso_path, "CIDATA", &files)
         .with_context(|| format!("build cidata ISO at {}", iso_path.display()))?;
 
     Ok(())
+}
+
+fn write_cidata_iso_hdiutil(
+    output_path: &Path,
+    volume_label: &str,
+    entries: &[CidataEntry],
+) -> eyre::Result<()> {
+    let staging_root = make_temp_dir("bento-cidata")?;
+    for entry in entries {
+        let file_path = staging_root.join(&entry.name);
+        std::fs::write(&file_path, &entry.contents)
+            .with_context(|| format!("write cidata entry {}", file_path.display()))?;
+    }
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create output directory {}", parent.display()))?;
+    }
+
+    let output_prefix = make_temp_path("bento-cidata-output");
+    let status = Command::new("hdiutil")
+        .arg("makehybrid")
+        .arg("-iso")
+        .arg("-joliet")
+        .arg("-default-volume-name")
+        .arg(volume_label)
+        .arg("-o")
+        .arg(&output_prefix)
+        .arg(&staging_root)
+        .status()
+        .context("run hdiutil makehybrid")?;
+
+    if !status.success() {
+        return Err(eyre::eyre!(
+            "hdiutil makehybrid failed with status {}",
+            status
+        ));
+    }
+
+    let generated = resolve_hdiutil_output_path(&output_prefix)?;
+    if output_path.exists() {
+        std::fs::remove_file(output_path)
+            .with_context(|| format!("remove existing output {}", output_path.display()))?;
+    }
+    std::fs::rename(&generated, output_path).with_context(|| {
+        format!(
+            "move generated iso from {} to {}",
+            generated.display(),
+            output_path.display()
+        )
+    })?;
+
+    let _ = std::fs::remove_dir_all(staging_root);
+    Ok(())
+}
+
+fn resolve_hdiutil_output_path(prefix: &Path) -> eyre::Result<PathBuf> {
+    let candidates = [
+        prefix.to_path_buf(),
+        PathBuf::from(format!("{}.iso", prefix.display())),
+        PathBuf::from(format!("{}.cdr", prefix.display())),
+        PathBuf::from(format!("{}.iso.cdr", prefix.display())),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or_else(|| eyre::eyre!("hdiutil did not produce an output image"))
+}
+
+fn make_temp_dir(prefix: &str) -> eyre::Result<PathBuf> {
+    let path = make_temp_path(prefix);
+    std::fs::create_dir_all(&path)
+        .with_context(|| format!("create temporary directory {}", path.display()))?;
+    Ok(path)
+}
+
+fn make_temp_path(prefix: &str) -> PathBuf {
+    let nonce = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_nanos(),
+        Err(_) => 0,
+    };
+    std::env::temp_dir().join(format!("{prefix}-{nonce}"))
 }
 
 #[derive(Serialize)]
@@ -43,6 +154,8 @@ struct CloudConfig {
     users: Vec<CloudUser>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     mounts: Vec<[String; 6]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    write_files: Vec<WriteFile>,
 }
 
 #[derive(Serialize)]
@@ -55,6 +168,14 @@ struct CloudUser {
     sudo: String,
     lock_passwd: bool,
     ssh_authorized_keys: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct WriteFile {
+    path: String,
+    owner: String,
+    permissions: String,
+    content: String,
 }
 
 #[derive(Serialize)]
@@ -112,9 +233,17 @@ fn render_user_data(
         ]);
     }
 
+    let write_files = vec![WriteFile {
+        path: GUEST_AGENT_BOOTSTRAP_SCRIPT.to_string(),
+        owner: "root:root".to_string(),
+        permissions: "0755".to_string(),
+        content: GUEST_BOOTSTRAP_SCRIPT_CONTENT.to_string(),
+    }];
+
     let cloud_config = CloudConfig {
         users: vec![user],
         mounts,
+        write_files,
     };
     let mut yaml = String::from("#cloud-config\n");
     yaml.push_str(
@@ -251,6 +380,38 @@ mod tests {
 
         assert!(user_data.contains("- mount0"));
         assert!(user_data.contains(&format!("- {}", home.display())));
+    }
+
+    #[test]
+    fn user_data_contains_guest_agent_install_steps() {
+        let host_user = HostUser {
+            name: "nickvd".to_string(),
+            uid: 504,
+            gecos: "Nick Van Dyck".to_string(),
+        };
+        let inst = instance_with_mounts(Vec::new());
+
+        let user_data = render_user_data(
+            &inst,
+            &host_user,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestValue nickvd@host",
+        )
+        .expect("render user-data");
+
+        assert!(user_data.contains(GUEST_AGENT_BOOTSTRAP_SCRIPT));
+        assert!(user_data.contains(GUEST_AGENT_INSTALL_SCRIPT_ENTRY));
+        assert!(user_data.contains("/run/bento-cidata"));
+        assert!(user_data.contains("/dev/disk/by-label/CIDATA"));
+    }
+
+    #[test]
+    fn guest_agent_payload_contains_systemd_install_steps() {
+        let payload = GUEST_INSTALL_SCRIPT_CONTENT;
+
+        assert!(payload.contains("/usr/local/bin/bento-instance-guest"));
+        assert!(payload.contains("/etc/systemd/system/bento-instance-guest.service"));
+        assert!(payload.contains("systemctl daemon-reload"));
+        assert!(payload.contains("systemctl enable"));
     }
 
     #[test]

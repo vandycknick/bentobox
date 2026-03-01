@@ -1,7 +1,7 @@
 #! /usr/bin/env bash
 set -eou pipefail
 
-host="root@192.168.64.204"
+host="root@192.168.64.212"
 opts="-i keys/arch-boot -o Port=11838 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ControlPath=".tmp/cm-%r@%h:%p""
 
 mkdir -p .tmp

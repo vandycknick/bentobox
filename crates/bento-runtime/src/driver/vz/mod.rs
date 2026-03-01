@@ -1,6 +1,7 @@
 use std::os::fd::{IntoRawFd, OwnedFd};
 use std::time::Duration;
 
+use bento_protocol::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
 use nix::unistd::pipe;
 use objc2::AllocAnyThread;
 use objc2::{rc::Retained, ClassType};
@@ -172,9 +173,11 @@ unsafe fn create_vm_config(inst: &Instance) -> Result<VmBootstrap, DriverError> 
     let initramfs_url = NSURL::initFileURLWithPath(NSURL::alloc(), &initramfs);
     bootloader.setInitialRamdiskURL(Some(&initramfs_url));
 
-    // FIX: How should I handle this?
-    let command_line = "console=hvc0 rd.break=initqueue root=/dev/vda";
-    bootloader.setCommandLine(&NSString::from_str(command_line));
+    let command_line = format!(
+        "console=hvc0 rd.break=initqueue root=/dev/vda {}={}",
+        KERNEL_PARAM_DISCOVERY_PORT, DEFAULT_DISCOVERY_PORT
+    );
+    bootloader.setCommandLine(&NSString::from_str(&command_line));
 
     // TODO: rename this var, can't be config because otherwise I'll shadow
     let c = VZVirtualMachineConfiguration::new();

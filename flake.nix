@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     systems.url = "github:nix-systems/default";
+    rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
   outputs =
@@ -11,6 +12,7 @@
       self,
       nixpkgs,
       systems,
+      rust-overlay,
     }:
     let
       forEachSystem = nixpkgs.lib.genAttrs (import systems);
@@ -21,6 +23,7 @@
         let
           pkgs = import nixpkgs {
             inherit system;
+            overlays = [ (import rust-overlay) ];
           };
           bentoctlToml = fromTOML (builtins.readFile ./crates/bentoctl/Cargo.toml);
           pname = bentoctlToml.package.name;
@@ -60,14 +63,24 @@
         let
           pkgs = import nixpkgs {
             inherit system;
+            overlays = [ (import rust-overlay) ];
+          };
+          rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+            targets = [ "aarch64-unknown-linux-musl" ];
+            extensions = [
+              "rust-src"
+              "rustfmt"
+              "clippy"
+              "rust-analyzer"
+            ];
           };
         in
         {
           default = pkgs.mkShell {
             packages = [
-              pkgs.cargo
-              pkgs.rustc
-              pkgs.rust-analyzer
+              rustToolchain
+              pkgs.zig
+              pkgs.cargo-zigbuild
               pkgs.docker
               pkgs.vfkit
             ];

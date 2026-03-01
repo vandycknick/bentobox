@@ -1,4 +1,14 @@
 KERNEL_VERSION	:= 6.6.72
+GUEST_TARGET := aarch64-unknown-linux-musl
+GUEST_BIN := $(CURDIR)/target/$(GUEST_TARGET)/release/bento-instance-guest
+BENTO_CONFIG := $(HOME)/.config/bento/config.yaml
+
+.PHONY: build-guest-agent
+build-guest-agent:
+	cargo zigbuild -p bento-instance-guest --target $(GUEST_TARGET) --release
+	mkdir -p "$(HOME)/.config/bento"
+	printf "guest:\n  agent_binary: \"%s\"\n" "$(GUEST_BIN)" > "$(BENTO_CONFIG)"
+	@echo "Updated $(BENTO_CONFIG) -> $(GUEST_BIN)"
 
 .PHONY: build-kernel
 build-kernel: .tmp/boxos-builder

@@ -1,5 +1,7 @@
+use bento_protocol::{GuestDiscoveryClient, HealthStatus, ServiceEndpoint, DEFAULT_DISCOVERY_PORT};
 use chrono::Utc;
 use eyre::Context;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
@@ -8,14 +10,18 @@ use std::collections::{BTreeMap, HashMap};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
 };
+use std::task::{Context as TaskContext, Poll};
 use std::thread;
 use std::time::Duration;
 use std::{fs, io};
-use std::{fs::OpenOptions, io::Write, path::Path};
+use std::{fs::OpenOptions, io::Read, io::Write, path::Path};
+use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::driver::{self, OpenDeviceRequest, OpenDeviceResponse};
 use crate::{
@@ -263,7 +269,6 @@ fn handle_client(
     serial_runtime: Arc<SerialRuntime>,
 ) -> eyre::Result<()> {
     let request = ControlRequest::read_from(&mut stream).context("read control request")?;
-    let service_registry = ServiceRegistry::default();
 
     if request.version != CONTROL_PROTOCOL_VERSION {
         let response = ControlResponse::v1_error(
@@ -282,6 +287,19 @@ fn handle_client(
 
     match request.body {
         ControlRequestBody::ListServices => {
+            let service_registry = match ServiceRegistry::discover(driver) {
+                Ok(service_registry) => service_registry,
+                Err(err) => {
+                    ControlResponse::v1_error(
+                        request.id,
+                        ControlErrorCode::ServiceUnavailable,
+                        format!("discover guest services failed: {err}"),
+                    )
+                    .write_to(&mut stream)
+                    .context("write control response")?;
+                    return Ok(());
+                }
+            };
             let response = ControlResponse::v1_services(request.id, service_registry.describe());
             response
                 .write_to(&mut stream)
@@ -289,19 +307,35 @@ fn handle_client(
         }
         ControlRequestBody::OpenService { service, options } => {
             let id = request.id;
-            let target = match service_registry.resolve(&service) {
-                Some(target) => target,
-                None => {
-                    let response = ControlResponse::v1_error(
-                        id,
-                        ControlErrorCode::UnknownService,
-                        format!("service '{service}' is not registered"),
-                    );
-                    response
+            let target = if service == SERVICE_SERIAL {
+                Some(ServiceTarget::Serial)
+            } else {
+                let service_registry = match ServiceRegistry::discover(driver) {
+                    Ok(service_registry) => service_registry,
+                    Err(err) => {
+                        ControlResponse::v1_error(
+                            id,
+                            ControlErrorCode::ServiceUnavailable,
+                            format!("discover guest services failed: {err}"),
+                        )
                         .write_to(&mut stream)
                         .context("write control response")?;
-                    return Ok(());
-                }
+                        return Ok(());
+                    }
+                };
+                service_registry.resolve(&service)
+            };
+
+            let Some(target) = target else {
+                let response = ControlResponse::v1_error(
+                    id,
+                    ControlErrorCode::UnknownService,
+                    format!("service '{service}' is not registered"),
+                );
+                response
+                    .write_to(&mut stream)
+                    .context("write control response")?;
+                return Ok(());
             };
 
             match target {
@@ -410,6 +444,17 @@ struct ServiceRegistry {
 }
 
 impl ServiceRegistry {
+    fn discover(driver: &dyn crate::driver::Driver) -> eyre::Result<Self> {
+        let mut by_name = BTreeMap::new();
+        by_name.insert(SERVICE_SERIAL.to_string(), ServiceTarget::Serial);
+
+        for endpoint in fetch_guest_services(driver)? {
+            by_name.insert(endpoint.name, ServiceTarget::VsockPort(endpoint.port));
+        }
+
+        Ok(Self { by_name })
+    }
+
     fn resolve(&self, name: &str) -> Option<ServiceTarget> {
         self.by_name.get(name).copied()
     }
@@ -419,16 +464,6 @@ impl ServiceRegistry {
             .keys()
             .map(|name| ServiceDescriptor { name: name.clone() })
             .collect()
-    }
-}
-
-impl Default for ServiceRegistry {
-    fn default() -> Self {
-        let mut by_name = BTreeMap::new();
-        by_name.insert(SERVICE_SSH.to_string(), ServiceTarget::VsockPort(2222));
-        by_name.insert(SERVICE_SERIAL.to_string(), ServiceTarget::Serial);
-
-        Self { by_name }
     }
 }
 
@@ -638,6 +673,153 @@ fn proxy_streams(mut client_stream: UnixStream, vsock_fd: OwnedFd) -> io::Result
         Ok(_) => Ok(()),
         Err(_) => Err(io::Error::other("relay thread panicked")),
     }
+}
+
+#[derive(Debug)]
+struct AsyncFdStream {
+    inner: AsyncFd<std::fs::File>,
+}
+
+impl AsyncFdStream {
+    fn new(file: std::fs::File) -> io::Result<Self> {
+        set_nonblocking(&file)?;
+        Ok(Self {
+            inner: AsyncFd::new(file)?,
+        })
+    }
+
+    fn poll_read_priv(
+        &self,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let bytes =
+            unsafe { &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]) };
+
+        loop {
+            let mut guard = futures::ready!(self.inner.poll_read_ready(cx))?;
+            match guard.try_io(|inner| inner.get_ref().read(bytes)) {
+                Ok(Ok(n)) => {
+                    unsafe {
+                        buf.assume_init(n);
+                    }
+                    buf.advance(n);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Ok(Err(err)) => return Poll::Ready(Err(err)),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    fn poll_write_priv(&self, cx: &mut TaskContext<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        loop {
+            let mut guard = futures::ready!(self.inner.poll_write_ready(cx))?;
+            match guard.try_io(|inner| inner.get_ref().write(buf)) {
+                Ok(Ok(n)) => return Poll::Ready(Ok(n)),
+                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Ok(Err(err)) => return Poll::Ready(Err(err)),
+                Err(_) => continue,
+            }
+        }
+    }
+}
+
+impl AsyncRead for AsyncFdStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.poll_read_priv(cx, buf)
+    }
+}
+
+impl AsyncWrite for AsyncFdStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.poll_write_priv(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        self.inner.get_ref().flush()?;
+        Poll::Ready(Ok(()))
+    }
+}
+
+fn set_nonblocking(file: &std::fs::File) -> io::Result<()> {
+    let flags = fcntl(file, FcntlArg::F_GETFL)
+        .map(OFlag::from_bits_truncate)
+        .map_err(|err| io::Error::other(format!("fcntl(F_GETFL) failed: {err}")))?;
+
+    fcntl(file, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))
+        .map_err(|err| io::Error::other(format!("fcntl(F_SETFL, O_NONBLOCK) failed: {err}")))?;
+
+    Ok(())
+}
+
+fn fetch_guest_services(driver: &dyn crate::driver::Driver) -> eyre::Result<Vec<ServiceEndpoint>> {
+    let stream = match driver.open_device(OpenDeviceRequest::Vsock {
+        port: DEFAULT_DISCOVERY_PORT,
+    })? {
+        OpenDeviceResponse::Vsock { stream } => stream,
+        OpenDeviceResponse::Serial { .. } => {
+            eyre::bail!("driver returned serial device when opening guest discovery port")
+        }
+    };
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime for guest discovery")?;
+
+    runtime.block_on(async move {
+        use tarpc::context;
+        use tarpc::serde_transport;
+        use tarpc::tokio_serde::formats::Bincode;
+        use tarpc::tokio_util::codec::LengthDelimitedCodec;
+
+        let stream = AsyncFdStream::new(std::fs::File::from(stream))
+            .context("wrap discovery stream in async fd")?;
+        let framed = LengthDelimitedCodec::builder().new_framed(stream);
+        let transport = serde_transport::new(framed, Bincode::default());
+        let client = GuestDiscoveryClient::new(tarpc::client::Config::default(), transport).spawn();
+
+        let HealthStatus { ok } =
+            tokio::time::timeout(Duration::from_secs(3), client.health(context::current()))
+                .await
+                .map_err(|_| eyre::eyre!("guest discovery health request timed out"))?
+                .map_err(|err| eyre::eyre!("query guest discovery health failed: {err}"))?;
+
+        if !ok {
+            eyre::bail!("guest discovery service reported unhealthy");
+        }
+
+        let endpoints = tokio::time::timeout(
+            Duration::from_secs(3),
+            client.list_services(context::current()),
+        )
+        .await
+        .map_err(|_| eyre::eyre!("guest discovery list_services request timed out"))?
+        .map_err(|err| eyre::eyre!("query guest service list failed: {err}"))?;
+
+        if endpoints
+            .iter()
+            .all(|endpoint| endpoint.name != SERVICE_SSH)
+        {
+            eyre::bail!("guest discovery did not report ssh service");
+        }
+
+        Ok(endpoints)
+    })
 }
 
 #[must_use = "hold this guard for the process lifetime to keep PID file cleanup active"]
