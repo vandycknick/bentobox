@@ -293,8 +293,8 @@ Acceptance:
 - [x] Guest migrated to `tokio-vsock` for async accept and stream handling
 - [x] Shared discovery protocol moved to `crates/bento-protocol`
 - [x] Guest no longer depends on `bento-runtime`
-- [ ] Phase 1.1 start waits for guest discovery readiness
-- [ ] Phase 1.1 shell-proxy retry/backoff for transient guest startup failures
+- [x] Phase 1.1 start waits for guest discovery readiness
+- [x] Phase 1.1 shell-proxy retry/backoff for transient guest startup failures
 - [ ] Phase 1 commit created
 - [ ] Phase 2 started (async top-level instanced, multi-thread runtime)
 - [ ] Phase 3 started (async tunnel paths)
@@ -319,5 +319,4 @@ Validation completed:
 - `cargo clippy --all --benches --tests --examples --all-features` (passes with pre-existing warnings outside phase 1 scope)
 
 Open items before closing phase 1:
-- Implement phase 1.1 readiness hardening (`start` guest readiness wait + shell retry/backoff).
 - Create the phase 1 git commit.

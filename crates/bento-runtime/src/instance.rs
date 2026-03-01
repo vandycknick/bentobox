@@ -8,7 +8,7 @@ use std::{
 use thiserror::Error;
 
 use crate::directories::Directory;
-use crate::images::capabilities::GuestCapabilities;
+use crate::images::capabilities::{Capability, GuestCapabilities};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -262,6 +262,11 @@ impl Instance {
 
     pub fn capabilities(&self) -> &GuestCapabilities {
         &self.config.capabilities
+    }
+
+    pub fn expects_guest_agent(&self) -> bool {
+        self.config.capabilities.supports(Capability::CloudInit)
+            || self.config.userdata_path.is_some()
     }
 
     pub fn root_disk(&self) -> Result<Option<InstanceDisk>, InstanceDiskError> {

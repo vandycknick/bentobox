@@ -20,13 +20,13 @@ use crate::{
     directories::Directory,
     driver::get_driver_for,
     host_user,
-    images::capabilities::{Capability, GuestCapabilities},
+    images::capabilities::GuestCapabilities,
     instance::{
         resolve_mount_location, validate_network_mode, DiskConfig, DiskRole, Instance,
         InstanceConfig, InstanceFile, InstanceStatus, MountConfig, NetworkConfig,
     },
     log_watcher::{LogWatcher, StreamKind, WatchError},
-    ssh_keys,
+    service_readiness, ssh_keys,
     utils::read_pid_file,
 };
 
@@ -194,8 +194,7 @@ impl<D: Daemon> InstanceManager<D> {
         driver.validate()?;
         driver.create()?;
 
-        let should_inject_cidata = inst.config.capabilities.supports(Capability::CloudInit)
-            || inst.config.userdata_path.is_some();
+        let should_inject_cidata = inst.expects_guest_agent();
 
         if should_inject_cidata {
             let host_user =
@@ -360,7 +359,22 @@ impl<D: Daemon> InstanceManager<D> {
 
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line.text) {
                         match v.get("type").and_then(|t| t.as_str()) {
-                            Some("Running") => return Ok(()),
+                            Some("Running") => {
+                                if inst.expects_guest_agent() {
+                                    service_readiness::wait_for_services(
+                                        &inst.file(InstanceFile::InstancedSocket),
+                                    )
+                                    .map_err(|err| {
+                                        InstanceError::GenericError {
+                                            reason: format!(
+                                            "guest service discovery readiness check failed: {err}"
+                                        ),
+                                        }
+                                    })?;
+                                }
+
+                                return Ok(());
+                            }
                             Some("Exiting") => {
                                 return Err(InstanceError::GenericError {
                                     reason: "instanced exited before running".to_string(),
