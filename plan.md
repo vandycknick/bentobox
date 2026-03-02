@@ -296,8 +296,8 @@ Acceptance:
 - [x] Phase 1.1 start waits for guest discovery readiness
 - [x] Phase 1.1 shell-proxy retry/backoff for transient guest startup failures
 - [ ] Phase 1 commit created
-- [ ] Phase 2 started (async top-level instanced, multi-thread runtime)
-- [ ] Phase 3 started (async tunnel paths)
+- [x] Phase 2 started (async top-level instanced, multi-thread runtime)
+- [x] Phase 3 started (async tunnel paths)
 - [ ] Phase 4 started (driver async boundary)
 
 ## Current implementation status
@@ -307,9 +307,12 @@ Completed in code:
 - Added new guest crate `crates/bento-instance-guest` with tarpc discovery server, `/proc/cmdline` control-port parsing, random SSH service port allocation, and SSH relay to `127.0.0.1:22`.
 - Refactored guest vsock networking to native async `tokio-vsock` and removed the custom `AsyncVsock` adapter.
 - Renamed the guest discovery implementation type from `GuestDiscoveryImpl` to `GuestAgentServer`.
-- Updated `instanced` to discover guest services via tarpc in `crates/bento-runtime/src/instance_daemon.rs` while keeping top-level daemon flow synchronous.
+- Updated `instanced` to discover guest services via tarpc in `crates/bento-runtime/src/instance_daemon.rs` and later migrated the top-level daemon flow to async.
 - Appended kernel arg `bento.guest.control_port=1027` in `crates/bento-runtime/src/driver/vz/mod.rs`.
 - Added global config loader in `crates/bento-runtime/src/global_config.rs` and wired CIDATA injection + cloud-init systemd setup in `crates/bento-runtime/src/cidata.rs`.
+- Started phase 2 by making `InstanceDaemon::run` async and moving runtime setup to `bentoctl instanced`.
+- Started phase 2 by migrating CLI<->instanced control RPCs to tarpc with control models in `crates/bento-protocol/src/control.rs`.
+- Started phase 3 by introducing per-request Unix tunnel sockets for opened services and async vsock relay plumbing.
 
 Validation completed:
 - `cargo fmt`

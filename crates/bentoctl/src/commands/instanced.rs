@@ -16,6 +16,11 @@ impl Display for Cmd {
 
 impl Cmd {
     pub fn run(&self) -> eyre::Result<()> {
-        InstanceDaemon::new(&self.name).run()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| eyre::eyre!("build tokio runtime for instanced failed: {err}"))?;
+
+        runtime.block_on(InstanceDaemon::new(&self.name).run())
     }
 }

@@ -1,4 +1,4 @@
-use bento_protocol::{GuestDiscovery, HealthStatus, ServiceEndpoint};
+use bento_protocol::guest::{GuestDiscovery, HealthStatus, ServiceEndpoint};
 use futures::StreamExt;
 use tarpc::server::{self, Channel};
 use tokio_vsock::VsockStream;

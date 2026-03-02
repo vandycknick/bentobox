@@ -4,11 +4,10 @@ use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use bento_runtime::instance::{InstanceFile, InstanceStatus};
-use bento_runtime::instance_control::{
-    ControlErrorCode, ControlRequest, ControlResponse, ControlResponseBody,
-    CONTROL_PROTOCOL_VERSION, SERVICE_SSH,
+use bento_protocol::control::{
+    ControlErrorCode, ControlPlaneClient, OpenServiceRequest, SERVICE_SSH,
 };
+use bento_runtime::instance::{InstanceFile, InstanceStatus};
 use bento_runtime::instance_manager::{InstanceManager, NixDaemon};
 use bento_runtime::service_readiness;
 use clap::Args;
@@ -34,20 +33,21 @@ impl Cmd {
     pub fn run(&self) -> eyre::Result<()> {
         let manager = InstanceManager::new(NixDaemon::new("123"));
         let inst = manager.inspect(&self.name)?;
-        let socket_path = inst.file(InstanceFile::InstancedSocket);
+        let control_socket_path = inst.file(InstanceFile::InstancedSocket);
 
         let should_wait_for_guest_readiness =
             inst.status() == InstanceStatus::Running && inst.expects_guest_agent();
         let deadline = Instant::now() + service_readiness::DEFAULT_SERVICE_READINESS_TIMEOUT;
 
         loop {
-            match try_open_service_once(&socket_path, &self.service) {
+            match open_service_once(&control_socket_path, &self.service) {
                 Ok(stream) => return proxy_stdio(stream),
                 Err(ControlClientError::Fatal { message }) => bail!("{message}"),
                 Err(ControlClientError::Retryable { message }) => {
                     if !should_wait_for_guest_readiness {
                         bail!("{message}");
                     }
+
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     if remaining.is_zero() {
                         bail!(
@@ -57,7 +57,7 @@ impl Cmd {
                     }
 
                     let services = service_readiness::wait_for_services_with_timeout(
-                        &socket_path,
+                        &control_socket_path,
                         remaining,
                         Duration::from_secs(1),
                     )
@@ -86,92 +86,60 @@ impl Cmd {
     }
 }
 
-fn try_open_service_once(
-    socket_path: &std::path::Path,
+fn open_service_once(
+    control_socket_path: &std::path::Path,
     service: &str,
 ) -> Result<UnixStream, ControlClientError> {
-    let client = ControlClient::connect(socket_path)?;
-    client.open_service(service)
-}
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| ControlClientError::Fatal {
+            message: format!("build tokio runtime failed: {err}"),
+        })?;
 
-struct ControlClient {
-    stream: UnixStream,
-}
+    let tunnel_socket_path = runtime.block_on(async move {
+        use tarpc::context;
+        use tarpc::serde_transport;
+        use tarpc::tokio_serde::formats::Bincode;
+        use tarpc::tokio_util::codec::LengthDelimitedCodec;
 
-impl ControlClient {
-    fn connect(path: &std::path::Path) -> Result<Self, ControlClientError> {
-        let stream = match UnixStream::connect(path) {
-            Ok(stream) => stream,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ControlClientError::Retryable {
-                    message: format!(
-                        "instanced_unreachable: control socket {} is missing, make sure the VM is running",
-                        path.display()
-                    ),
-                });
-            }
-            Err(err) => {
-                return Err(classify_io_error(
-                    "connect control socket",
-                    io::Error::new(err.kind(), format!("{} ({})", err, path.display())),
-                ))
-            }
-        };
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::UnixStream::connect(control_socket_path),
+        )
+        .await
+        .map_err(|_| ControlClientError::Retryable {
+            message: "connect control socket timed out".to_string(),
+        })
+        .and_then(|result| {
+            result.map_err(|err| classify_io_error("connect control socket", err))
+        })?;
 
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .map_err(|err| classify_io_error("set control socket read timeout", err))?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .map_err(|err| classify_io_error("set control socket write timeout", err))?;
+        let framed = LengthDelimitedCodec::builder().new_framed(stream);
+        let transport = serde_transport::new(framed, Bincode::default());
+        let client = ControlPlaneClient::new(tarpc::client::Config::default(), transport).spawn();
 
-        Ok(Self { stream })
-    }
+        let request = OpenServiceRequest::new(service.to_string());
+        let rpc_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.open_service(context::current(), request),
+        )
+        .await
+        .map_err(|_| ControlClientError::Retryable {
+            message: "open_service request timed out".to_string(),
+        })?;
 
-    fn open_service(mut self, service: &str) -> Result<UnixStream, ControlClientError> {
-        let request = ControlRequest::v1_open_service("shell-proxy", service);
-        request
-            .write_to(&mut self.stream)
-            .map_err(|err| classify_io_error("write shell request", err))?;
+        let service_result = rpc_result.map_err(|err| ControlClientError::Retryable {
+            message: format!("open_service transport failed: {err}"),
+        })?;
 
-        loop {
-            let response = ControlResponse::read_from(&mut self.stream)
-                .map_err(|err| classify_io_error("read shell response", err))?;
+        service_result
+            .map(|response| response.socket_path)
+            .map_err(classify_control_error)
+    })?;
 
-            if response.version != CONTROL_PROTOCOL_VERSION {
-                return Err(ControlClientError::Fatal {
-                    message: format!(
-                        "unsupported_version: daemon returned protocol version {}, expected {}",
-                        response.version, CONTROL_PROTOCOL_VERSION
-                    ),
-                });
-            }
-
-            match response.body {
-                ControlResponseBody::Opened => {
-                    self.stream.set_read_timeout(None).map_err(|err| {
-                        classify_io_error("clear control socket read timeout", err)
-                    })?;
-                    self.stream.set_write_timeout(None).map_err(|err| {
-                        classify_io_error("clear control socket write timeout", err)
-                    })?;
-                    return Ok(self.stream);
-                }
-                ControlResponseBody::Starting { .. } => {
-                    continue;
-                }
-                ControlResponseBody::Error { code, message } => {
-                    return Err(classify_control_error(&code, &message));
-                }
-                ControlResponseBody::Services { .. } => {
-                    return Err(ControlClientError::Fatal {
-                        message: "invalid_response: expected opened response for service request"
-                            .to_string(),
-                    });
-                }
-            }
-        }
-    }
+    UnixStream::connect(&tunnel_socket_path)
+        .map_err(|err| classify_io_error("connect service tunnel socket", err))
 }
 
 enum ControlClientError {
@@ -179,15 +147,15 @@ enum ControlClientError {
     Fatal { message: String },
 }
 
-fn classify_control_error(code: &ControlErrorCode, message: &str) -> ControlClientError {
-    match code {
+fn classify_control_error(err: bento_protocol::control::ControlError) -> ControlClientError {
+    match err.code {
         ControlErrorCode::ServiceUnavailable | ControlErrorCode::InstanceNotRunning => {
             ControlClientError::Retryable {
-                message: render_control_error(code, message),
+                message: render_control_error(&err.code, &err.message),
             }
         }
         _ => ControlClientError::Fatal {
-            message: render_control_error(code, message),
+            message: render_control_error(&err.code, &err.message),
         },
     }
 }

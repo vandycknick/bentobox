@@ -1,15 +1,10 @@
 use std::io;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bento_protocol::control::{ControlErrorCode, ControlPlaneClient, ServiceDescriptor};
 use eyre::bail;
-
-use crate::instance_control::{
-    ControlErrorCode, ControlRequest, ControlResponse, ControlResponseBody, ServiceDescriptor,
-    CONTROL_PROTOCOL_VERSION,
-};
 
 pub const DEFAULT_SERVICE_READINESS_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const DEFAULT_SERVICE_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -57,48 +52,49 @@ pub fn wait_for_services_with_timeout(
 }
 
 fn list_services_once(socket_path: &Path) -> Result<Vec<ServiceDescriptor>, ProbeError> {
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|err| classify_io_error("connect control socket", err))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| ProbeError::Fatal(format!("build tokio runtime failed: {err}")))?;
 
-    stream
-        .set_read_timeout(Some(CONTROL_IO_TIMEOUT))
-        .map_err(|err| classify_io_error("set control socket read timeout", err))?;
-    stream
-        .set_write_timeout(Some(CONTROL_IO_TIMEOUT))
-        .map_err(|err| classify_io_error("set control socket write timeout", err))?;
+    runtime.block_on(async move {
+        use tarpc::context;
+        use tarpc::serde_transport;
+        use tarpc::tokio_serde::formats::Bincode;
+        use tarpc::tokio_util::codec::LengthDelimitedCodec;
 
-    ControlRequest::v1_list_services("guest-service-readiness")
-        .write_to(&mut stream)
-        .map_err(|err| classify_io_error("write list_services request", err))?;
+        let stream = tokio::time::timeout(
+            CONTROL_IO_TIMEOUT,
+            tokio::net::UnixStream::connect(socket_path),
+        )
+        .await
+        .map_err(|_| ProbeError::Retryable("connect control socket timed out".to_string()))
+        .and_then(|result| {
+            result.map_err(|err| classify_io_error("connect control socket", err))
+        })?;
 
-    let response = ControlResponse::read_from(&mut stream)
-        .map_err(|err| classify_io_error("read list_services response", err))?;
+        let framed = LengthDelimitedCodec::builder().new_framed(stream);
+        let transport = serde_transport::new(framed, Bincode::default());
+        let client = ControlPlaneClient::new(tarpc::client::Config::default(), transport).spawn();
 
-    if response.version != CONTROL_PROTOCOL_VERSION {
-        return Err(ProbeError::Fatal(format!(
-            "unsupported_version: daemon returned protocol version {}, expected {}",
-            response.version, CONTROL_PROTOCOL_VERSION
-        )));
-    }
+        let rpc_result =
+            tokio::time::timeout(CONTROL_IO_TIMEOUT, client.list_services(context::current()))
+                .await
+                .map_err(|_| {
+                    ProbeError::Retryable("list_services request timed out".to_string())
+                })?;
 
-    match response.body {
-        ControlResponseBody::Services { services } => Ok(services),
-        ControlResponseBody::Error { code, message } => match code {
-            ControlErrorCode::ServiceUnavailable | ControlErrorCode::InstanceNotRunning => Err(
-                ProbeError::Retryable(format!("{}: {message}", error_code_label(&code))),
-            ),
-            _ => Err(ProbeError::Fatal(format!(
-                "{}: {message}",
-                error_code_label(&code)
-            ))),
-        },
-        ControlResponseBody::Opened => Err(ProbeError::Fatal(
-            "invalid_response: expected services response for list_services request".to_string(),
-        )),
-        ControlResponseBody::Starting { .. } => Err(ProbeError::Retryable(
-            "service_starting: daemon is still preparing guest services".to_string(),
-        )),
-    }
+        let service_result = rpc_result.map_err(|err| {
+            ProbeError::Retryable(format!("list_services transport failed: {err}"))
+        })?;
+
+        service_result.map_err(|err| match err.code {
+            ControlErrorCode::ServiceUnavailable | ControlErrorCode::InstanceNotRunning => {
+                ProbeError::Retryable(format!("{}: {}", error_code_label(&err.code), err.message))
+            }
+            _ => ProbeError::Fatal(format!("{}: {}", error_code_label(&err.code), err.message)),
+        })
+    })
 }
 
 fn classify_io_error(context: &str, err: io::Error) -> ProbeError {

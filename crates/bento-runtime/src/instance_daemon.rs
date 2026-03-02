@@ -1,20 +1,23 @@
-use bento_protocol::{GuestDiscoveryClient, HealthStatus, ServiceEndpoint, DEFAULT_DISCOVERY_PORT};
+use bento_protocol::control::{
+    ControlError, ControlErrorCode, ControlPlane, OpenServiceRequest, OpenServiceResponse,
+    ServiceDescriptor, SERVICE_SERIAL, SERVICE_SSH,
+};
+use bento_protocol::guest::{
+    GuestDiscoveryClient, HealthStatus, ServiceEndpoint, DEFAULT_DISCOVERY_PORT,
+};
 use chrono::Utc;
 use eyre::Context;
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use signal_hook::consts::signal::{SIGINT, SIGTERM};
-use signal_hook::flag;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::os::fd::OwnedFd;
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc, Arc, Mutex,
-};
+use std::rc::Rc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::task::{Context as TaskContext, Poll};
 use std::thread;
 use std::time::Duration;
@@ -22,14 +25,11 @@ use std::{fs, io};
 use std::{fs::OpenOptions, io::Read, io::Write, path::Path};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::UnixListener;
 
 use crate::driver::{self, OpenDeviceRequest, OpenDeviceResponse};
 use crate::{
     instance::InstanceFile,
-    instance_control::{
-        ControlErrorCode, ControlRequest, ControlRequestBody, ControlResponse, ServiceDescriptor,
-        CONTROL_PROTOCOL_VERSION, SERVICE_SERIAL, SERVICE_SSH,
-    },
     instance_manager::{Daemon, InstanceManager},
 };
 
@@ -179,7 +179,7 @@ impl InstanceDaemon {
         Ok(())
     }
 
-    pub fn run(&self) -> eyre::Result<()> {
+    pub async fn run(&self) -> eyre::Result<()> {
         let inst = self.manager.inspect(&self.name)?;
 
         // NOTE: PidFileGuard will auto drop the id.pid file at the end of the run function
@@ -199,35 +199,59 @@ impl InstanceDaemon {
             }
         };
 
+        let driver = Rc::new(RefCell::new(driver));
+        let control_service = ControlService {
+            driver: driver.clone(),
+            serial_runtime: serial_runtime.clone(),
+            instance_dir: inst.dir().to_path_buf(),
+        };
+
         self.emit_event(&InstancedEvent {
             timestamp: Utc::now().to_rfc3339(),
             event_type: InstancedEventType::Running,
             message: None,
         })?;
 
-        let terminated = Arc::new(AtomicBool::new(false));
-        flag::register(SIGINT, terminated.clone()).context("register SIGINT")?;
-        flag::register(SIGTERM, terminated.clone()).context("register SIGTERM")?;
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .context("register SIGINT handler")?;
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("register SIGTERM handler")?;
 
-        while !terminated.load(Ordering::Relaxed) {
-            match socket.listener.accept() {
-                Ok((stream, _)) => {
-                    if let Err(err) = handle_client(stream, &*driver, serial_runtime.clone()) {
-                        eprintln!("[instanced] shell control request failed: {err}");
+        tokio::task::LocalSet::new()
+            .run_until(async move {
+                loop {
+                    tokio::select! {
+                        result = socket.listener.accept() => {
+                            match result {
+                                Ok((stream, _)) => {
+                                    let service = control_service.clone();
+                                    tokio::task::spawn_local(async move {
+                                        if let Err(err) = serve_control_client(stream, service).await {
+                                            eprintln!("[instanced] shell control request failed: {err}");
+                                        }
+                                    });
+                                }
+                                Err(err) => {
+                                    eprintln!("[instanced] control socket accept error: {err}");
+                                    tokio::time::sleep(Duration::from_millis(250)).await;
+                                }
+                            }
+                        }
+                        _ = sigint.recv() => {
+                            break;
+                        }
+                        _ = sigterm.recv() => {
+                            break;
+                        }
                     }
                 }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(50));
-                }
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-                Err(err) => {
-                    eprintln!("[instanced] control socket accept error: {err}");
-                    thread::sleep(Duration::from_millis(250));
-                }
-            }
-        }
+            })
+            .await;
 
-        driver.stop()?;
+        driver
+            .borrow_mut()
+            .stop()
+            .map_err(|err| eyre::eyre!("driver stop failed: {err}"))?;
 
         Ok(())
     }
@@ -253,9 +277,6 @@ pub fn bind_socket(path: &Path) -> eyre::Result<SocketGuard> {
     }
 
     let listener = UnixListener::bind(path).context(format!("bind socket {}", path.display()))?;
-    listener
-        .set_nonblocking(true)
-        .context("set control socket nonblocking")?;
 
     Ok(SocketGuard {
         path: path.to_path_buf(),
@@ -263,173 +284,167 @@ pub fn bind_socket(path: &Path) -> eyre::Result<SocketGuard> {
     })
 }
 
-fn handle_client(
-    mut stream: UnixStream,
-    driver: &dyn crate::driver::Driver,
-    serial_runtime: Arc<SerialRuntime>,
+async fn serve_control_client(
+    stream: tokio::net::UnixStream,
+    service: ControlService,
 ) -> eyre::Result<()> {
-    let request = ControlRequest::read_from(&mut stream).context("read control request")?;
+    use futures::StreamExt;
+    use tarpc::serde_transport;
+    use tarpc::server::{self, Channel};
+    use tarpc::tokio_serde::formats::Bincode;
+    use tarpc::tokio_util::codec::LengthDelimitedCodec;
 
-    if request.version != CONTROL_PROTOCOL_VERSION {
-        let response = ControlResponse::v1_error(
-            request.id,
-            ControlErrorCode::UnsupportedVersion,
-            format!(
-                "control protocol version {} is unsupported",
-                request.version
-            ),
-        );
-        response
-            .write_to(&mut stream)
-            .context("write control response")?;
-        return Ok(());
+    let framed = LengthDelimitedCodec::builder().new_framed(stream);
+    let transport = serde_transport::new(framed, Bincode::default());
+
+    server::BaseChannel::with_defaults(transport)
+        .execute(service.serve())
+        .for_each(|response| response)
+        .await;
+
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ControlService {
+    driver: Rc<RefCell<Box<dyn crate::driver::Driver>>>,
+    serial_runtime: Arc<SerialRuntime>,
+    instance_dir: PathBuf,
+}
+
+impl ControlPlane for ControlService {
+    async fn list_services(
+        self,
+        _: tarpc::context::Context,
+    ) -> Result<Vec<ServiceDescriptor>, ControlError> {
+        ServiceRegistry::discover(&self.driver)
+            .await
+            .map(|registry| registry.describe())
+            .map_err(|err| {
+                ControlError::new(
+                    ControlErrorCode::ServiceUnavailable,
+                    format!("discover guest services failed: {err}"),
+                )
+            })
     }
 
-    match request.body {
-        ControlRequestBody::ListServices => {
-            let service_registry = match ServiceRegistry::discover(driver) {
-                Ok(service_registry) => service_registry,
-                Err(err) => {
-                    ControlResponse::v1_error(
-                        request.id,
-                        ControlErrorCode::ServiceUnavailable,
-                        format!("discover guest services failed: {err}"),
-                    )
-                    .write_to(&mut stream)
-                    .context("write control response")?;
-                    return Ok(());
-                }
-            };
-            let response = ControlResponse::v1_services(request.id, service_registry.describe());
-            response
-                .write_to(&mut stream)
-                .context("write control response")?;
-        }
-        ControlRequestBody::OpenService { service, options } => {
-            let id = request.id;
-            let target = if service == SERVICE_SERIAL {
-                Some(ServiceTarget::Serial)
-            } else {
-                let service_registry = match ServiceRegistry::discover(driver) {
-                    Ok(service_registry) => service_registry,
-                    Err(err) => {
-                        ControlResponse::v1_error(
-                            id,
+    async fn open_service(
+        self,
+        _: tarpc::context::Context,
+        request: OpenServiceRequest,
+    ) -> Result<OpenServiceResponse, ControlError> {
+        let target = if request.service == SERVICE_SERIAL {
+            Some(ServiceTarget::Serial)
+        } else {
+            let service_registry =
+                ServiceRegistry::discover(&self.driver)
+                    .await
+                    .map_err(|err| {
+                        ControlError::new(
                             ControlErrorCode::ServiceUnavailable,
                             format!("discover guest services failed: {err}"),
                         )
-                        .write_to(&mut stream)
-                        .context("write control response")?;
-                        return Ok(());
-                    }
-                };
-                service_registry.resolve(&service)
-            };
+                    })?;
+            service_registry.resolve(&request.service)
+        };
 
-            let Some(target) = target else {
-                let response = ControlResponse::v1_error(
-                    id,
-                    ControlErrorCode::UnknownService,
-                    format!("service '{service}' is not registered"),
-                );
-                response
-                    .write_to(&mut stream)
-                    .context("write control response")?;
-                return Ok(());
-            };
+        let Some(target) = target else {
+            return Err(ControlError::new(
+                ControlErrorCode::UnknownService,
+                format!("service '{}' is not registered", request.service),
+            ));
+        };
 
-            match target {
-                ServiceTarget::VsockPort(port) => {
-                    if !options.is_empty() {
-                        ControlResponse::v1_error(
-                            id,
-                            ControlErrorCode::UnsupportedRequest,
-                            "ssh service does not accept options",
-                        )
-                        .write_to(&mut stream)
-                        .context("write control response")?;
-                        return Ok(());
-                    }
-
-                    let mut last_err = None;
-
-                    for attempt in 1..=SERVICE_OPEN_MAX_ATTEMPTS {
-                        match driver.open_device(OpenDeviceRequest::Vsock { port }) {
-                            Ok(OpenDeviceResponse::Vsock { stream: vsock_fd }) => {
-                                ControlResponse::v1_opened(id.clone())
-                                    .write_to(&mut stream)
-                                    .context("write control response")?;
-                                spawn_tunnel(stream, vsock_fd);
-                                return Ok(());
-                            }
-                            Ok(_) => {
-                                last_err = Some(eyre::eyre!(
-                                    "driver returned unexpected device type for ssh service"
-                                ));
-                            }
-                            Err(err) => {
-                                last_err = Some(eyre::eyre!(err));
-
-                                if attempt < SERVICE_OPEN_MAX_ATTEMPTS {
-                                    ControlResponse::v1_starting(
-                                        id.clone(),
-                                        attempt,
-                                        SERVICE_OPEN_MAX_ATTEMPTS,
-                                        SERVICE_OPEN_RETRY_DELAY_SECS,
-                                    )
-                                    .write_to(&mut stream)
-                                    .context("write control response")?;
-
-                                    thread::sleep(Duration::from_secs(
-                                        SERVICE_OPEN_RETRY_DELAY_SECS,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-
-                    let err_text = last_err
-                        .map(|err| err.to_string())
-                        .unwrap_or_else(|| "unknown startup error".to_string());
-
-                    ControlResponse::v1_error(
-                        id,
-                        ControlErrorCode::ServiceUnavailable,
-                        format!(
-                            "failed to open service '{service}' on vsock port {port} after {} attempts: {err_text}",
-                            SERVICE_OPEN_MAX_ATTEMPTS
-                        ),
-                    )
-                    .write_to(&mut stream)
-                    .context("write control response")?;
+        match target {
+            ServiceTarget::VsockPort(port) => {
+                if !request.options.is_empty() {
+                    return Err(ControlError::new(
+                        ControlErrorCode::UnsupportedRequest,
+                        "ssh service does not accept options",
+                    ));
                 }
-                ServiceTarget::Serial => {
-                    let serial_options = match parse_serial_open_options(options) {
-                        Ok(options) => options,
-                        Err(message) => {
-                            ControlResponse::v1_error(
-                                id,
-                                ControlErrorCode::UnsupportedRequest,
-                                message,
-                            )
-                            .write_to(&mut stream)
-                            .context("write control response")?;
-                            return Ok(());
-                        }
+
+                let mut last_err = None;
+                for _ in 1..=SERVICE_OPEN_MAX_ATTEMPTS {
+                    let open_result = {
+                        self.driver
+                            .borrow()
+                            .open_device(OpenDeviceRequest::Vsock { port })
                     };
 
-                    let access = serial_options.access;
-                    ControlResponse::v1_opened(id.clone())
-                        .write_to(&mut stream)
-                        .context("write control response")?;
-                    spawn_serial_tunnel(stream, serial_runtime.clone(), access);
-                    return Ok(());
+                    match open_result {
+                        Ok(OpenDeviceResponse::Vsock { stream: vsock_fd }) => {
+                            let tunnel_socket =
+                                bind_tunnel_socket(&self.instance_dir).map_err(|err| {
+                                    ControlError::new(
+                                        ControlErrorCode::Internal,
+                                        format!("bind tunnel socket failed: {err}"),
+                                    )
+                                })?;
+                            let socket_path = tunnel_socket.path.display().to_string();
+                            tokio::task::spawn_local(async move {
+                                if let Err(err) =
+                                    accept_and_proxy_vsock_tunnel(tunnel_socket, vsock_fd).await
+                                {
+                                    eprintln!("[instanced] vsock relay failed: {err}");
+                                }
+                            });
+
+                            return Ok(OpenServiceResponse { socket_path });
+                        }
+                        Ok(_) => {
+                            last_err = Some(
+                                "driver returned unexpected device type for ssh service"
+                                    .to_string(),
+                            );
+                        }
+                        Err(err) => {
+                            last_err = Some(err.to_string());
+                            tokio::time::sleep(Duration::from_secs(SERVICE_OPEN_RETRY_DELAY_SECS))
+                                .await;
+                        }
+                    }
                 }
+
+                let err_text = last_err.unwrap_or_else(|| "unknown startup error".to_string());
+                Err(ControlError::new(
+                    ControlErrorCode::ServiceUnavailable,
+                    format!(
+                        "failed to open service '{}' on vsock port {} after {} attempts: {}",
+                        request.service, port, SERVICE_OPEN_MAX_ATTEMPTS, err_text
+                    ),
+                ))
+            }
+            ServiceTarget::Serial => {
+                let serial_options =
+                    parse_serial_open_options(request.options).map_err(|message| {
+                        ControlError::new(ControlErrorCode::UnsupportedRequest, message)
+                    })?;
+
+                let tunnel_socket = bind_tunnel_socket(&self.instance_dir).map_err(|err| {
+                    ControlError::new(
+                        ControlErrorCode::Internal,
+                        format!("bind tunnel socket failed: {err}"),
+                    )
+                })?;
+                let socket_path = tunnel_socket.path.display().to_string();
+                let serial_runtime = self.serial_runtime.clone();
+                tokio::task::spawn_local(async move {
+                    if let Err(err) = accept_and_proxy_serial_tunnel(
+                        tunnel_socket,
+                        serial_runtime,
+                        serial_options.access,
+                    )
+                    .await
+                    {
+                        eprintln!("[instanced] serial relay failed: {err}");
+                    }
+                });
+
+                Ok(OpenServiceResponse { socket_path })
             }
         }
     }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -444,11 +459,23 @@ struct ServiceRegistry {
 }
 
 impl ServiceRegistry {
-    fn discover(driver: &dyn crate::driver::Driver) -> eyre::Result<Self> {
+    async fn discover(driver: &Rc<RefCell<Box<dyn crate::driver::Driver>>>) -> eyre::Result<Self> {
         let mut by_name = BTreeMap::new();
         by_name.insert(SERVICE_SERIAL.to_string(), ServiceTarget::Serial);
 
-        for endpoint in fetch_guest_services(driver)? {
+        let discovery_stream = {
+            let driver_ref = driver.borrow();
+            match driver_ref.open_device(OpenDeviceRequest::Vsock {
+                port: DEFAULT_DISCOVERY_PORT,
+            })? {
+                OpenDeviceResponse::Vsock { stream } => stream,
+                OpenDeviceResponse::Serial { .. } => {
+                    eyre::bail!("driver returned serial device when opening guest discovery port")
+                }
+            }
+        };
+
+        for endpoint in fetch_guest_services_from_stream(discovery_stream).await? {
             by_name.insert(endpoint.name, ServiceTarget::VsockPort(endpoint.port));
         }
 
@@ -469,6 +496,83 @@ impl ServiceRegistry {
 
 const SERVICE_OPEN_MAX_ATTEMPTS: u8 = 5;
 const SERVICE_OPEN_RETRY_DELAY_SECS: u64 = 2;
+const TUNNEL_ACCEPT_TIMEOUT_SECS: u64 = 15;
+
+struct TunnelSocketGuard {
+    path: PathBuf,
+    listener: UnixListener,
+}
+
+impl Drop for TunnelSocketGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn bind_tunnel_socket(instance_dir: &Path) -> io::Result<TunnelSocketGuard> {
+    let tunnel_dir = instance_dir.join("tunnels");
+    fs::create_dir_all(&tunnel_dir)?;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let path = tunnel_dir.join(format!("tunnel-{nonce}.sock"));
+    let listener = UnixListener::bind(&path)?;
+
+    Ok(TunnelSocketGuard { path, listener })
+}
+
+async fn accept_and_proxy_vsock_tunnel(
+    tunnel_socket: TunnelSocketGuard,
+    vsock_fd: OwnedFd,
+) -> io::Result<()> {
+    let (client, _) = tokio::time::timeout(
+        Duration::from_secs(TUNNEL_ACCEPT_TIMEOUT_SECS),
+        tunnel_socket.listener.accept(),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timed out waiting for tunnel client",
+        )
+    })??;
+
+    proxy_streams_async(client, vsock_fd).await
+}
+
+async fn accept_and_proxy_serial_tunnel(
+    tunnel_socket: TunnelSocketGuard,
+    runtime: Arc<SerialRuntime>,
+    access: SerialAccess,
+) -> io::Result<()> {
+    let (client, _) = tokio::time::timeout(
+        Duration::from_secs(TUNNEL_ACCEPT_TIMEOUT_SECS),
+        tunnel_socket.listener.accept(),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timed out waiting for tunnel client",
+        )
+    })??;
+
+    let std_client = client.into_std()?;
+    tokio::task::spawn_blocking(move || proxy_serial_stream(std_client, runtime, access))
+        .await
+        .map_err(|err| io::Error::other(format!("serial tunnel task join error: {err}")))?
+}
+
+async fn proxy_streams_async(
+    mut client_stream: tokio::net::UnixStream,
+    vsock_fd: OwnedFd,
+) -> io::Result<()> {
+    let mut vsock_stream = AsyncFdStream::new(std::fs::File::from(vsock_fd))?;
+    let _ = tokio::io::copy_bidirectional(&mut client_stream, &mut vsock_stream).await?;
+    Ok(())
+}
 
 fn parse_serial_open_options(options: Map<String, Value>) -> Result<SerialOpenOptions, String> {
     serde_json::from_value::<SerialOpenOptions>(Value::Object(options))
@@ -545,14 +649,6 @@ fn spawn_serial_reader(
                     break;
                 }
             }
-        }
-    });
-}
-
-fn spawn_serial_tunnel(stream: UnixStream, runtime: Arc<SerialRuntime>, access: SerialAccess) {
-    thread::spawn(move || {
-        if let Err(err) = proxy_serial_stream(stream, runtime, access) {
-            eprintln!("[instanced] serial relay failed: {err}");
         }
     });
 }
@@ -642,36 +738,6 @@ fn proxy_serial_stream(
     match output_task.join() {
         Ok(result) => result,
         Err(_) => Err(io::Error::other("serial output relay thread panicked")),
-    }
-}
-
-fn spawn_tunnel(stream: UnixStream, vsock_fd: OwnedFd) {
-    thread::spawn(move || {
-        if let Err(err) = proxy_streams(stream, vsock_fd) {
-            eprintln!("[instanced] vsock relay failed: {err}");
-        }
-    });
-}
-
-fn proxy_streams(mut client_stream: UnixStream, vsock_fd: OwnedFd) -> io::Result<()> {
-    client_stream.set_nonblocking(false)?;
-
-    let mut client_read = client_stream.try_clone()?;
-    let mut vsock_stream = std::fs::File::from(vsock_fd);
-    let mut vsock_write = vsock_stream.try_clone()?;
-
-    let forward = thread::spawn(move || {
-        let stdin_done = io::copy(&mut client_read, &mut vsock_write);
-        let _ = vsock_write.flush();
-        stdin_done
-    });
-
-    let _ = io::copy(&mut vsock_stream, &mut client_stream)?;
-    let _ = client_stream.shutdown(std::net::Shutdown::Write);
-
-    match forward.join() {
-        Ok(_) => Ok(()),
-        Err(_) => Err(io::Error::other("relay thread panicked")),
     }
 }
 
@@ -766,60 +832,44 @@ fn set_nonblocking(file: &std::fs::File) -> io::Result<()> {
     Ok(())
 }
 
-fn fetch_guest_services(driver: &dyn crate::driver::Driver) -> eyre::Result<Vec<ServiceEndpoint>> {
-    let stream = match driver.open_device(OpenDeviceRequest::Vsock {
-        port: DEFAULT_DISCOVERY_PORT,
-    })? {
-        OpenDeviceResponse::Vsock { stream } => stream,
-        OpenDeviceResponse::Serial { .. } => {
-            eyre::bail!("driver returned serial device when opening guest discovery port")
-        }
-    };
+async fn fetch_guest_services_from_stream(stream: OwnedFd) -> eyre::Result<Vec<ServiceEndpoint>> {
+    use tarpc::context;
+    use tarpc::serde_transport;
+    use tarpc::tokio_serde::formats::Bincode;
+    use tarpc::tokio_util::codec::LengthDelimitedCodec;
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("build tokio runtime for guest discovery")?;
+    let stream = AsyncFdStream::new(std::fs::File::from(stream))
+        .context("wrap discovery stream in async fd")?;
+    let framed = LengthDelimitedCodec::builder().new_framed(stream);
+    let transport = serde_transport::new(framed, Bincode::default());
+    let client = GuestDiscoveryClient::new(tarpc::client::Config::default(), transport).spawn();
 
-    runtime.block_on(async move {
-        use tarpc::context;
-        use tarpc::serde_transport;
-        use tarpc::tokio_serde::formats::Bincode;
-        use tarpc::tokio_util::codec::LengthDelimitedCodec;
+    let HealthStatus { ok } =
+        tokio::time::timeout(Duration::from_secs(3), client.health(context::current()))
+            .await
+            .map_err(|_| eyre::eyre!("guest discovery health request timed out"))?
+            .map_err(|err| eyre::eyre!("query guest discovery health failed: {err}"))?;
 
-        let stream = AsyncFdStream::new(std::fs::File::from(stream))
-            .context("wrap discovery stream in async fd")?;
-        let framed = LengthDelimitedCodec::builder().new_framed(stream);
-        let transport = serde_transport::new(framed, Bincode::default());
-        let client = GuestDiscoveryClient::new(tarpc::client::Config::default(), transport).spawn();
+    if !ok {
+        eyre::bail!("guest discovery service reported unhealthy");
+    }
 
-        let HealthStatus { ok } =
-            tokio::time::timeout(Duration::from_secs(3), client.health(context::current()))
-                .await
-                .map_err(|_| eyre::eyre!("guest discovery health request timed out"))?
-                .map_err(|err| eyre::eyre!("query guest discovery health failed: {err}"))?;
+    let endpoints = tokio::time::timeout(
+        Duration::from_secs(3),
+        client.list_services(context::current()),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("guest discovery list_services request timed out"))?
+    .map_err(|err| eyre::eyre!("query guest service list failed: {err}"))?;
 
-        if !ok {
-            eyre::bail!("guest discovery service reported unhealthy");
-        }
+    if endpoints
+        .iter()
+        .all(|endpoint| endpoint.name != SERVICE_SSH)
+    {
+        eyre::bail!("guest discovery did not report ssh service");
+    }
 
-        let endpoints = tokio::time::timeout(
-            Duration::from_secs(3),
-            client.list_services(context::current()),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("guest discovery list_services request timed out"))?
-        .map_err(|err| eyre::eyre!("query guest service list failed: {err}"))?;
-
-        if endpoints
-            .iter()
-            .all(|endpoint| endpoint.name != SERVICE_SSH)
-        {
-            eyre::bail!("guest discovery did not report ssh service");
-        }
-
-        Ok(endpoints)
-    })
+    Ok(endpoints)
 }
 
 #[must_use = "hold this guard for the process lifetime to keep PID file cleanup active"]

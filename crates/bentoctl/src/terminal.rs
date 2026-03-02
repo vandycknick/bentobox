@@ -1,80 +1,57 @@
-use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd};
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use bento_runtime::instance::InstanceFile;
-use bento_runtime::instance_control::{
-    ControlErrorCode, ControlRequest, ControlResponse, ControlResponseBody,
-    CONTROL_PROTOCOL_VERSION, SERVICE_SERIAL,
+use bento_protocol::control::{
+    ControlErrorCode, ControlPlaneClient, OpenServiceRequest, SERVICE_SERIAL,
 };
+use bento_runtime::instance::InstanceFile;
 use bento_runtime::instance_manager::{InstanceManager, NixDaemon};
 use eyre::{bail, Context};
-use serde_json::Map;
 
-pub(crate) fn attach_serial(name: &str) -> eyre::Result<()> {
+use tarpc::context;
+use tarpc::serde_transport;
+use tarpc::tokio_serde::formats::Bincode;
+use tarpc::tokio_util::codec::LengthDelimitedCodec;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+pub(crate) async fn attach_serial(name: &str) -> eyre::Result<()> {
     let manager = InstanceManager::new(NixDaemon::new("123"));
     let inst = manager.inspect(name)?;
     let socket_path = inst.file(InstanceFile::InstancedSocket);
 
-    let mut stream = match UnixStream::connect(&socket_path) {
-        Ok(stream) => stream,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            bail!(
-                "instanced_unreachable: control socket {} is missing, make sure the VM is running",
-                socket_path.display()
-            )
-        }
-        Err(err) => return Err(err).context(format!("connect {}", socket_path.display())),
-    };
+    let control_stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::UnixStream::connect(&socket_path),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("connect control socket timed out"))?
+    .map_err(|err| eyre::eyre!("connect {}: {err}", socket_path.display()))?;
 
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .context("set control socket read timeout")?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .context("set control socket write timeout")?;
+    let framed = LengthDelimitedCodec::builder().new_framed(control_stream);
+    let transport = serde_transport::new(framed, Bincode::default());
+    let client = ControlPlaneClient::new(tarpc::client::Config::default(), transport).spawn();
 
-    let mut options = Map::new();
-    options.insert(
-        "access".to_string(),
-        serde_json::Value::String("interactive".to_string()),
-    );
+    let request = OpenServiceRequest::new(SERVICE_SERIAL);
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.open_service(context::current(), request),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("open serial service request timed out"))?
+    .map_err(|err| eyre::eyre!("open serial service transport failed: {err}"))?
+    .map_err(|err| eyre::eyre!("{}", render_control_error(&err.code, &err.message)))?;
 
-    ControlRequest::v1_open_service_with_options("serial-attach", SERVICE_SERIAL, options)
-        .write_to(&mut stream)
-        .context("write serial request")?;
+    let tunnel_socket = response.socket_path;
 
-    loop {
-        let response = ControlResponse::read_from(&mut stream).context("read serial response")?;
+    let stream = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::UnixStream::connect(&tunnel_socket),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("connect serial tunnel socket timed out"))?
+    .context(format!("connect serial tunnel socket {}", tunnel_socket))?;
 
-        if response.version != CONTROL_PROTOCOL_VERSION {
-            bail!(
-                "unsupported_version: daemon returned protocol version {}, expected {}",
-                response.version,
-                CONTROL_PROTOCOL_VERSION
-            );
-        }
-
-        match response.body {
-            ControlResponseBody::Opened => {
-                stream
-                    .set_read_timeout(None)
-                    .context("clear control socket read timeout")?;
-                stream
-                    .set_write_timeout(None)
-                    .context("clear control socket write timeout")?;
-                return proxy_serial_stdio(stream);
-            }
-            ControlResponseBody::Starting { .. } => continue,
-            ControlResponseBody::Error { code, message } => {
-                bail!("{}", render_control_error(&code, &message))
-            }
-            ControlResponseBody::Services { .. } => {
-                bail!("invalid_response: expected opened response for service request")
-            }
-        }
-    }
+    proxy_serial_stdio(stream).await
 }
 
 fn render_control_error(code: &ControlErrorCode, message: &str) -> String {
@@ -105,49 +82,51 @@ fn render_control_error(code: &ControlErrorCode, message: &str) -> String {
     }
 }
 
-fn proxy_serial_stdio(mut stream: UnixStream) -> eyre::Result<()> {
+async fn proxy_serial_stdio(stream: tokio::net::UnixStream) -> eyre::Result<()> {
     let _raw_terminal = RawTerminalGuard::new()?;
+    let (mut stream_read, mut stream_write) = stream.into_split();
 
-    let mut stream_write = stream.try_clone().context("clone serial relay stream")?;
-    let input = std::thread::spawn(move || -> std::io::Result<()> {
-        let stdin_fd = std::io::stdin().as_fd().try_clone_to_owned()?;
-        let mut stdin_file = std::fs::File::from(stdin_fd);
-        let mut buf = [0u8; 1024];
-
-        loop {
-            let n = stdin_file.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-
-            let chunk = &buf[..n];
-            if chunk.contains(&0x1d) {
-                let filtered: Vec<u8> = chunk.iter().copied().filter(|b| *b != 0x1d).collect();
-                if !filtered.is_empty() {
-                    stream_write.write_all(&filtered)?;
-                }
-                let _ = stream_write.shutdown(std::net::Shutdown::Write);
-                break;
-            }
-
-            stream_write.write_all(chunk)?;
-        }
-
-        Ok(())
+    let output = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        let _ = tokio::io::copy(&mut stream_read, &mut stdout).await?;
+        stdout.flush().await
     });
 
-    let stdout_fd = std::io::stdout()
-        .as_fd()
-        .try_clone_to_owned()
-        .context("dup stdout fd")?;
-    let mut stdout_file = std::fs::File::from(stdout_fd);
-    let _ = std::io::copy(&mut stream, &mut stdout_file).context("relay serial output")?;
-    stdout_file.flush().context("flush serial output")?;
+    let mut stdin = tokio::io::stdin();
+    let mut buf = [0u8; 1024];
 
-    match input.join() {
+    loop {
+        let n = stdin.read(&mut buf).await.context("relay serial input")?;
+        if n == 0 {
+            break;
+        }
+
+        let chunk = &buf[..n];
+        if chunk.contains(&0x1d) {
+            let filtered: Vec<u8> = chunk.iter().copied().filter(|b| *b != 0x1d).collect();
+            if !filtered.is_empty() {
+                stream_write
+                    .write_all(&filtered)
+                    .await
+                    .context("relay serial input")?;
+            }
+            stream_write
+                .shutdown()
+                .await
+                .context("relay serial input")?;
+            break;
+        }
+
+        stream_write
+            .write_all(chunk)
+            .await
+            .context("relay serial input")?;
+    }
+
+    match output.await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(err)) => Err(err).context("relay serial input"),
-        Err(_) => bail!("serial relay thread panicked"),
+        Ok(Err(err)) => Err(err).context("relay serial output"),
+        Err(err) => bail!("serial output task failed: {err}"),
     }
 }
 

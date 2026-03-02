@@ -1,7 +1,7 @@
 use std::os::fd::{IntoRawFd, OwnedFd};
 use std::time::Duration;
 
-use bento_protocol::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
+use bento_protocol::guest::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
 use nix::unistd::pipe;
 use objc2::AllocAnyThread;
 use objc2::{rc::Retained, ClassType};

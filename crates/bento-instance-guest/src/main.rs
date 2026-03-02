@@ -2,7 +2,7 @@ mod port;
 mod server;
 mod services;
 
-use bento_protocol::ServiceEndpoint;
+use bento_protocol::guest::ServiceEndpoint;
 use std::io;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;

@@ -53,6 +53,15 @@ impl Display for AttachMode {
 
 impl Cmd {
     pub fn run(&self) -> eyre::Result<()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| eyre::eyre!("build tokio runtime for shell failed: {err}"))?;
+
+        runtime.block_on(self.run_inner())
+    }
+
+    async fn run_inner(&self) -> eyre::Result<()> {
         let manager = InstanceManager::new(NixDaemon::new("123"));
         let inst = manager.inspect(&self.name)?;
 
@@ -68,7 +77,7 @@ impl Cmd {
                 if self.user.is_some() {
                     eprintln!("[bentoctl] --user is ignored for serial attach");
                 }
-                return terminal::attach_serial(&self.name);
+                return terminal::attach_serial(&self.name).await;
             }
             Some(AttachMode::Ssh) => {
                 return exec_ssh_command(&self.name, self.user.as_deref());
@@ -81,7 +90,7 @@ impl Cmd {
                 eprintln!("[bentoctl] --user is ignored for serial attach");
             }
             eprintln!("[bentoctl] image has no ssh capability, using serial attach");
-            return terminal::attach_serial(&self.name);
+            return terminal::attach_serial(&self.name).await;
         }
 
         exec_ssh_command(&self.name, self.user.as_deref())

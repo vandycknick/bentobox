@@ -1,4 +1,4 @@
-use bento_protocol::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
+use bento_protocol::guest::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
 
 pub fn from_kernel_cmdline() -> u32 {
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
@@ -27,7 +27,7 @@ fn parse_discovery_port(cmdline: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::parse_discovery_port;
-    use bento_protocol::DEFAULT_DISCOVERY_PORT;
+    use bento_protocol::guest::DEFAULT_DISCOVERY_PORT;
 
     #[test]
     fn parses_control_port_from_kernel_cmdline() {

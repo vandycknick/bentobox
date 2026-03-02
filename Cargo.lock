@@ -228,6 +228,7 @@ name = "bentoctl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bento-protocol",
  "bento-runtime",
  "chrono",
  "clap",
@@ -239,8 +240,10 @@ dependencies = [
  "serde_yaml_ng",
  "signal-hook 0.3.18",
  "tabwriter",
+ "tarpc",
  "tempfile",
  "time",
+ "tokio",
 ]
 
 [[package]]
@@ -2733,6 +2736,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
