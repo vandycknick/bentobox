@@ -1,6 +1,7 @@
 use std::fmt::{Display, Formatter};
 
-use bento_runtime::instance_manager::{InstanceManager, NixDaemon};
+use bento_instanced::daemon::NixDaemon;
+use bento_runtime::instance_manager::InstanceManager;
 use clap::Args;
 
 #[derive(Args, Debug)]

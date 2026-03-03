@@ -1,8 +1,9 @@
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 
+use bento_instanced::daemon::NixDaemon;
 use bento_runtime::instance::InstanceStatus;
-use bento_runtime::instance_manager::{InstanceManager, NixDaemon};
+use bento_runtime::instance_manager::InstanceManager;
 use clap::Args;
 use tabwriter::TabWriter;
 

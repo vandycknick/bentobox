@@ -91,7 +91,13 @@ impl Driver for VzDriver {
     }
 
     fn stop(&mut self) -> Result<(), DriverError> {
-        self.vm.as_ref().map(|vm| vm.stop());
+        if let Some(vm) = self.vm.as_ref() {
+            unsafe {
+                stop_vm(vm)?;
+            }
+        }
+
+        self.vm = None;
         Ok(())
     }
 
@@ -153,6 +159,45 @@ unsafe fn start_vm(bootstrap: VmBootstrap) -> Result<VirtualMachine, DriverError
             }
             vm::VirtualMachineState::Running => return Ok(vm),
             // TODO: add some trace logging here
+            _ => continue,
+        }
+    }
+}
+
+unsafe fn stop_vm(vm: &VirtualMachine) -> Result<(), DriverError> {
+    if vm.state() == vm::VirtualMachineState::Stopped {
+        return Ok(());
+    }
+
+    vm.stop()?;
+
+    let events = vm.subscribe_state();
+    let shutdown_timeout = Duration::from_mins(5);
+
+    loop {
+        let event = match events.recv_timeout(shutdown_timeout) {
+            Ok(event) => event,
+            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                return Err(DriverError::Backend(format!(
+                    "timed out after {:?} waiting for VM to stop (current state: {})",
+                    shutdown_timeout,
+                    vm.state()
+                )));
+            }
+            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                return Err(DriverError::Backend(
+                    "VM state subscription disconnected while waiting for shutdown".to_string(),
+                ));
+            }
+        };
+
+        match event {
+            vm::VirtualMachineState::Stopped => return Ok(()),
+            vm::VirtualMachineState::Error => {
+                return Err(DriverError::Backend(
+                    "VM entered error state while stopping".to_string(),
+                ));
+            }
             _ => continue,
         }
     }

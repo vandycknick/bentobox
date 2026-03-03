@@ -8,7 +8,7 @@ use crate::global_config::{ensure_guest_agent_binary, GlobalConfig};
 use crate::host_user::HostUser;
 use crate::instance::{resolve_mount_location, Instance, InstanceFile, NetworkMode};
 
-const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-instance-guest";
+const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-guestd";
 const GUEST_AGENT_INSTALL_SCRIPT_ENTRY: &str = "bento-install-guest-agent.sh";
 const GUEST_AGENT_BOOTSTRAP_SCRIPT: &str = "/var/lib/cloud/scripts/per-boot/00-bento.bootstrap.sh";
 const GUEST_BOOTSTRAP_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-bootstrap.sh");
@@ -408,8 +408,8 @@ mod tests {
     fn guest_agent_payload_contains_systemd_install_steps() {
         let payload = GUEST_INSTALL_SCRIPT_CONTENT;
 
-        assert!(payload.contains("/usr/local/bin/bento-instance-guest"));
-        assert!(payload.contains("/etc/systemd/system/bento-instance-guest.service"));
+        assert!(payload.contains("/usr/local/bin/bento-guestd"));
+        assert!(payload.contains("/etc/systemd/system/bento-guestd.service"));
         assert!(payload.contains("systemctl daemon-reload"));
         assert!(payload.contains("systemctl enable"));
     }

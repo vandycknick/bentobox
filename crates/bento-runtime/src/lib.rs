@@ -6,7 +6,6 @@ pub mod host_user;
 pub mod images;
 pub mod instance;
 pub mod instance_control;
-pub mod instance_daemon;
 pub mod instance_manager;
 pub mod log_watcher;
 pub mod service_readiness;

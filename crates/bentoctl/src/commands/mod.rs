@@ -6,7 +6,6 @@ pub mod delete;
 pub mod images;
 pub mod instanced;
 pub mod list;
-pub mod run;
 pub mod shell;
 pub mod shell_proxy;
 pub mod start;
@@ -35,7 +34,6 @@ pub enum Command {
     Start(start::Cmd),
     Stop(stop::Cmd),
     Shell(shell::Cmd),
-    Run(run::Cmd),
     Delete(delete::Cmd),
     List(list::Cmd),
     Status(status::Cmd),
@@ -54,7 +52,6 @@ impl Display for Command {
             Command::Start(cmd) => write!(f, "start {}", cmd),
             Command::Stop(cmd) => write!(f, "stop {}", cmd),
             Command::Shell(cmd) => write!(f, "shell {}", cmd),
-            Command::Run(cmd) => write!(f, "run {}", cmd),
             Command::Delete(cmd) => write!(f, "delete {}", cmd),
             Command::List(_) => write!(f, "list"),
             Command::Status(cmd) => write!(f, "status {}", cmd),
@@ -77,7 +74,6 @@ impl BentoCtlCmd {
             Command::Start(cmd) => cmd.run(),
             Command::Stop(cmd) => cmd.run(),
             Command::Shell(cmd) => cmd.run(),
-            Command::Run(cmd) => cmd.run(),
             Command::Delete(cmd) => cmd.run(),
             Command::List(cmd) => cmd.run(),
             Command::Status(cmd) => cmd.run(),

@@ -3,9 +3,10 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
+use bento_instanced::daemon::NixDaemon;
 use bento_runtime::images::capabilities::Capability;
 use bento_runtime::instance::InstanceStatus;
-use bento_runtime::instance_manager::{InstanceError, InstanceManager, NixDaemon};
+use bento_runtime::instance_manager::{InstanceError, InstanceManager};
 use bento_runtime::{host_user, ssh_keys};
 use clap::{Args, ValueEnum};
 use eyre::{bail, Context};

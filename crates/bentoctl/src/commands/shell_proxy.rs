@@ -4,12 +4,13 @@ use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
+use bento_instanced::daemon::NixDaemon;
 use bento_runtime::instance::{InstanceFile, InstanceStatus};
 use bento_runtime::instance_control::{
     ControlErrorCode, ControlRequest, ControlResponse, ControlResponseBody,
     CONTROL_PROTOCOL_VERSION, SERVICE_SSH,
 };
-use bento_runtime::instance_manager::{InstanceManager, NixDaemon};
+use bento_runtime::instance_manager::InstanceManager;
 use bento_runtime::service_readiness;
 use clap::Args;
 use eyre::{bail, Context};

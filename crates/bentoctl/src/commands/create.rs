@@ -1,7 +1,8 @@
+use bento_instanced::daemon::NixDaemon;
 use bento_runtime::images::capabilities::GuestCapabilities;
 use bento_runtime::images::store::ImageStore;
 use bento_runtime::instance::{InstanceFile, MountConfig, NetworkConfig, NetworkMode};
-use bento_runtime::instance_manager::{InstanceCreateOptions, InstanceManager, NixDaemon};
+use bento_runtime::instance_manager::{InstanceCreateOptions, InstanceManager};
 use clap::Args;
 use eyre::Context;
 use std::{

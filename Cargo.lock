@@ -167,7 +167,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
-name = "bento-instance-guest"
+name = "bento-guestd"
 version = "0.1.0"
 dependencies = [
  "bento-protocol",
@@ -179,6 +179,23 @@ dependencies = [
  "tokio-vsock",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "bento-instanced"
+version = "0.1.0"
+dependencies = [
+ "bento-protocol",
+ "bento-runtime",
+ "chrono",
+ "eyre",
+ "futures",
+ "nix 0.31.1",
+ "serde",
+ "serde_json",
+ "tarpc",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -213,7 +230,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "sha2 0.10.9",
- "signal-hook 0.4.3",
+ "signal-hook",
  "ssh-key",
  "tar",
  "tarpc",
@@ -228,6 +245,7 @@ name = "bentoctl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bento-instanced",
  "bento-runtime",
  "chrono",
  "clap",
@@ -237,10 +255,12 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "signal-hook 0.3.18",
  "tabwriter",
  "tempfile",
  "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2360,16 +2380,6 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "signal-hook"
-version = "0.3.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
-
-[[package]]
-name = "signal-hook"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b57709da74f9ff9f4a27dce9526eec25ca8407c45a7887243b031a58935fb8e"
@@ -2733,6 +2743,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

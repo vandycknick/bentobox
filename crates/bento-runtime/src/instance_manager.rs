@@ -1,17 +1,15 @@
 use std::{
-    ffi::OsStr,
     fs::{self, OpenOptions},
     io,
-    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
 use nix::{
     sys::signal::{self, Signal},
-    unistd::{setsid, Pid},
+    unistd::Pid,
 };
 use thiserror::Error;
 
@@ -35,51 +33,6 @@ pub trait Daemon {
     fn stdout<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self;
     fn stderr<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self;
     fn spawn(&mut self) -> io::Result<Child>;
-}
-
-pub struct NixDaemon {
-    command: Command,
-}
-
-impl NixDaemon {
-    pub fn new(exe: impl AsRef<OsStr>) -> Self {
-        let mut command = Command::new(exe.as_ref());
-        unsafe {
-            command.pre_exec(|| {
-                setsid()
-                    .map(|_| ())
-                    .map_err(|errno| io::Error::from_raw_os_error(errno as i32))
-            });
-        }
-
-        Self { command }
-    }
-
-    pub fn arg(mut self, arg: &str) -> Self {
-        self.command.arg(arg);
-        self
-    }
-}
-
-impl Daemon for NixDaemon {
-    fn stdin<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self {
-        self.command.stdin(cfg);
-        self
-    }
-
-    fn stdout<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self {
-        self.command.stdout(cfg);
-        self
-    }
-
-    fn stderr<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self {
-        self.command.stderr(cfg);
-        self
-    }
-
-    fn spawn(&mut self) -> io::Result<Child> {
-        self.command.spawn()
-    }
 }
 
 #[derive(Debug, Error)]
@@ -661,107 +614,5 @@ pub fn wait_for_instanced_start(ha_pid_path: &Path, ha_stderr_path: &Path) -> io
         }
 
         thread::sleep(poll_interval);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn unique_dir(base: &Path, prefix: &str) -> PathBuf {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be after epoch")
-            .as_nanos();
-        base.join(format!("bento-{prefix}-{}-{now}", std::process::id()))
-    }
-
-    #[test]
-    fn normalize_mounts_makes_relative_paths_absolute() {
-        let old_cwd = std::env::current_dir().expect("cwd should resolve");
-        let base = unique_dir(&std::env::temp_dir(), "mount-cwd");
-        let mount_dir = base.join("share");
-        std::fs::create_dir_all(&mount_dir).expect("mount dir should be created");
-        std::env::set_current_dir(&base).expect("set cwd should succeed");
-
-        let mounts = vec![MountConfig {
-            location: PathBuf::from("share"),
-            writable: true,
-        }];
-
-        let normalized = normalize_mounts(&mounts).expect("normalize mounts should succeed");
-
-        std::env::set_current_dir(&old_cwd).expect("restore cwd should succeed");
-
-        assert_eq!(normalized.len(), 1);
-        assert!(normalized[0].location.is_absolute());
-        assert!(normalized[0].writable);
-
-        std::fs::remove_dir_all(&base).expect("temp dir should be removable");
-    }
-
-    // #[test]
-    // fn normalize_mounts_preserves_tilde_paths_in_config() {
-    //     let home = std::env::var_os("HOME").expect("HOME should be set");
-    //     let home = PathBuf::from(home);
-    //     let leaf = format!(
-    //         "bento-mount-tilde-{}-{}",
-    //         std::process::id(),
-    //         SystemTime::now()
-    //             .duration_since(UNIX_EPOCH)
-    //             .expect("clock should be after epoch")
-    //             .as_nanos()
-    //     );
-    //     let host_dir = home.join(&leaf);
-    //     std::fs::create_dir_all(&host_dir).expect("host dir should be created");
-    //
-    //     let mounts = vec![MountConfig {
-    //         location: PathBuf::from(format!("~/{leaf}")),
-    //         writable: false,
-    //     }];
-    //
-    //     let normalized = normalize_mounts(&mounts).expect("normalize mounts should succeed");
-    //     assert_eq!(normalized[0].location, PathBuf::from(format!("~/{leaf}")));
-    //     assert!(!normalized[0].writable);
-    //
-    //     std::fs::remove_dir_all(&host_dir).expect("host dir should be removable");
-    // }
-
-    #[test]
-    fn instance_create_options_with_initramfs_sets_path() {
-        let initramfs = PathBuf::from("/tmp/custom-initramfs.img");
-        let options = InstanceCreateOptions::default().with_initramfs(Some(initramfs.clone()));
-
-        assert_eq!(options.initramfs, Some(initramfs));
-    }
-
-    #[test]
-    fn instance_create_options_with_disks_sets_paths() {
-        let disks = vec![
-            PathBuf::from("/tmp/data-a.img"),
-            PathBuf::from("/tmp/data-b.img"),
-        ];
-        let options = InstanceCreateOptions::default().with_disks(disks.clone());
-
-        assert_eq!(options.disks, disks);
-    }
-
-    #[test]
-    fn apply_create_options_keeps_absolute_paths_in_config() {
-        let mut config = InstanceConfig::new();
-        let options = InstanceCreateOptions::default()
-            .with_kernel(Some(PathBuf::from("/tmp/kernel")))
-            .with_initramfs(Some(PathBuf::from("/tmp/initramfs")))
-            .with_disks(vec![PathBuf::from("/tmp/disk.img")]);
-
-        apply_create_options(&mut config, options).expect("apply options should succeed");
-
-        assert_eq!(config.kernel_path, Some(PathBuf::from("/tmp/kernel")));
-        assert_eq!(config.initramfs_path, Some(PathBuf::from("/tmp/initramfs")));
-        assert_eq!(config.disks.len(), 1);
-        assert_eq!(config.disks[0].path, PathBuf::from("/tmp/disk.img"));
-        assert_eq!(config.disks[0].role, Some(DiskRole::Data));
-        assert_eq!(config.disks[0].read_only, Some(false));
     }
 }

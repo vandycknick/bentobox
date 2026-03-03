@@ -1,5 +1,5 @@
 [package]
-name = "bento-instance-guest"
+name = "bento-guestd"
 version = "0.1.0"
 edition = "2021"
 

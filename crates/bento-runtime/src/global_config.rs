@@ -84,15 +84,12 @@ mod tests {
         let cfg = parse_global_config(
             r#"
 guest:
-  agent_binary: "/tmp/bento-instance-guest"
+  agent_binary: "/tmp/bento-guestd"
 "#,
         )
         .expect("parse config");
 
-        assert_eq!(
-            cfg.guest_agent_binary,
-            PathBuf::from("/tmp/bento-instance-guest")
-        );
+        assert_eq!(cfg.guest_agent_binary, PathBuf::from("/tmp/bento-guestd"));
     }
 
     #[test]
@@ -112,7 +109,7 @@ guest:
         let err = parse_global_config(
             r#"
 guest:
-  agent_binary: "./bento-instance-guest"
+  agent_binary: "./bento-guestd"
 "#,
         )
         .expect_err("relative path should fail");
