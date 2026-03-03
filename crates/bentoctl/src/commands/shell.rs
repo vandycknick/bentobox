@@ -5,7 +5,7 @@ use std::process::Command;
 
 use bento_instanced::daemon::NixDaemon;
 use bento_runtime::images::capabilities::Capability;
-use bento_runtime::instance::InstanceStatus;
+use bento_runtime::instance::{InstanceFile, InstanceStatus};
 use bento_runtime::instance_manager::{InstanceError, InstanceManager};
 use bento_runtime::{host_user, ssh_keys};
 use clap::{Args, ValueEnum};
@@ -69,7 +69,8 @@ impl Cmd {
                 if self.user.is_some() {
                     eprintln!("[bentoctl] --user is ignored for serial attach");
                 }
-                return terminal::attach_serial(&self.name);
+                let socket_path = inst.file(InstanceFile::InstancedSocket);
+                return attach_serial_sync(&socket_path.to_string_lossy());
             }
             Some(AttachMode::Ssh) => {
                 return exec_ssh_command(&self.name, self.user.as_deref());
@@ -82,88 +83,23 @@ impl Cmd {
                 eprintln!("[bentoctl] --user is ignored for serial attach");
             }
             eprintln!("[bentoctl] image has no ssh capability, using serial attach");
-            return terminal::attach_serial(&self.name);
+            let socket_path = inst.file(InstanceFile::InstancedSocket);
+            return attach_serial_sync(&socket_path.to_string_lossy());
         }
 
         exec_ssh_command(&self.name, self.user.as_deref())
     }
 }
 
-fn exec_ssh_command(name: &str, user: Option<&str>) -> eyre::Result<()> {
-    let err = build_ssh_command(name, user)?.exec();
-
-    // Ignore user/global ssh config
-    // - -F /dev/null
-    //   - Do not read ~/.ssh/config or custom host stanzas. Keeps behavior deterministic.
-    //
-    // Auth + identity
-    // - -o IdentityFile="/Users/nickvd/.lima/_config/user"
-    //   - Private key Lima generated/uses for this VM.
-    // - -o PreferredAuthentications=publickey
-    //   - Try key auth first/only preferred method.
-    // - -o BatchMode=yes
-    //   - Non-interactive mode, do not prompt for passwords/passphrases.
-    // - -o IdentitiesOnly=yes
-    //   - Only use the specified identity file, do not spray all agent keys.
-    // - -o GSSAPIAuthentication=no
-    //   - Disable Kerberos/GSSAPI attempts, avoids slow or noisy fallback paths.
-    //
-    // Host key handling (convenience > strict security)
-    // - -o StrictHostKeyChecking=no
-    //   - Accept host key changes without prompting.
-    // - -o UserKnownHostsFile=/dev/null
-    //   - Do not store known_hosts entries.
-    // - -o NoHostAuthenticationForLocalhost=yes
-    //   - Relax host auth for localhost targets.
-    // These are dev-convenience settings, less secure but frictionless for local VM flows.
-    //
-    // Transport tuning
-    // - -o Compression=no
-    //   - Disable SSH compression (often faster locally).
-    // - -o Ciphers="^aes128-gcm@openssh.com,aes256-gcm@openssh.com"
-    //   - Prefer AES-GCM ciphers first (the ^ means prepend preference order).
-    // - -o LogLevel=ERROR
-    //   - Suppress normal SSH chatter, only show real errors.
-    //
-    // Remote identity + endpoint
-    // - -o User=nickvd
-    //   - Login user inside guest.
-    // - -p 50301
-    //   - Connect to forwarded host TCP port 50301.
-    // - 127.0.0.1
-    //   - Connects to local loopback, not directly to guest IP.
-    //
-    // So Lima here is using localhost TCP forwarding, not your VSOCK relay pattern.
-    //
-    // Connection multiplexing
-    // - -o ControlMaster=auto
-    //   - Reuse/create a master SSH connection for this target.
-    // - -o ControlPath="/Users/nickvd/.lima/docker/ssh.sock"
-    //   - Unix socket path for control channel.
-    // - -o ControlPersist=yes
-    //   - Keep master connection alive in background after session exits.
-    // This is a major UX win, subsequent shell/exec/copy commands are much faster.
-    //
-    // TTY + env
-    // - -t
-    //   - Force pseudo-terminal allocation for interactive shell behavior.
-    // - -o SendEnv=COLORTERM
-    //   - Pass COLORTERM to guest for terminal color capability consistency.
-    //
-    // Remote command
-    // - -- cd /Users/nickvd/Projects/bentobox || cd /Users/nickvd ; exec "$SHELL" --login
-    //   - -- ends ssh options, following text runs on remote shell.
-    //   - Try to enter host-equivalent project dir in guest, fallback to home.
-    //   - exec "$SHELL" --login replaces command shell with login shell.
-
-    if err.kind() == io::ErrorKind::NotFound {
-        bail!("`ssh` command not found. install OpenSSH client and retry")
-    }
-
-    bail!("failed to execute ssh: {err}")
+fn attach_serial_sync(socket_path: &str) -> eyre::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("build tokio runtime for serial attach")?;
+    runtime.block_on(terminal::attach_serial(socket_path))
 }
 
-pub(crate) fn build_ssh_command(name: &str, user: Option<&str>) -> eyre::Result<Command> {
+fn exec_ssh_command(name: &str, user: Option<&str>) -> eyre::Result<()> {
     let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
 
     let proxy_command = format!(
@@ -177,7 +113,7 @@ pub(crate) fn build_ssh_command(name: &str, user: Option<&str>) -> eyre::Result<
 
     let mut command = Command::new("ssh");
     // Do not read ~/.ssh/config or custom host stanzas. Keeps behaviour deterministic.
-    command
+    let err = command
         .arg("-F")
         .arg("/dev/null")
         // Auth + identity
@@ -217,9 +153,14 @@ pub(crate) fn build_ssh_command(name: &str, user: Option<&str>) -> eyre::Result<
         // Remote endpoint and identity
         .arg("-o")
         .arg(format!("User={ssh_user}"))
-        .arg(name);
+        .arg(name)
+        .exec();
 
-    Ok(command)
+    if err.kind() == io::ErrorKind::NotFound {
+        bail!("`ssh` command not found. install OpenSSH client and retry")
+    }
+
+    bail!("failed to execute ssh: {err}")
 }
 
 fn shell_quote(input: &str) -> String {

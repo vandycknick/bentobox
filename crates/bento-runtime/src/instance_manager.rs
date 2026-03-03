@@ -306,7 +306,7 @@ impl<D: Daemon> InstanceManager<D> {
                 Ok(line) => {
                     // TODO: I might want to handle this differently
                     if line.stream == StreamKind::Stderr {
-                        eprintln!("[instanced] {}", line.text.trim_end());
+                        // eprintln!("[instanced] {}", line.text.trim_end());
                         continue;
                     }
 

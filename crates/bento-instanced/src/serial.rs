@@ -1,39 +1,24 @@
 use bento_runtime::driver::{Driver, OpenDeviceRequest, OpenDeviceResponse};
 use bento_runtime::instance::InstanceFile;
 use eyre::Context;
-use serde::Deserialize;
-use serde_json::{Map, Value};
-use std::collections::HashMap;
-use std::fs::OpenOptions;
 use std::io;
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
+use tokio::sync::{broadcast, Mutex};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
+use crate::async_fd::AsyncFdStream;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SerialAccess {
     Interactive,
     Watch,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SerialOpenOptions {
-    #[serde(default = "default_serial_access")]
-    access: SerialAccess,
-}
-
-fn default_serial_access() -> SerialAccess {
-    SerialAccess::Interactive
 }
 
 #[derive(Debug)]
 struct SerialHub {
     next_id: u64,
     interactive_owner: Option<u64>,
-    subscribers: HashMap<u64, mpsc::SyncSender<Vec<u8>>>,
 }
 
 impl SerialHub {
@@ -41,11 +26,10 @@ impl SerialHub {
         Self {
             next_id: 1,
             interactive_owner: None,
-            subscribers: HashMap::new(),
         }
     }
 
-    fn attach(&mut self, access: SerialAccess) -> eyre::Result<(u64, mpsc::Receiver<Vec<u8>>)> {
+    fn attach(&mut self, access: SerialAccess) -> eyre::Result<u64> {
         if access == SerialAccess::Interactive && self.interactive_owner.is_some() {
             eyre::bail!("interactive serial client is already attached");
         }
@@ -53,17 +37,14 @@ impl SerialHub {
         let id = self.next_id;
         self.next_id += 1;
 
-        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(64);
-        self.subscribers.insert(id, tx);
         if access == SerialAccess::Interactive {
             self.interactive_owner = Some(id);
         }
 
-        Ok((id, rx))
+        Ok(id)
     }
 
     fn detach(&mut self, id: u64) {
-        self.subscribers.remove(&id);
         if self.interactive_owner == Some(id) {
             self.interactive_owner = None;
         }
@@ -72,38 +53,13 @@ impl SerialHub {
     fn can_write_input(&self, id: u64) -> bool {
         self.interactive_owner == Some(id)
     }
-
-    fn broadcast(&mut self, data: &[u8]) {
-        let payload = data.to_vec();
-        let mut disconnected = Vec::new();
-
-        for (id, tx) in &self.subscribers {
-            match tx.try_send(payload.clone()) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
-                    disconnected.push(*id)
-                }
-            }
-        }
-
-        for id in disconnected {
-            self.detach(id);
-        }
-    }
 }
 
 #[derive(Debug)]
 pub(crate) struct SerialRuntime {
     hub: Arc<Mutex<SerialHub>>,
-    guest_input: Arc<Mutex<std::fs::File>>,
-}
-
-pub(crate) fn parse_serial_open_options(
-    options: Map<String, Value>,
-) -> Result<SerialAccess, String> {
-    serde_json::from_value::<SerialOpenOptions>(Value::Object(options))
-        .map(|options| options.access)
-        .map_err(|err| format!("invalid serial options: {err}"))
+    guest_input: Arc<Mutex<AsyncFdStream>>,
+    output_tx: broadcast::Sender<Vec<u8>>,
 }
 
 pub(crate) fn create_serial_runtime(
@@ -124,36 +80,40 @@ pub(crate) fn create_serial_runtime(
         }
     };
 
-    let serial_log = OpenOptions::new()
+    let serial_log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(inst.file(InstanceFile::SerialLog))
         .context("open serial.log")?;
 
+    let (output_tx, _) = broadcast::channel(256);
     let runtime = Arc::new(SerialRuntime {
         hub: Arc::new(Mutex::new(SerialHub::new())),
-        guest_input: Arc::new(Mutex::new(std::fs::File::from(guest_input))),
+        guest_input: Arc::new(Mutex::new(AsyncFdStream::new(std::fs::File::from(
+            guest_input,
+        ))?)),
+        output_tx,
     });
 
     spawn_serial_reader(
-        std::fs::File::from(guest_output),
-        serial_log,
-        runtime.hub.clone(),
+        AsyncFdStream::new(std::fs::File::from(guest_output)).context("wrap serial output fd")?,
+        tokio::fs::File::from_std(serial_log),
+        runtime.output_tx.clone(),
     );
 
     Ok(runtime)
 }
 
 fn spawn_serial_reader(
-    mut guest_output: std::fs::File,
-    mut serial_log: std::fs::File,
-    hub: Arc<Mutex<SerialHub>>,
+    mut guest_output: AsyncFdStream,
+    mut serial_log: tokio::fs::File,
+    output_tx: broadcast::Sender<Vec<u8>>,
 ) {
-    thread::spawn(move || {
+    tokio::spawn(async move {
         let mut buf = [0u8; 8192];
 
         loop {
-            let n = match Read::read(&mut guest_output, &mut buf) {
+            let n = match guest_output.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -164,18 +124,13 @@ fn spawn_serial_reader(
             };
 
             let chunk = &buf[..n];
-            if let Err(err) = serial_log.write_all(chunk) {
+
+            if let Err(err) = serial_log.write_all(chunk).await {
                 tracing::error!(error = %err, "serial log write failed");
             }
-            let _ = serial_log.flush();
 
-            match hub.lock() {
-                Ok(mut hub) => hub.broadcast(chunk),
-                Err(err) => {
-                    tracing::error!(error = %err, "serial hub lock poisoned");
-                    break;
-                }
-            }
+            let _ = serial_log.flush().await;
+            let _ = output_tx.send(chunk.to_vec());
         }
     });
 }
@@ -185,97 +140,90 @@ pub(crate) fn spawn_serial_tunnel(
     runtime: Arc<SerialRuntime>,
     access: SerialAccess,
 ) {
-    thread::spawn(move || {
-        if let Err(err) = proxy_serial_stream(stream, runtime, access) {
+    tokio::spawn(async move {
+        if let Err(err) = proxy_serial_stream(stream, runtime, access).await {
             tracing::error!(error = %err, "serial relay failed");
         }
     });
 }
 
-fn proxy_serial_stream(
-    mut client_stream: UnixStream,
+async fn proxy_serial_stream(
+    client_stream: UnixStream,
     runtime: Arc<SerialRuntime>,
     access: SerialAccess,
 ) -> io::Result<()> {
-    client_stream.set_nonblocking(false)?;
-    let (client_id, output_rx) = {
-        let mut hub = runtime
-            .hub
-            .lock()
-            .map_err(|_| io::Error::other("serial hub mutex poisoned"))?;
+    let client_id = {
+        let mut hub = runtime.hub.lock().await;
         hub.attach(access)
             .map_err(|err| io::Error::other(format!("{err}")))?
     };
 
-    let mut output_stream = client_stream.try_clone()?;
-    let output_task = thread::spawn(move || -> io::Result<()> {
-        while let Ok(chunk) = output_rx.recv() {
-            output_stream.write_all(&chunk)?;
-            output_stream.flush()?;
+    let mut output_rx = runtime.output_tx.subscribe();
+    let (mut client_read, mut client_write) = client_stream.into_split();
+
+    let output_task: tokio::task::JoinHandle<io::Result<()>> = tokio::spawn(async move {
+        loop {
+            match output_rx.recv().await {
+                Ok(chunk) => {
+                    client_write.write_all(&chunk).await?;
+                    client_write.flush().await?;
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return Ok(()),
+            }
         }
-        Ok(())
     });
 
-    if access == SerialAccess::Interactive {
-        let runtime_input = runtime.clone();
-        let input_task = thread::spawn(move || -> io::Result<()> {
-            let mut buf = [0u8; 4096];
-            loop {
-                let n = Read::read(&mut client_stream, &mut buf)?;
-                if n == 0 {
-                    break;
-                }
-
-                let is_owner = runtime_input
-                    .hub
-                    .lock()
-                    .map_err(|_| io::Error::other("serial hub mutex poisoned"))?
-                    .can_write_input(client_id);
-                if !is_owner {
-                    break;
-                }
-
-                let mut guest_input = runtime_input
-                    .guest_input
-                    .lock()
-                    .map_err(|_| io::Error::other("serial input mutex poisoned"))?;
-                guest_input.write_all(&buf[..n])?;
-                guest_input.flush()?;
-            }
-            Ok(())
-        });
-
-        match input_task.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                let mut hub = runtime
-                    .hub
-                    .lock()
-                    .map_err(|_| io::Error::other("serial hub mutex poisoned"))?;
-                hub.detach(client_id);
-                return Err(err);
-            }
-            Err(_) => {
-                let mut hub = runtime
-                    .hub
-                    .lock()
-                    .map_err(|_| io::Error::other("serial hub mutex poisoned"))?;
-                hub.detach(client_id);
-                return Err(io::Error::other("serial input relay thread panicked"));
-            }
+    let relay_result = match access {
+        SerialAccess::Interactive => {
+            relay_client_input(client_id, runtime.clone(), &mut client_read).await
         }
-    }
+        SerialAccess::Watch => wait_for_client_disconnect(&mut client_read).await,
+    };
 
     {
-        let mut hub = runtime
-            .hub
-            .lock()
-            .map_err(|_| io::Error::other("serial hub mutex poisoned"))?;
+        let mut hub = runtime.hub.lock().await;
         hub.detach(client_id);
     }
 
-    match output_task.join() {
-        Ok(result) => result,
-        Err(_) => Err(io::Error::other("serial output relay thread panicked")),
+    output_task.abort();
+    let _ = output_task.await;
+
+    relay_result
+}
+
+async fn relay_client_input(
+    client_id: u64,
+    runtime: Arc<SerialRuntime>,
+    client_read: &mut tokio::net::unix::OwnedReadHalf,
+) -> io::Result<()> {
+    let mut buf = [0u8; 4096];
+
+    loop {
+        let n = client_read.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+
+        let is_owner = runtime.hub.lock().await.can_write_input(client_id);
+        if !is_owner {
+            return Ok(());
+        }
+
+        let mut guest_input = runtime.guest_input.lock().await;
+        guest_input.write_all(&buf[..n]).await?;
+        guest_input.flush().await?;
+    }
+}
+
+async fn wait_for_client_disconnect(
+    client_read: &mut tokio::net::unix::OwnedReadHalf,
+) -> io::Result<()> {
+    let mut buf = [0u8; 256];
+    loop {
+        let n = client_read.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
     }
 }

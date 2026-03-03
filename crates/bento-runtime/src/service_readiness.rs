@@ -6,14 +6,11 @@ use std::time::{Duration, Instant};
 
 use eyre::bail;
 
-use crate::instance_control::{
-    ControlErrorCode, ControlRequest, ControlResponse, ControlResponseBody, ServiceDescriptor,
-    CONTROL_PROTOCOL_VERSION,
-};
+use crate::instance_control::{ServiceDescriptor, SERVICE_SERIAL, SERVICE_SSH};
+use crate::negotiate::{Negotiate, RejectCode, Upgrade};
 
 pub const DEFAULT_SERVICE_READINESS_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const DEFAULT_SERVICE_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const CONTROL_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 enum ProbeError {
     Retryable(String),
@@ -36,12 +33,21 @@ pub fn wait_for_services_with_timeout(
     let deadline = Instant::now() + timeout;
 
     loop {
-        match list_services_once(socket_path) {
-            Ok(services) => return Ok(services),
+        match probe_instance_control_once(socket_path) {
+            Ok(()) => {
+                return Ok(vec![
+                    ServiceDescriptor {
+                        name: SERVICE_SERIAL.to_string(),
+                    },
+                    ServiceDescriptor {
+                        name: SERVICE_SSH.to_string(),
+                    },
+                ])
+            }
             Err(ProbeError::Retryable(message)) => {
                 if Instant::now() >= deadline {
                     bail!(
-                        "timed out waiting {:?} for guest service discovery readiness (last error: {})",
+                        "timed out waiting {:?} for guest service readiness via instance control (last error: {})",
                         timeout,
                         message
                     );
@@ -56,48 +62,32 @@ pub fn wait_for_services_with_timeout(
     }
 }
 
-fn list_services_once(socket_path: &Path) -> Result<Vec<ServiceDescriptor>, ProbeError> {
+fn probe_instance_control_once(socket_path: &Path) -> Result<(), ProbeError> {
     let mut stream = UnixStream::connect(socket_path)
-        .map_err(|err| classify_io_error("connect control socket", err))?;
+        .map_err(|err| classify_io_error("connect Negotiate socket", err))?;
 
-    stream
-        .set_read_timeout(Some(CONTROL_IO_TIMEOUT))
-        .map_err(|err| classify_io_error("set control socket read timeout", err))?;
-    stream
-        .set_write_timeout(Some(CONTROL_IO_TIMEOUT))
-        .map_err(|err| classify_io_error("set control socket write timeout", err))?;
-
-    ControlRequest::v1_list_services("guest-service-readiness")
-        .write_to(&mut stream)
-        .map_err(|err| classify_io_error("write list_services request", err))?;
-
-    let response = ControlResponse::read_from(&mut stream)
-        .map_err(|err| classify_io_error("read list_services response", err))?;
-
-    if response.version != CONTROL_PROTOCOL_VERSION {
-        return Err(ProbeError::Fatal(format!(
-            "unsupported_version: daemon returned protocol version {}, expected {}",
-            response.version, CONTROL_PROTOCOL_VERSION
-        )));
-    }
-
-    match response.body {
-        ControlResponseBody::Services { services } => Ok(services),
-        ControlResponseBody::Error { code, message } => match code {
-            ControlErrorCode::ServiceUnavailable | ControlErrorCode::InstanceNotRunning => Err(
-                ProbeError::Retryable(format!("{}: {message}", error_code_label(&code))),
-            ),
+    match Negotiate::client_upgrade_stream_v1(
+        &mut stream,
+        Upgrade::InstanceControl { api_version: 1 },
+    ) {
+        Ok(()) => Ok(()),
+        Err(crate::negotiate::ClientUpgradeStreamError::Io(err)) => {
+            Err(classify_io_error("negotiate instance_control stream", err))
+        }
+        Err(crate::negotiate::ClientUpgradeStreamError::Reject(reject)) => match reject.code {
+            RejectCode::ServiceStarting | RejectCode::ServiceUnavailable => {
+                Err(ProbeError::Retryable(format!(
+                    "{}: {}",
+                    reject_code_label(reject.code),
+                    reject.message
+                )))
+            }
             _ => Err(ProbeError::Fatal(format!(
-                "{}: {message}",
-                error_code_label(&code)
+                "{}: {}",
+                reject_code_label(reject.code),
+                reject.message
             ))),
         },
-        ControlResponseBody::Opened => Err(ProbeError::Fatal(
-            "invalid_response: expected services response for list_services request".to_string(),
-        )),
-        ControlResponseBody::Starting { .. } => Err(ProbeError::Retryable(
-            "service_starting: daemon is still preparing guest services".to_string(),
-        )),
     }
 }
 
@@ -124,15 +114,16 @@ fn is_retryable_io_kind(kind: io::ErrorKind) -> bool {
     )
 }
 
-fn error_code_label(code: &ControlErrorCode) -> &'static str {
+fn reject_code_label(code: RejectCode) -> &'static str {
     match code {
-        ControlErrorCode::UnsupportedVersion => "unsupported_version",
-        ControlErrorCode::UnsupportedRequest => "unsupported_request",
-        ControlErrorCode::UnknownService => "unknown_service",
-        ControlErrorCode::ServiceUnavailable => "service_unavailable",
-        ControlErrorCode::InstanceNotRunning => "instance_not_running",
-        ControlErrorCode::PermissionDenied => "permission_denied",
-        ControlErrorCode::Internal => "internal_error",
+        RejectCode::UnsupportedProtocol => "unsupported_protocol",
+        RejectCode::UnsupportedUpgrade => "unsupported_upgrade",
+        RejectCode::UnsupportedService => "unsupported_service",
+        RejectCode::ServiceStarting => "service_starting",
+        RejectCode::ServiceUnavailable => "service_unavailable",
+        RejectCode::PermissionDenied => "permission_denied",
+        RejectCode::AuthFailed => "auth_failed",
+        RejectCode::Internal => "internal_error",
     }
 }
 

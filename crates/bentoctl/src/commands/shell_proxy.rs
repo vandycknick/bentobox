@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 
 use bento_instanced::daemon::NixDaemon;
 use bento_runtime::instance::{InstanceFile, InstanceStatus};
-use bento_runtime::instance_control::{
-    ControlErrorCode, ControlRequest, ControlResponse, ControlResponseBody,
-    CONTROL_PROTOCOL_VERSION, SERVICE_SSH,
-};
+use bento_runtime::instance_control::SERVICE_SSH;
 use bento_runtime::instance_manager::InstanceManager;
+use bento_runtime::negotiate::{
+    ClientUpgradeStreamError, Negotiate, ProxyMode, RejectCode, Upgrade,
+};
 use bento_runtime::service_readiness;
 use clap::Args;
 use eyre::{bail, Context};
@@ -91,86 +91,37 @@ fn try_open_service_once(
     socket_path: &std::path::Path,
     service: &str,
 ) -> Result<UnixStream, ControlClientError> {
-    let client = ControlClient::connect(socket_path)?;
-    client.open_service(service)
-}
+    let mut stream = match UnixStream::connect(socket_path) {
+        Ok(stream) => stream,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ControlClientError::Retryable {
+                message: format!(
+                    "instanced_unreachable: control socket {} is missing, make sure the VM is running",
+                    socket_path.display()
+                ),
+            });
+        }
+        Err(err) => {
+            return Err(classify_io_error(
+                "connect control socket",
+                io::Error::new(err.kind(), format!("{} ({})", err, socket_path.display())),
+            ))
+        }
+    };
 
-struct ControlClient {
-    stream: UnixStream,
-}
-
-impl ControlClient {
-    fn connect(path: &std::path::Path) -> Result<Self, ControlClientError> {
-        let stream = match UnixStream::connect(path) {
-            Ok(stream) => stream,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ControlClientError::Retryable {
-                    message: format!(
-                        "instanced_unreachable: control socket {} is missing, make sure the VM is running",
-                        path.display()
-                    ),
-                });
-            }
-            Err(err) => {
-                return Err(classify_io_error(
-                    "connect control socket",
-                    io::Error::new(err.kind(), format!("{} ({})", err, path.display())),
-                ))
-            }
-        };
-
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .map_err(|err| classify_io_error("set control socket read timeout", err))?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .map_err(|err| classify_io_error("set control socket write timeout", err))?;
-
-        Ok(Self { stream })
-    }
-
-    fn open_service(mut self, service: &str) -> Result<UnixStream, ControlClientError> {
-        let request = ControlRequest::v1_open_service("shell-proxy", service);
-        request
-            .write_to(&mut self.stream)
-            .map_err(|err| classify_io_error("write shell request", err))?;
-
-        loop {
-            let response = ControlResponse::read_from(&mut self.stream)
-                .map_err(|err| classify_io_error("read shell response", err))?;
-
-            if response.version != CONTROL_PROTOCOL_VERSION {
-                return Err(ControlClientError::Fatal {
-                    message: format!(
-                        "unsupported_version: daemon returned protocol version {}, expected {}",
-                        response.version, CONTROL_PROTOCOL_VERSION
-                    ),
-                });
-            }
-
-            match response.body {
-                ControlResponseBody::Opened => {
-                    self.stream.set_read_timeout(None).map_err(|err| {
-                        classify_io_error("clear control socket read timeout", err)
-                    })?;
-                    self.stream.set_write_timeout(None).map_err(|err| {
-                        classify_io_error("clear control socket write timeout", err)
-                    })?;
-                    return Ok(self.stream);
-                }
-                ControlResponseBody::Starting { .. } => {
-                    continue;
-                }
-                ControlResponseBody::Error { code, message } => {
-                    return Err(classify_control_error(&code, &message));
-                }
-                ControlResponseBody::Services { .. } => {
-                    return Err(ControlClientError::Fatal {
-                        message: "invalid_response: expected opened response for service request"
-                            .to_string(),
-                    });
-                }
-            }
+    match Negotiate::client_upgrade_stream_v1(
+        &mut stream,
+        Upgrade::Proxy {
+            service: service.to_string(),
+            mode: ProxyMode::ReadWrite,
+        },
+    ) {
+        Ok(()) => Ok(stream),
+        Err(ClientUpgradeStreamError::Reject(reject)) => {
+            Err(classify_reject_code(reject.code, &reject.message))
+        }
+        Err(ClientUpgradeStreamError::Io(err)) => {
+            Err(classify_io_error("negotiate proxy stream", err))
         }
     }
 }
@@ -180,15 +131,15 @@ enum ControlClientError {
     Fatal { message: String },
 }
 
-fn classify_control_error(code: &ControlErrorCode, message: &str) -> ControlClientError {
+fn classify_reject_code(code: RejectCode, message: &str) -> ControlClientError {
     match code {
-        ControlErrorCode::ServiceUnavailable | ControlErrorCode::InstanceNotRunning => {
+        RejectCode::ServiceStarting | RejectCode::ServiceUnavailable => {
             ControlClientError::Retryable {
-                message: render_control_error(code, message),
+                message: render_reject_error(code, message),
             }
         }
         _ => ControlClientError::Fatal {
-            message: render_control_error(code, message),
+            message: render_reject_error(code, message),
         },
     }
 }
@@ -218,29 +169,32 @@ fn is_retryable_io_kind(kind: io::ErrorKind) -> bool {
     )
 }
 
-fn render_control_error(code: &ControlErrorCode, message: &str) -> String {
+fn render_reject_error(code: RejectCode, message: &str) -> String {
     match code {
-        ControlErrorCode::ServiceUnavailable => {
+        RejectCode::ServiceStarting => {
+            format!("service_starting: {message}")
+        }
+        RejectCode::ServiceUnavailable => {
             format!("service_unavailable: {message}. ensure guest service is running")
         }
-        ControlErrorCode::UnknownService => {
+        RejectCode::UnsupportedService => {
             format!("unknown_service: {message}. try a supported service like 'ssh'")
         }
-        ControlErrorCode::UnsupportedVersion => {
+        RejectCode::UnsupportedProtocol => {
             format!(
-                "unsupported_version: {message}. update bentoctl/instanced to matching versions"
+                "unsupported_protocol: {message}. update bentoctl/instanced to matching versions"
             )
         }
-        ControlErrorCode::UnsupportedRequest => {
-            format!("unsupported_request: {message}")
+        RejectCode::UnsupportedUpgrade => {
+            format!("unsupported_upgrade: {message}")
         }
-        ControlErrorCode::InstanceNotRunning => {
-            format!("instance_not_running: {message}")
-        }
-        ControlErrorCode::PermissionDenied => {
+        RejectCode::PermissionDenied => {
             format!("permission_denied: {message}")
         }
-        ControlErrorCode::Internal => {
+        RejectCode::AuthFailed => {
+            format!("auth_failed: {message}")
+        }
+        RejectCode::Internal => {
             format!("internal_error: {message}")
         }
     }

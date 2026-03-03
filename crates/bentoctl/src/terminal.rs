@@ -1,122 +1,101 @@
-use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd};
-use std::os::unix::net::UnixStream;
-use std::time::Duration;
 
-use bento_instanced::daemon::NixDaemon;
-use bento_runtime::instance::InstanceFile;
-use bento_runtime::instance_control::{
-    ControlErrorCode, ControlRequest, ControlResponse, ControlResponseBody,
-    CONTROL_PROTOCOL_VERSION, SERVICE_SERIAL,
+use bento_runtime::instance_control::SERVICE_SERIAL;
+use bento_runtime::negotiate::{
+    ClientUpgradeStreamError, Negotiate, ProxyMode, RejectCode, Upgrade,
 };
-use bento_runtime::instance_manager::InstanceManager;
 use eyre::{bail, Context};
-use serde_json::Map;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
 
-pub(crate) fn attach_serial(name: &str) -> eyre::Result<()> {
-    let manager = InstanceManager::new(NixDaemon::new("123"));
-    let inst = manager.inspect(name)?;
-    let socket_path = inst.file(InstanceFile::InstancedSocket);
-
-    let mut stream = match UnixStream::connect(&socket_path) {
+pub(crate) async fn attach_serial(socket_path: &str) -> eyre::Result<()> {
+    let stream = match UnixStream::connect(socket_path).await {
         Ok(stream) => stream,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             bail!(
                 "instanced_unreachable: control socket {} is missing, make sure the VM is running",
-                socket_path.display()
+                socket_path
             )
         }
-        Err(err) => return Err(err).context(format!("connect {}", socket_path.display())),
+        Err(err) => return Err(err).context(format!("connect {}", socket_path)),
     };
 
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .context("set control socket read timeout")?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .context("set control socket write timeout")?;
-
-    let mut options = Map::new();
-    options.insert(
-        "access".to_string(),
-        serde_json::Value::String("interactive".to_string()),
-    );
-
-    ControlRequest::v1_open_service_with_options("serial-attach", SERVICE_SERIAL, options)
-        .write_to(&mut stream)
-        .context("write serial request")?;
-
-    loop {
-        let response = ControlResponse::read_from(&mut stream).context("read serial response")?;
-
-        if response.version != CONTROL_PROTOCOL_VERSION {
-            bail!(
-                "unsupported_version: daemon returned protocol version {}, expected {}",
-                response.version,
-                CONTROL_PROTOCOL_VERSION
-            );
+    let mode = ProxyMode::ReadWrite;
+    let stream = Negotiate::client_upgrade_stream_v1_async(
+        stream,
+        Upgrade::Proxy {
+            service: SERVICE_SERIAL.to_string(),
+            mode,
+        },
+    )
+    .await
+    .map_err(|err| match err {
+        ClientUpgradeStreamError::Io(io_err) => {
+            eyre::eyre!(io_err).wrap_err("negotiate serial proxy stream")
         }
-
-        match response.body {
-            ControlResponseBody::Opened => {
-                stream
-                    .set_read_timeout(None)
-                    .context("clear control socket read timeout")?;
-                stream
-                    .set_write_timeout(None)
-                    .context("clear control socket write timeout")?;
-                return proxy_serial_stdio(stream);
-            }
-            ControlResponseBody::Starting { .. } => continue,
-            ControlResponseBody::Error { code, message } => {
-                bail!("{}", render_control_error(&code, &message))
-            }
-            ControlResponseBody::Services { .. } => {
-                bail!("invalid_response: expected opened response for service request")
-            }
+        ClientUpgradeStreamError::Reject(reject) => {
+            eyre::eyre!(render_reject_error(reject.code, &reject.message))
         }
-    }
+    })?;
+
+    print_serial_exit_hint(mode);
+    proxy_serial_stdio(stream).await
 }
 
-fn render_control_error(code: &ControlErrorCode, message: &str) -> String {
+fn print_serial_exit_hint(mode: ProxyMode) {
+    if mode != ProxyMode::ReadWrite {
+        return;
+    }
+
+    if unsafe { libc::isatty(std::io::stderr().as_raw_fd()) } == 0 {
+        return;
+    }
+
+    eprintln!("Connected to serial console. Exit with Ctrl+]");
+}
+
+fn render_reject_error(code: RejectCode, message: &str) -> String {
     match code {
-        ControlErrorCode::ServiceUnavailable => {
+        RejectCode::ServiceStarting => {
+            format!("service_starting: {message}")
+        }
+        RejectCode::ServiceUnavailable => {
             format!("service_unavailable: {message}. ensure guest service is running")
         }
-        ControlErrorCode::UnknownService => {
+        RejectCode::UnsupportedService => {
             format!("unknown_service: {message}. try a supported service like 'serial'")
         }
-        ControlErrorCode::UnsupportedVersion => {
+        RejectCode::UnsupportedProtocol => {
             format!(
-                "unsupported_version: {message}. update bentoctl/instanced to matching versions"
+                "unsupported_protocol: {message}. update bentoctl/instanced to matching versions"
             )
         }
-        ControlErrorCode::UnsupportedRequest => {
-            format!("unsupported_request: {message}")
+        RejectCode::UnsupportedUpgrade => {
+            format!("unsupported_upgrade: {message}")
         }
-        ControlErrorCode::InstanceNotRunning => {
-            format!("instance_not_running: {message}")
-        }
-        ControlErrorCode::PermissionDenied => {
+        RejectCode::PermissionDenied => {
             format!("permission_denied: {message}")
         }
-        ControlErrorCode::Internal => {
+        RejectCode::AuthFailed => {
+            format!("auth_failed: {message}")
+        }
+        RejectCode::Internal => {
             format!("internal_error: {message}")
         }
     }
 }
 
-fn proxy_serial_stdio(mut stream: UnixStream) -> eyre::Result<()> {
+async fn proxy_serial_stdio(stream: UnixStream) -> eyre::Result<()> {
     let _raw_terminal = RawTerminalGuard::new()?;
 
-    let mut stream_write = stream.try_clone().context("clone serial relay stream")?;
-    let input = std::thread::spawn(move || -> std::io::Result<()> {
-        let stdin_fd = std::io::stdin().as_fd().try_clone_to_owned()?;
-        let mut stdin_file = std::fs::File::from(stdin_fd);
+    let (mut stream_read, mut stream_write) = stream.into_split();
+
+    let input = tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 1024];
 
         loop {
-            let n = stdin_file.read(&mut buf)?;
+            let n = stdin.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
@@ -125,30 +104,35 @@ fn proxy_serial_stdio(mut stream: UnixStream) -> eyre::Result<()> {
             if chunk.contains(&0x1d) {
                 let filtered: Vec<u8> = chunk.iter().copied().filter(|b| *b != 0x1d).collect();
                 if !filtered.is_empty() {
-                    stream_write.write_all(&filtered)?;
+                    stream_write.write_all(&filtered).await?;
                 }
-                let _ = stream_write.shutdown(std::net::Shutdown::Write);
+                stream_write.shutdown().await?;
                 break;
             }
 
-            stream_write.write_all(chunk)?;
+            stream_write.write_all(chunk).await?;
         }
 
-        Ok(())
+        Ok::<(), std::io::Error>(())
     });
 
-    let stdout_fd = std::io::stdout()
-        .as_fd()
-        .try_clone_to_owned()
-        .context("dup stdout fd")?;
-    let mut stdout_file = std::fs::File::from(stdout_fd);
-    let _ = std::io::copy(&mut stream, &mut stdout_file).context("relay serial output")?;
-    stdout_file.flush().context("flush serial output")?;
+    let output = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        tokio::io::copy(&mut stream_read, &mut stdout).await?;
+        stdout.flush().await?;
+        Ok::<(), std::io::Error>(())
+    });
 
-    match input.join() {
+    match output.await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err).context("relay serial output"),
+        Err(_) => bail!("serial output task panicked"),
+    }
+
+    match input.await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(err)) => Err(err).context("relay serial input"),
-        Err(_) => bail!("serial relay thread panicked"),
+        Err(_) => bail!("serial input task panicked"),
     }
 }
 

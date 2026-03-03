@@ -132,10 +132,6 @@ impl InstanceDaemon {
                 accepted = socket.listener.accept() => {
                     match accepted {
                         Ok((stream, _)) => {
-                            let stream = stream.into_std().context("convert accepted stream")?;
-                            stream
-                                .set_nonblocking(false)
-                                .context("set accepted control stream blocking")?;
                             let serial_runtime = serial_runtime.clone();
                             let driver_ref = &*driver;
                             let result = handle_client(stream, driver_ref, serial_runtime).await;

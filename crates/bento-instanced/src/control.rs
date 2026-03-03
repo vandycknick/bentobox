@@ -1,193 +1,229 @@
 use bento_runtime::driver::{Driver, OpenDeviceRequest, OpenDeviceResponse};
-use bento_runtime::instance_control::{
-    ControlErrorCode, ControlRequest, ControlRequestBody, ControlResponse,
-    CONTROL_PROTOCOL_VERSION, SERVICE_SERIAL,
+use bento_runtime::instance_control::SERVICE_SERIAL;
+use bento_runtime::negotiate::{
+    Accept, Negotiate, ProxyMode, Reject, RejectCode, Upgrade, NEGOTIATE_PROTOCOL_VERSION,
 };
 use eyre::Context;
-use serde_json::{Map, Value};
-use std::os::unix::net::UnixStream;
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::UnixStream;
 
 use crate::discovery::{ServiceRegistry, ServiceTarget};
-use crate::serial::{parse_serial_open_options, spawn_serial_tunnel, SerialRuntime};
+use crate::serial::{spawn_serial_tunnel, SerialAccess, SerialRuntime};
 use crate::tunnel::spawn_tunnel;
 
-const SERVICE_OPEN_MAX_ATTEMPTS: u8 = 5;
-const SERVICE_OPEN_RETRY_DELAY_SECS: u64 = 2;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const RETRY_AFTER_STARTING_MS: u32 = 1000;
 
 pub(crate) async fn handle_client(
     mut stream: UnixStream,
     driver: &dyn Driver,
     serial_runtime: Arc<SerialRuntime>,
 ) -> eyre::Result<()> {
-    let request = ControlRequest::read_from(&mut stream).context("read control request")?;
-
-    if request.version != CONTROL_PROTOCOL_VERSION {
-        let response = ControlResponse::v1_error(
-            request.id,
-            ControlErrorCode::UnsupportedVersion,
-            format!(
-                "control protocol version {} is unsupported",
-                request.version
-            ),
-        );
-        response
-            .write_to(&mut stream)
-            .context("write control response")?;
-        return Ok(());
-    }
-
-    match request.body {
-        ControlRequestBody::ListServices => {
-            let service_registry = match ServiceRegistry::discover(driver).await {
-                Ok(service_registry) => service_registry,
-                Err(err) => {
-                    ControlResponse::v1_error(
-                        request.id,
-                        ControlErrorCode::ServiceUnavailable,
-                        format!("discover guest services failed: {err}"),
-                    )
-                    .write_to(&mut stream)
-                    .context("write control response")?;
-                    return Ok(());
-                }
-            };
-            let response = ControlResponse::v1_services(request.id, service_registry.describe());
-            response
-                .write_to(&mut stream)
-                .context("write control response")?;
+    let request = match tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        Negotiate::read_from_async(&mut stream),
+    )
+    .await
+    {
+        Ok(Ok(request)) => request,
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "failed to read Negotiate request");
+            return Ok(());
         }
-        ControlRequestBody::OpenService { service, options } => {
-            let id = request.id;
-            let target = if service == SERVICE_SERIAL {
-                Some(ServiceTarget::Serial)
-            } else {
-                let service_registry = match ServiceRegistry::discover(driver).await {
-                    Ok(service_registry) => service_registry,
-                    Err(err) => {
-                        ControlResponse::v1_error(
-                            id,
-                            ControlErrorCode::ServiceUnavailable,
-                            format!("discover guest services failed: {err}"),
-                        )
-                        .write_to(&mut stream)
-                        .context("write control response")?;
-                        return Ok(());
-                    }
-                };
-                service_registry.resolve(&service)
-            };
-
-            let Some(target) = target else {
-                let response = ControlResponse::v1_error(
-                    id,
-                    ControlErrorCode::UnknownService,
-                    format!("service '{service}' is not registered"),
-                );
-                response
-                    .write_to(&mut stream)
-                    .context("write control response")?;
-                return Ok(());
-            };
-
-            match target {
-                ServiceTarget::VsockPort(port) => {
-                    if !options.is_empty() {
-                        ControlResponse::v1_error(
-                            id,
-                            ControlErrorCode::UnsupportedRequest,
-                            "ssh service does not accept options",
-                        )
-                        .write_to(&mut stream)
-                        .context("write control response")?;
-                        return Ok(());
-                    }
-
-                    let mut last_err = None;
-
-                    for attempt in 1..=SERVICE_OPEN_MAX_ATTEMPTS {
-                        match driver.open_device(OpenDeviceRequest::Vsock { port }) {
-                            Ok(OpenDeviceResponse::Vsock { stream: vsock_fd }) => {
-                                ControlResponse::v1_opened(id.clone())
-                                    .write_to(&mut stream)
-                                    .context("write control response")?;
-                                spawn_tunnel(stream, vsock_fd);
-                                return Ok(());
-                            }
-                            Ok(_) => {
-                                last_err = Some(eyre::eyre!(
-                                    "driver returned unexpected device type for ssh service"
-                                ));
-                            }
-                            Err(err) => {
-                                last_err = Some(eyre::eyre!(err));
-
-                                if attempt < SERVICE_OPEN_MAX_ATTEMPTS {
-                                    ControlResponse::v1_starting(
-                                        id.clone(),
-                                        attempt,
-                                        SERVICE_OPEN_MAX_ATTEMPTS,
-                                        SERVICE_OPEN_RETRY_DELAY_SECS,
-                                    )
-                                    .write_to(&mut stream)
-                                    .context("write control response")?;
-
-                                    tokio::time::sleep(Duration::from_secs(
-                                        SERVICE_OPEN_RETRY_DELAY_SECS,
-                                    ))
-                                    .await;
-                                }
-                            }
-                        }
-                    }
-
-                    let err_text = last_err
-                        .map(|err| err.to_string())
-                        .unwrap_or_else(|| "unknown startup error".to_string());
-
-                    ControlResponse::v1_error(
-                        id,
-                        ControlErrorCode::ServiceUnavailable,
-                        format!(
-                            "failed to open service '{service}' on vsock port {port} after {} attempts: {err_text}",
-                            SERVICE_OPEN_MAX_ATTEMPTS
-                        ),
-                    )
-                    .write_to(&mut stream)
-                    .context("write control response")?;
-                }
-                ServiceTarget::Serial => {
-                    handle_open_serial(stream, id, options, serial_runtime)?;
-                    return Ok(());
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn handle_open_serial(
-    mut stream: UnixStream,
-    id: String,
-    options: Map<String, Value>,
-    serial_runtime: Arc<SerialRuntime>,
-) -> eyre::Result<()> {
-    let access = match parse_serial_open_options(options) {
-        Ok(access) => access,
-        Err(message) => {
-            ControlResponse::v1_error(id, ControlErrorCode::UnsupportedRequest, message)
-                .write_to(&mut stream)
-                .context("write control response")?;
+        Err(_) => {
+            tracing::warn!("timed out waiting for Negotiate request");
             return Ok(());
         }
     };
 
-    ControlResponse::v1_opened(id)
-        .write_to(&mut stream)
-        .context("write control response")?;
-    spawn_serial_tunnel(stream, serial_runtime, access);
+    if request.protocol_version != NEGOTIATE_PROTOCOL_VERSION {
+        return reject(
+            &mut stream,
+            request.request_id,
+            RejectCode::UnsupportedProtocol,
+            format!(
+                "Negotiate protocol version {} is unsupported",
+                request.protocol_version
+            ),
+            None,
+        )
+        .await;
+    }
 
+    if !peer_uid_matches_current(&stream) {
+        return reject(
+            &mut stream,
+            request.request_id,
+            RejectCode::PermissionDenied,
+            "peer uid is not authorized for this socket",
+            None,
+        )
+        .await;
+    }
+
+    match request.upgrade {
+        Upgrade::Proxy { service, mode } => {
+            let target = resolve_proxy_target(driver, &service).await;
+            let Some(target) = target else {
+                return reject(
+                    &mut stream,
+                    request.request_id,
+                    RejectCode::UnsupportedService,
+                    format!("service '{service}' is not registered"),
+                    None,
+                )
+                .await;
+            };
+
+            match target {
+                ServiceTarget::VsockPort(port) => {
+                    match driver.open_device(OpenDeviceRequest::Vsock { port }) {
+                        Ok(OpenDeviceResponse::Vsock { stream: vsock_fd }) => {
+                            accept(&mut stream, request.request_id, None).await?;
+                            spawn_tunnel(stream, vsock_fd);
+                            Ok(())
+                        }
+                        Ok(_) => {
+                            reject(
+                                &mut stream,
+                                request.request_id,
+                                RejectCode::Internal,
+                                "driver returned unexpected device type for proxy service",
+                                None,
+                            )
+                            .await
+                        }
+                        Err(err) => {
+                            tracing::info!(error = %err, service = %service, "proxy service still starting");
+                            reject(
+                                &mut stream,
+                                request.request_id,
+                                RejectCode::ServiceStarting,
+                                "service is starting",
+                                Some(RETRY_AFTER_STARTING_MS),
+                            )
+                            .await
+                        }
+                    }
+                }
+                ServiceTarget::Serial => {
+                    let access = match mode {
+                        ProxyMode::ReadOnly => SerialAccess::Watch,
+                        ProxyMode::ReadWrite => SerialAccess::Interactive,
+                    };
+
+                    accept(&mut stream, request.request_id, None).await?;
+                    spawn_serial_tunnel(stream, serial_runtime, access);
+                    Ok(())
+                }
+            }
+        }
+        Upgrade::InstanceControl { .. } => match ServiceRegistry::discover(driver).await {
+            Ok(_) => accept(&mut stream, request.request_id, None).await,
+            Err(err) => {
+                tracing::info!(error = %err, "instance control not ready yet");
+                reject(
+                    &mut stream,
+                    request.request_id,
+                    RejectCode::ServiceStarting,
+                    "instance control is not ready",
+                    Some(RETRY_AFTER_STARTING_MS),
+                )
+                .await
+            }
+        },
+    }
+}
+
+async fn resolve_proxy_target(driver: &dyn Driver, service: &str) -> Option<ServiceTarget> {
+    if service == SERVICE_SERIAL {
+        return Some(ServiceTarget::Serial);
+    }
+
+    ServiceRegistry::discover(driver)
+        .await
+        .ok()
+        .and_then(|registry| registry.resolve(service))
+}
+
+async fn accept(
+    stream: &mut UnixStream,
+    request_id: u64,
+    message: Option<String>,
+) -> eyre::Result<()> {
+    Accept {
+        request_id,
+        message,
+    }
+    .write_to_async(stream)
+    .await
+    .context("write Negotiate accept")?;
     Ok(())
+}
+
+async fn reject(
+    stream: &mut UnixStream,
+    request_id: u64,
+    code: RejectCode,
+    message: impl Into<String>,
+    retry_after_ms: Option<u32>,
+) -> eyre::Result<()> {
+    Reject {
+        request_id,
+        code,
+        message: message.into(),
+        retry_after_ms,
+    }
+    .write_to_async(stream)
+    .await
+    .context("write Negotiate reject")?;
+    Ok(())
+}
+
+fn peer_uid_matches_current(stream: &UnixStream) -> bool {
+    match peer_uid(stream) {
+        Ok(peer_uid) => peer_uid == unsafe { libc::geteuid() },
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to resolve peer uid");
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    let fd = stream.as_raw_fd();
+    let mut euid: libc::uid_t = 0;
+    let mut egid: libc::gid_t = 0;
+    let rc = unsafe { libc::getpeereid(fd, &mut euid, &mut egid) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(euid)
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+    let fd = stream.as_raw_fd();
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast::<libc::c_void>(),
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(cred.uid)
 }

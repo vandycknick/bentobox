@@ -8,6 +8,7 @@ pub mod instance;
 pub mod instance_control;
 pub mod instance_manager;
 pub mod log_watcher;
+pub mod negotiate;
 pub mod service_readiness;
 pub mod ssh_keys;
 pub mod utils;
