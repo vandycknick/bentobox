@@ -1,8 +1,15 @@
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bento_protocol::instance::v1::instance_control_service_client::InstanceControlServiceClient;
+use bento_protocol::instance::v1::HealthRequest;
 use eyre::bail;
+use hyper_util::rt::TokioIo;
+use tokio::sync::Mutex;
+use tonic::transport::Endpoint;
+use tower::service_fn;
 
 use crate::negotiate::{ClientUpgradeStreamError, Negotiate, RejectCode, Upgrade};
 use crate::services::{ServiceDescriptor, SERVICE_SERIAL, SERVICE_SSH};
@@ -69,7 +76,19 @@ async fn probe_instance_control_once(socket_path: &Path) -> Result<(), ProbeErro
     match Negotiate::client_upgrade_stream_v1(stream, Upgrade::InstanceControl { api_version: 1 })
         .await
     {
-        Ok(_stream) => Ok(()),
+        Ok(stream) => {
+            let health = call_instance_control_health(stream).await?;
+            if health.ok {
+                Ok(())
+            } else {
+                let message = if health.message.is_empty() {
+                    "instance control health check failed".to_string()
+                } else {
+                    health.message
+                };
+                Err(ProbeError::Retryable(message))
+            }
+        }
         Err(ClientUpgradeStreamError::Io(err)) => {
             Err(classify_io_error("negotiate instance_control stream", err))
         }
@@ -88,6 +107,41 @@ async fn probe_instance_control_once(socket_path: &Path) -> Result<(), ProbeErro
             ))),
         },
     }
+}
+
+async fn call_instance_control_health(
+    stream: tokio::net::UnixStream,
+) -> Result<bento_protocol::instance::v1::HealthResponse, ProbeError> {
+    let stream_slot = Arc::new(Mutex::new(Some(stream)));
+    let connector = service_fn(move |_| {
+        let stream_slot = Arc::clone(&stream_slot);
+        async move {
+            let mut guard = stream_slot.lock().await;
+            guard
+                .take()
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        "instance control connector stream already consumed",
+                    )
+                })
+                .map(TokioIo::new)
+        }
+    });
+
+    let channel = Endpoint::from_static("http://instance-control.local")
+        .connect_with_connector(connector)
+        .await
+        .map_err(|err| {
+            ProbeError::Retryable(format!("connect instance control rpc client: {err}"))
+        })?;
+
+    let mut client = InstanceControlServiceClient::new(channel);
+    let response = client.health(HealthRequest {}).await.map_err(|err| {
+        ProbeError::Retryable(format!("instance control health rpc failed: {err}"))
+    })?;
+
+    Ok(response.into_inner())
 }
 
 fn classify_io_error(context: &str, err: io::Error) -> ProbeError {

@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package instance.v1;
+
+service InstanceControlService {
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  string message = 2;
+}

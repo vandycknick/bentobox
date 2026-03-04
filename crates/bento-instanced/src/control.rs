@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 
 use crate::discovery::{ServiceRegistry, ServiceTarget};
+use crate::instance_control_service;
 use crate::serial::{spawn_serial_tunnel, SerialAccess, SerialRuntime};
 use crate::tunnel::spawn_tunnel;
 
@@ -116,20 +117,18 @@ pub(crate) async fn handle_client(
                 }
             }
         }
-        Upgrade::InstanceControl { .. } => match ServiceRegistry::discover(driver).await {
-            Ok(_) => accept(&mut stream, request.request_id, None).await,
-            Err(err) => {
-                tracing::info!(error = %err, "instance control not ready yet");
-                reject(
-                    &mut stream,
-                    request.request_id,
-                    RejectCode::ServiceStarting,
-                    "instance control is not ready",
-                    Some(RETRY_AFTER_STARTING_MS),
-                )
-                .await
-            }
-        },
+        Upgrade::InstanceControl { .. } => {
+            let ready = match ServiceRegistry::discover(driver).await {
+                Ok(_) => true,
+                Err(err) => {
+                    tracing::info!(error = %err, "instance control not ready yet");
+                    false
+                }
+            };
+
+            accept(&mut stream, request.request_id, None).await?;
+            instance_control_service::serve(stream, ready).await
+        }
     }
 }
 

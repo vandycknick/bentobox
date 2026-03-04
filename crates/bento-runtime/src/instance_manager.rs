@@ -608,7 +608,7 @@ pub async fn wait_for_instanced_start(ha_pid_path: &Path, ha_stderr_path: &Path)
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
-                    "hostagent ({}) did not start up in {:?} (hint: see {})",
+                    "instanced ({}) did not start up in {:?} (hint: see {})",
                     ha_pid_path.display(),
                     deadline_duration,
                     ha_stderr_path.display(),
