@@ -26,7 +26,11 @@ impl Cmd {
         let mut manager = InstanceManager::new(daemon);
 
         let inst = manager.inspect(&self.name)?;
-        manager.start(&inst)?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .context("build tokio runtime for start command")?;
+        runtime.block_on(manager.start(&inst))?;
         Ok(())
     }
 }

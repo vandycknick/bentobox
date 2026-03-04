@@ -1,14 +1,15 @@
 use std::{
-    fs::File,
-    io::{self, BufRead, BufReader, Seek, SeekFrom},
+    io,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        Arc,
     },
-    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamKind {
@@ -32,7 +33,7 @@ pub enum WatchError {
 pub struct LogWatcher {
     rx: mpsc::Receiver<Result<LogLine, WatchError>>,
     stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl LogWatcher {
@@ -42,56 +43,68 @@ impl LogWatcher {
         timeout: Duration,
         poll_interval: Duration,
     ) -> Self {
-        let (tx, rx) = mpsc::channel::<Result<LogLine, WatchError>>();
+        let (tx, rx) = mpsc::channel::<Result<LogLine, WatchError>>(256);
         let stop = Arc::new(AtomicBool::new(false));
-        let stop_thread = Arc::clone(&stop);
+        let stop_task = Arc::clone(&stop);
 
-        let handle = thread::spawn(move || {
+        let handle = tokio::spawn(async move {
             let deadline = Instant::now() + timeout;
             let mut stdout_offset = 0_u64;
             let mut stderr_offset = 0_u64;
 
             loop {
-                if stop_thread.load(Ordering::Relaxed) {
+                if stop_task.load(Ordering::Relaxed) {
                     break;
                 }
 
                 if Instant::now() >= deadline {
-                    let _ = tx.send(Err(WatchError::TimedOut));
+                    let _ = tx.send(Err(WatchError::TimedOut)).await;
                     break;
                 }
 
-                match read_new_lines(&stdout_path, &mut stdout_offset) {
+                match read_new_lines(&stdout_path, &mut stdout_offset).await {
                     Ok(lines) => {
                         for text in lines {
-                            let _ = tx.send(Ok(LogLine {
-                                stream: StreamKind::Stdout,
-                                text,
-                            }));
+                            if tx
+                                .send(Ok(LogLine {
+                                    stream: StreamKind::Stdout,
+                                    text,
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
                     Err(err) => {
-                        let _ = tx.send(Err(WatchError::Io(err)));
+                        let _ = tx.send(Err(WatchError::Io(err))).await;
                         break;
                     }
                 }
 
-                match read_new_lines(&stderr_path, &mut stderr_offset) {
+                match read_new_lines(&stderr_path, &mut stderr_offset).await {
                     Ok(lines) => {
                         for text in lines {
-                            let _ = tx.send(Ok(LogLine {
-                                stream: StreamKind::Stderr,
-                                text,
-                            }));
+                            if tx
+                                .send(Ok(LogLine {
+                                    stream: StreamKind::Stderr,
+                                    text,
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
                     Err(err) => {
-                        let _ = tx.send(Err(WatchError::Io(err)));
+                        let _ = tx.send(Err(WatchError::Io(err))).await;
                         break;
                     }
                 }
 
-                thread::sleep(poll_interval);
+                tokio::time::sleep(poll_interval).await;
             }
         });
 
@@ -101,8 +114,9 @@ impl LogWatcher {
             handle: Some(handle),
         }
     }
-    pub fn recv(&self) -> Result<Result<LogLine, WatchError>, mpsc::RecvError> {
-        self.rx.recv()
+
+    pub async fn recv(&mut self) -> Option<Result<LogLine, WatchError>> {
+        self.rx.recv().await
     }
 
     pub fn cancel(&self) {
@@ -114,25 +128,28 @@ impl Drop for LogWatcher {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            handle.abort();
         }
     }
 }
 
-fn read_new_lines(path: &Path, offset: &mut u64) -> io::Result<Vec<String>> {
-    let file = match File::open(path) {
-        Ok(f) => f,
+async fn read_new_lines(path: &Path, offset: &mut u64) -> io::Result<Vec<String>> {
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(err),
     };
 
     let mut reader = BufReader::new(file);
-    reader.seek(SeekFrom::Start(*offset))?;
+    reader
+        .seek(std::io::SeekFrom::Start(*offset))
+        .await
+        .map_err(io::Error::other)?;
 
     let mut lines = Vec::new();
     loop {
         let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
+        let n = reader.read_line(&mut line).await?;
         if n == 0 {
             break;
         }

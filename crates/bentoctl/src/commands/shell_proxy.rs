@@ -1,7 +1,5 @@
 use std::fmt::{Display, Formatter};
-use std::io::{self, Write};
-use std::os::fd::AsFd;
-use std::os::unix::net::UnixStream;
+use std::io;
 use std::time::{Duration, Instant};
 
 use bento_instanced::daemon::NixDaemon;
@@ -14,6 +12,7 @@ use bento_runtime::negotiate::{
 use bento_runtime::service_readiness;
 use clap::Args;
 use eyre::{bail, Context};
+use tokio::io::AsyncWriteExt;
 
 #[derive(Args, Debug)]
 #[command(hide = true)]
@@ -33,6 +32,14 @@ impl Display for Cmd {
 
 impl Cmd {
     pub fn run(&self) -> eyre::Result<()> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .context("build tokio runtime for shell proxy")?;
+        runtime.block_on(self.run_async())
+    }
+
+    async fn run_async(&self) -> eyre::Result<()> {
         let manager = InstanceManager::new(NixDaemon::new("123"));
         let inst = manager.inspect(&self.name)?;
         let socket_path = inst.file(InstanceFile::InstancedSocket);
@@ -42,8 +49,8 @@ impl Cmd {
         let deadline = Instant::now() + service_readiness::DEFAULT_SERVICE_READINESS_TIMEOUT;
 
         loop {
-            match try_open_service_once(&socket_path, &self.service) {
-                Ok(stream) => return proxy_stdio(stream),
+            match try_open_service_once(&socket_path, &self.service).await {
+                Ok(stream) => return proxy_stdio(stream).await,
                 Err(ControlClientError::Fatal { message }) => bail!("{message}"),
                 Err(ControlClientError::Retryable { message }) => {
                     if !should_wait_for_guest_readiness {
@@ -62,6 +69,7 @@ impl Cmd {
                         remaining,
                         Duration::from_secs(1),
                     )
+                    .await
                     .context("wait for guest service discovery readiness")?;
 
                     if self.service == SERVICE_SSH
@@ -87,36 +95,38 @@ impl Cmd {
     }
 }
 
-fn try_open_service_once(
+async fn try_open_service_once(
     socket_path: &std::path::Path,
     service: &str,
-) -> Result<UnixStream, ControlClientError> {
-    let mut stream = match UnixStream::connect(socket_path) {
-        Ok(stream) => stream,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ControlClientError::Retryable {
-                message: format!(
-                    "instanced_unreachable: control socket {} is missing, make sure the VM is running",
-                    socket_path.display()
-                ),
-            });
-        }
-        Err(err) => {
-            return Err(classify_io_error(
-                "connect control socket",
-                io::Error::new(err.kind(), format!("{} ({})", err, socket_path.display())),
-            ))
-        }
-    };
+) -> Result<tokio::net::UnixStream, ControlClientError> {
+    let stream = tokio::net::UnixStream::connect(socket_path)
+        .await
+        .map_err(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                ControlClientError::Retryable {
+                    message: format!(
+                        "instanced_unreachable: control socket {} is missing, make sure the VM is running",
+                        socket_path.display()
+                    ),
+                }
+            } else {
+                classify_io_error(
+                    "connect control socket",
+                    io::Error::new(err.kind(), format!("{} ({})", err, socket_path.display())),
+                )
+            }
+        })?;
 
     match Negotiate::client_upgrade_stream_v1(
-        &mut stream,
+        stream,
         Upgrade::Proxy {
             service: service.to_string(),
             mode: ProxyMode::ReadWrite,
         },
-    ) {
-        Ok(()) => Ok(stream),
+    )
+    .await
+    {
+        Ok(stream) => Ok(stream),
         Err(ClientUpgradeStreamError::Reject(reject)) => {
             Err(classify_reject_code(reject.code, &reject.message))
         }
@@ -200,28 +210,30 @@ fn render_reject_error(code: RejectCode, message: &str) -> String {
     }
 }
 
-fn proxy_stdio(mut stream: UnixStream) -> eyre::Result<()> {
-    let mut stream_write = stream.try_clone().context("clone relay stream")?;
-    let copy_in = std::thread::spawn(move || -> std::io::Result<()> {
-        let stdin_fd = std::io::stdin().as_fd().try_clone_to_owned()?;
-        let mut stdin_file = std::fs::File::from(stdin_fd);
-        std::io::copy(&mut stdin_file, &mut stream_write)?;
-        let _ = stream_write.shutdown(std::net::Shutdown::Write);
-        Ok(())
-    });
+async fn proxy_stdio(stream: tokio::net::UnixStream) -> eyre::Result<()> {
+    let (mut stream_read, mut stream_write) = stream.into_split();
 
-    let stdout_fd = std::io::stdout()
-        .as_fd()
-        .try_clone_to_owned()
-        .context("dup stdout fd")?;
+    let input = async {
+        let mut stdin = tokio::io::stdin();
+        tokio::io::copy(&mut stdin, &mut stream_write)
+            .await
+            .context("relay shell input")?;
+        stream_write
+            .shutdown()
+            .await
+            .context("shutdown shell input stream")?;
+        Ok::<(), eyre::Report>(())
+    };
 
-    let mut stdout_file = std::fs::File::from(stdout_fd);
-    let _ = std::io::copy(&mut stream, &mut stdout_file).context("relay shell output")?;
-    stdout_file.flush().context("flush shell output")?;
+    let output = async {
+        let mut stdout = tokio::io::stdout();
+        tokio::io::copy(&mut stream_read, &mut stdout)
+            .await
+            .context("relay shell output")?;
+        stdout.flush().await.context("flush shell output")?;
+        Ok::<(), eyre::Report>(())
+    };
 
-    match copy_in.join() {
-        Ok(Ok(_in_bytes)) => Ok(()),
-        Ok(Err(err)) => Err(err).context("relay shell input"),
-        Err(_) => bail!("shell relay thread panicked"),
-    }
+    tokio::try_join!(output, input)?;
+    Ok(())
 }

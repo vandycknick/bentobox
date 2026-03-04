@@ -3,7 +3,6 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::{Child, Stdio},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -258,7 +257,7 @@ impl<D: Daemon> InstanceManager<D> {
         Ok(instances)
     }
 
-    pub fn start(&mut self, inst: &Instance) -> Result<(), InstanceError> {
+    pub async fn start(&mut self, inst: &Instance) -> Result<(), InstanceError> {
         inst.validate_network_mode()
             .map_err(|reason| InstanceError::GenericError { reason })?;
 
@@ -290,9 +289,9 @@ impl<D: Daemon> InstanceManager<D> {
             .stderr(Stdio::from(stderr))
             .spawn()?;
 
-        wait_for_instanced_start(&pid_path, &stderr_path)?;
+        wait_for_instanced_start(&pid_path, &stderr_path).await?;
 
-        let watcher = LogWatcher::spawn(
+        let mut watcher = LogWatcher::spawn(
             stdout_path,
             stderr_path,
             Duration::from_secs(60 * 10),
@@ -300,10 +299,8 @@ impl<D: Daemon> InstanceManager<D> {
         );
 
         loop {
-            match watcher.recv().map_err(|_| InstanceError::GenericError {
-                reason: String::from("failed"),
-            })? {
-                Ok(line) => {
+            match watcher.recv().await {
+                Some(Ok(line)) => {
                     // TODO: I might want to handle this differently
                     if line.stream == StreamKind::Stderr {
                         // eprintln!("[instanced] {}", line.text.trim_end());
@@ -317,6 +314,7 @@ impl<D: Daemon> InstanceManager<D> {
                                     service_readiness::wait_for_services(
                                         &inst.file(InstanceFile::InstancedSocket),
                                     )
+                                    .await
                                     .map_err(|err| {
                                         InstanceError::GenericError {
                                             reason: format!(
@@ -337,13 +335,18 @@ impl<D: Daemon> InstanceManager<D> {
                         }
                     }
                 }
-                Err(WatchError::TimedOut) => {
+                Some(Err(WatchError::TimedOut)) => {
                     return Err(InstanceError::Io(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "timed out waiting for Running event",
                     )));
                 }
-                Err(WatchError::Io(err)) => return Err(err.into()),
+                Some(Err(WatchError::Io(err))) => return Err(err.into()),
+                None => {
+                    return Err(InstanceError::GenericError {
+                        reason: String::from("log watcher terminated unexpectedly"),
+                    });
+                }
             }
         }
     }
@@ -589,13 +592,13 @@ pub fn validate_name(name: &str) -> Result<(), InstanceError> {
     Ok(())
 }
 
-pub fn wait_for_instanced_start(ha_pid_path: &Path, ha_stderr_path: &Path) -> io::Result<()> {
+pub async fn wait_for_instanced_start(ha_pid_path: &Path, ha_stderr_path: &Path) -> io::Result<()> {
     let deadline_duration = Duration::from_secs(5);
     let deadline = Instant::now() + deadline_duration;
     let poll_interval = Duration::from_millis(50);
 
     loop {
-        match std::fs::metadata(ha_pid_path) {
+        match tokio::fs::metadata(ha_pid_path).await {
             Ok(_) => return Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(err),
@@ -613,6 +616,6 @@ pub fn wait_for_instanced_start(ha_pid_path: &Path, ha_stderr_path: &Path) -> io
             ));
         }
 
-        thread::sleep(poll_interval);
+        tokio::time::sleep(poll_interval).await;
     }
 }

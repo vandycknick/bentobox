@@ -1,13 +1,11 @@
 use std::io;
-use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use eyre::bail;
 
 use crate::instance_control::{ServiceDescriptor, SERVICE_SERIAL, SERVICE_SSH};
-use crate::negotiate::{Negotiate, RejectCode, Upgrade};
+use crate::negotiate::{ClientUpgradeStreamError, Negotiate, RejectCode, Upgrade};
 
 pub const DEFAULT_SERVICE_READINESS_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const DEFAULT_SERVICE_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -17,15 +15,16 @@ enum ProbeError {
     Fatal(String),
 }
 
-pub fn wait_for_services(socket_path: &Path) -> eyre::Result<Vec<ServiceDescriptor>> {
+pub async fn wait_for_services(socket_path: &Path) -> eyre::Result<Vec<ServiceDescriptor>> {
     wait_for_services_with_timeout(
         socket_path,
         DEFAULT_SERVICE_READINESS_TIMEOUT,
         DEFAULT_SERVICE_READINESS_POLL_INTERVAL,
     )
+    .await
 }
 
-pub fn wait_for_services_with_timeout(
+pub async fn wait_for_services_with_timeout(
     socket_path: &Path,
     timeout: Duration,
     poll_interval: Duration,
@@ -33,7 +32,7 @@ pub fn wait_for_services_with_timeout(
     let deadline = Instant::now() + timeout;
 
     loop {
-        match probe_instance_control_once(socket_path) {
+        match probe_instance_control_once(socket_path).await {
             Ok(()) => {
                 return Ok(vec![
                     ServiceDescriptor {
@@ -53,7 +52,7 @@ pub fn wait_for_services_with_timeout(
                     );
                 }
 
-                thread::sleep(poll_interval);
+                tokio::time::sleep(poll_interval).await;
             }
             Err(ProbeError::Fatal(message)) => {
                 bail!("{message}");
@@ -62,19 +61,19 @@ pub fn wait_for_services_with_timeout(
     }
 }
 
-fn probe_instance_control_once(socket_path: &Path) -> Result<(), ProbeError> {
-    let mut stream = UnixStream::connect(socket_path)
+async fn probe_instance_control_once(socket_path: &Path) -> Result<(), ProbeError> {
+    let stream = tokio::net::UnixStream::connect(socket_path)
+        .await
         .map_err(|err| classify_io_error("connect Negotiate socket", err))?;
 
-    match Negotiate::client_upgrade_stream_v1(
-        &mut stream,
-        Upgrade::InstanceControl { api_version: 1 },
-    ) {
-        Ok(()) => Ok(()),
-        Err(crate::negotiate::ClientUpgradeStreamError::Io(err)) => {
+    match Negotiate::client_upgrade_stream_v1(stream, Upgrade::InstanceControl { api_version: 1 })
+        .await
+    {
+        Ok(_stream) => Ok(()),
+        Err(ClientUpgradeStreamError::Io(err)) => {
             Err(classify_io_error("negotiate instance_control stream", err))
         }
-        Err(crate::negotiate::ClientUpgradeStreamError::Reject(reject)) => match reject.code {
+        Err(ClientUpgradeStreamError::Reject(reject)) => match reject.code {
             RejectCode::ServiceStarting | RejectCode::ServiceUnavailable => {
                 Err(ProbeError::Retryable(format!(
                     "{}: {}",

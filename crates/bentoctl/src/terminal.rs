@@ -21,7 +21,7 @@ pub(crate) async fn attach_serial(socket_path: &str) -> eyre::Result<()> {
     };
 
     let mode = ProxyMode::ReadWrite;
-    let stream = Negotiate::client_upgrade_stream_v1_async(
+    let stream = Negotiate::client_upgrade_stream_v1(
         stream,
         Upgrade::Proxy {
             service: SERVICE_SERIAL.to_string(),
@@ -90,12 +90,15 @@ async fn proxy_serial_stdio(stream: UnixStream) -> eyre::Result<()> {
 
     let (mut stream_read, mut stream_write) = stream.into_split();
 
-    let input = tokio::spawn(async move {
+    let input = async {
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 1024];
 
         loop {
-            let n = stdin.read(&mut buf).await?;
+            let n = stdin
+                .read(&mut buf)
+                .await
+                .context("relay serial input read")?;
             if n == 0 {
                 break;
             }
@@ -104,36 +107,38 @@ async fn proxy_serial_stdio(stream: UnixStream) -> eyre::Result<()> {
             if chunk.contains(&0x1d) {
                 let filtered: Vec<u8> = chunk.iter().copied().filter(|b| *b != 0x1d).collect();
                 if !filtered.is_empty() {
-                    stream_write.write_all(&filtered).await?;
+                    stream_write
+                        .write_all(&filtered)
+                        .await
+                        .context("relay serial input write")?;
                 }
-                stream_write.shutdown().await?;
+                stream_write
+                    .shutdown()
+                    .await
+                    .context("relay serial input shutdown")?;
                 break;
             }
 
-            stream_write.write_all(chunk).await?;
+            stream_write
+                .write_all(chunk)
+                .await
+                .context("relay serial input write")?;
         }
 
-        Ok::<(), std::io::Error>(())
-    });
+        Ok::<(), eyre::Report>(())
+    };
 
-    let output = tokio::spawn(async move {
+    let output = async {
         let mut stdout = tokio::io::stdout();
-        tokio::io::copy(&mut stream_read, &mut stdout).await?;
-        stdout.flush().await?;
-        Ok::<(), std::io::Error>(())
-    });
+        tokio::io::copy(&mut stream_read, &mut stdout)
+            .await
+            .context("relay serial output")?;
+        stdout.flush().await.context("flush serial output")?;
+        Ok::<(), eyre::Report>(())
+    };
 
-    match output.await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => return Err(err).context("relay serial output"),
-        Err(_) => bail!("serial output task panicked"),
-    }
-
-    match input.await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(err)) => Err(err).context("relay serial input"),
-        Err(_) => bail!("serial input task panicked"),
-    }
+    tokio::try_join!(output, input)?;
+    Ok(())
 }
 
 struct RawTerminalGuard {

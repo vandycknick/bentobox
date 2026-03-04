@@ -1,5 +1,4 @@
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -146,36 +145,7 @@ impl Negotiate {
         write_framed_async(stream, self).await
     }
 
-    pub fn client_upgrade_stream_v1(
-        stream: &mut UnixStream,
-        upgrade: Upgrade,
-    ) -> Result<(), ClientUpgradeStreamError> {
-        stream
-            .set_read_timeout(Some(NEGOTIATE_STREAM_TIMEOUT))
-            .map_err(ClientUpgradeStreamError::Io)?;
-        stream
-            .set_write_timeout(Some(NEGOTIATE_STREAM_TIMEOUT))
-            .map_err(ClientUpgradeStreamError::Io)?;
-
-        Negotiate::new(1, upgrade)
-            .write_to(stream)
-            .map_err(ClientUpgradeStreamError::Io)?;
-
-        match NegotiateResult::read_from(stream).map_err(ClientUpgradeStreamError::Io)? {
-            NegotiateResult::Accept(_) => {
-                stream
-                    .set_read_timeout(None)
-                    .map_err(ClientUpgradeStreamError::Io)?;
-                stream
-                    .set_write_timeout(None)
-                    .map_err(ClientUpgradeStreamError::Io)?;
-                Ok(())
-            }
-            NegotiateResult::Reject(reject) => Err(ClientUpgradeStreamError::Reject(reject)),
-        }
-    }
-
-    pub async fn client_upgrade_stream_v1_async(
+    pub async fn client_upgrade_stream_v1(
         stream: tokio::net::UnixStream,
         upgrade: Upgrade,
     ) -> Result<tokio::net::UnixStream, ClientUpgradeStreamError> {
