@@ -11,11 +11,12 @@ use tracing_subscriber::EnvFilter;
 
 static TRACING_INIT: Once = Once::new();
 
-fn main() -> ExitCode {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> ExitCode {
     init_tracing();
     let cmd = BentoCtlCmd::parse();
 
-    match cmd.run() {
+    match cmd.run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             print_error(&err, cmd.verbose);

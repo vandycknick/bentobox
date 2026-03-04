@@ -53,7 +53,7 @@ impl Display for AttachMode {
 }
 
 impl Cmd {
-    pub fn run(&self) -> eyre::Result<()> {
+    pub async fn run(&self) -> eyre::Result<()> {
         let manager = InstanceManager::new(NixDaemon::new("123"));
         let inst = manager.inspect(&self.name)?;
 
@@ -70,7 +70,7 @@ impl Cmd {
                     eprintln!("[bentoctl] --user is ignored for serial attach");
                 }
                 let socket_path = inst.file(InstanceFile::InstancedSocket);
-                return attach_serial_sync(&socket_path.to_string_lossy());
+                return terminal::attach_serial(&socket_path.to_string_lossy()).await;
             }
             Some(AttachMode::Ssh) => {
                 return exec_ssh_command(&self.name, self.user.as_deref());
@@ -84,19 +84,11 @@ impl Cmd {
             }
             eprintln!("[bentoctl] image has no ssh capability, using serial attach");
             let socket_path = inst.file(InstanceFile::InstancedSocket);
-            return attach_serial_sync(&socket_path.to_string_lossy());
+            return terminal::attach_serial(&socket_path.to_string_lossy()).await;
         }
 
         exec_ssh_command(&self.name, self.user.as_deref())
     }
-}
-
-fn attach_serial_sync(socket_path: &str) -> eyre::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("build tokio runtime for serial attach")?;
-    runtime.block_on(terminal::attach_serial(socket_path))
 }
 
 fn exec_ssh_command(name: &str, user: Option<&str>) -> eyre::Result<()> {

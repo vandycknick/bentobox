@@ -63,25 +63,25 @@ impl Display for Command {
 }
 
 impl BentoCtlCmd {
-    pub fn run(&self) -> eyre::Result<()> {
-        self.invoke_sub_command()
+    pub async fn run(&self) -> eyre::Result<()> {
+        self.invoke_sub_command().await
     }
 
-    fn invoke_sub_command(&self) -> eyre::Result<()> {
+    async fn invoke_sub_command(&self) -> eyre::Result<()> {
         match &self.cmd {
-            Command::New(cmd) => cmd.run(),
-            Command::CreateAlias(cmd) => cmd.run(),
-            Command::Start(cmd) => cmd.run(),
-            Command::Stop(cmd) => cmd.run(),
-            Command::Shell(cmd) => cmd.run(),
-            Command::Delete(cmd) => cmd.run(),
-            Command::List(cmd) => cmd.run(),
-            Command::Status(cmd) => cmd.run(),
+            Command::New(cmd) => cmd.run().await,
+            Command::CreateAlias(cmd) => cmd.run().await,
+            Command::Start(cmd) => cmd.run().await,
+            Command::Stop(cmd) => cmd.run().await,
+            Command::Shell(cmd) => cmd.run().await,
+            Command::Delete(cmd) => cmd.run().await,
+            Command::List(cmd) => cmd.run().await,
+            Command::Status(cmd) => cmd.run().await,
 
-            Command::Instanced(cmd) => cmd.run(),
+            Command::Instanced(cmd) => cmd.run().await,
 
-            Command::Images(cmd) => cmd.run(),
-            Command::ShellProxy(cmd) => cmd.run(),
+            Command::Images(cmd) => cmd.run().await,
+            Command::ShellProxy(cmd) => cmd.run().await,
         }
     }
 }

@@ -142,7 +142,11 @@ pub(crate) fn spawn_serial_tunnel(
 ) {
     tokio::spawn(async move {
         if let Err(err) = proxy_serial_stream(stream, runtime, access).await {
-            tracing::error!(error = %err, "serial relay failed");
+            if is_expected_disconnect(&err) {
+                tracing::debug!(error = %err, "serial relay closed");
+            } else {
+                tracing::error!(error = %err, "serial relay failed");
+            }
         }
     });
 }
@@ -226,4 +230,16 @@ async fn wait_for_client_disconnect(
             return Ok(());
         }
     }
+}
+
+fn is_expected_disconnect(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::Interrupted
+    )
 }

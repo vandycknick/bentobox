@@ -1,8 +1,8 @@
 use bento_runtime::driver::{Driver, OpenDeviceRequest, OpenDeviceResponse};
-use bento_runtime::instance_control::SERVICE_SERIAL;
 use bento_runtime::negotiate::{
-    Accept, Negotiate, ProxyMode, Reject, RejectCode, Upgrade, NEGOTIATE_PROTOCOL_VERSION,
+    Accept, Negotiate, ProxyMode, Reject, RejectCode, Response, Upgrade, NEGOTIATE_PROTOCOL_VERSION,
 };
+use bento_runtime::services::SERVICE_SERIAL;
 use eyre::Context;
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
@@ -21,22 +21,18 @@ pub(crate) async fn handle_client(
     driver: &dyn Driver,
     serial_runtime: Arc<SerialRuntime>,
 ) -> eyre::Result<()> {
-    let request = match tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        Negotiate::read_from_async(&mut stream),
-    )
-    .await
-    {
-        Ok(Ok(request)) => request,
-        Ok(Err(err)) => {
-            tracing::warn!(error = %err, "failed to read Negotiate request");
-            return Ok(());
-        }
-        Err(_) => {
-            tracing::warn!("timed out waiting for Negotiate request");
-            return Ok(());
-        }
-    };
+    let request =
+        match tokio::time::timeout(HANDSHAKE_TIMEOUT, Negotiate::read_from(&mut stream)).await {
+            Ok(Ok(request)) => request,
+            Ok(Err(err)) => {
+                tracing::warn!(error = %err, "failed to read Negotiate request");
+                return Ok(());
+            }
+            Err(_) => {
+                tracing::warn!("timed out waiting for Negotiate request");
+                return Ok(());
+            }
+        };
 
     if request.protocol_version != NEGOTIATE_PROTOCOL_VERSION {
         return reject(
@@ -153,11 +149,11 @@ async fn accept(
     request_id: u64,
     message: Option<String>,
 ) -> eyre::Result<()> {
-    Accept {
+    Response::Accept(Accept {
         request_id,
         message,
-    }
-    .write_to_async(stream)
+    })
+    .write_to(stream)
     .await
     .context("write Negotiate accept")?;
     Ok(())
@@ -170,13 +166,13 @@ async fn reject(
     message: impl Into<String>,
     retry_after_ms: Option<u32>,
 ) -> eyre::Result<()> {
-    Reject {
+    Response::Reject(Reject {
         request_id,
         code,
         message: message.into(),
         retry_after_ms,
-    }
-    .write_to_async(stream)
+    })
+    .write_to(stream)
     .await
     .context("write Negotiate reject")?;
     Ok(())

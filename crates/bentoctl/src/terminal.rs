@@ -1,9 +1,9 @@
 use std::os::fd::{AsFd, AsRawFd};
 
-use bento_runtime::instance_control::SERVICE_SERIAL;
 use bento_runtime::negotiate::{
     ClientUpgradeStreamError, Negotiate, ProxyMode, RejectCode, Upgrade,
 };
+use bento_runtime::services::SERVICE_SERIAL;
 use eyre::{bail, Context};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;

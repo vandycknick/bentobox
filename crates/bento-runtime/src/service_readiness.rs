@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use eyre::bail;
 
-use crate::instance_control::{ServiceDescriptor, SERVICE_SERIAL, SERVICE_SSH};
 use crate::negotiate::{ClientUpgradeStreamError, Negotiate, RejectCode, Upgrade};
+use crate::services::{ServiceDescriptor, SERVICE_SERIAL, SERVICE_SSH};
 
 pub const DEFAULT_SERVICE_READINESS_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const DEFAULT_SERVICE_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(1);

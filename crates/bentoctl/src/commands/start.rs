@@ -16,7 +16,7 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub fn run(&self) -> eyre::Result<()> {
+    pub async fn run(&self) -> eyre::Result<()> {
         let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
         let daemon = NixDaemon::new(exe)
             .arg("instanced")
@@ -26,11 +26,7 @@ impl Cmd {
         let mut manager = InstanceManager::new(daemon);
 
         let inst = manager.inspect(&self.name)?;
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .context("build tokio runtime for start command")?;
-        runtime.block_on(manager.start(&inst))?;
+        manager.start(&inst).await?;
         Ok(())
     }
 }

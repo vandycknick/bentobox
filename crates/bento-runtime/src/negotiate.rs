@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -59,8 +59,8 @@ pub struct Reject {
     pub retry_after_ms: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NegotiateResult {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Response {
     Accept(Accept),
     Reject(Reject),
 }
@@ -121,26 +121,14 @@ impl Negotiate {
         Ok(())
     }
 
-    pub fn read_from(stream: &mut impl Read) -> io::Result<Self> {
-        let payload = read_frame(stream)?;
-        let msg = deserialize_frame::<Self>(&payload)?;
-        msg.validate()?;
-        Ok(msg)
-    }
-
-    pub fn write_to(&self, stream: &mut impl Write) -> io::Result<()> {
-        self.validate()?;
-        write_framed(stream, self)
-    }
-
-    pub async fn read_from_async(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Self> {
+    pub async fn read_from(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Self> {
         let payload = read_frame_async(stream).await?;
         let msg = deserialize_frame::<Self>(&payload)?;
         msg.validate()?;
         Ok(msg)
     }
 
-    pub async fn write_to_async(&self, stream: &mut (impl AsyncWrite + Unpin)) -> io::Result<()> {
+    pub async fn write_to(&self, stream: &mut (impl AsyncWrite + Unpin)) -> io::Result<()> {
         self.validate()?;
         write_framed_async(stream, self).await
     }
@@ -152,16 +140,16 @@ impl Negotiate {
         let mut stream = stream;
         let negotiate = async {
             Negotiate::new(1, upgrade)
-                .write_to_async(&mut stream)
+                .write_to(&mut stream)
                 .await
                 .map_err(ClientUpgradeStreamError::Io)?;
 
-            match NegotiateResult::read_from_async(&mut stream)
+            match Response::read_from(&mut stream)
                 .await
                 .map_err(ClientUpgradeStreamError::Io)?
             {
-                NegotiateResult::Accept(_) => Ok(()),
-                NegotiateResult::Reject(reject) => Err(ClientUpgradeStreamError::Reject(reject)),
+                Response::Accept(_) => Ok(()),
+                Response::Reject(reject) => Err(ClientUpgradeStreamError::Reject(reject)),
             }
         };
 
@@ -190,26 +178,14 @@ impl Accept {
         Ok(())
     }
 
-    pub fn read_from(stream: &mut impl Read) -> io::Result<Self> {
-        let payload = read_frame(stream)?;
-        let msg = deserialize_frame::<Self>(&payload)?;
-        msg.validate()?;
-        Ok(msg)
-    }
-
-    pub fn write_to(&self, stream: &mut impl Write) -> io::Result<()> {
-        self.validate()?;
-        write_framed(stream, self)
-    }
-
-    pub async fn read_from_async(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Self> {
+    pub async fn read_from(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Self> {
         let payload = read_frame_async(stream).await?;
         let msg = deserialize_frame::<Self>(&payload)?;
         msg.validate()?;
         Ok(msg)
     }
 
-    pub async fn write_to_async(&self, stream: &mut (impl AsyncWrite + Unpin)) -> io::Result<()> {
+    pub async fn write_to(&self, stream: &mut (impl AsyncWrite + Unpin)) -> io::Result<()> {
         self.validate()?;
         write_framed_async(stream, self).await
     }
@@ -234,62 +210,33 @@ impl Reject {
         Ok(())
     }
 
-    pub fn read_from(stream: &mut impl Read) -> io::Result<Self> {
-        let payload = read_frame(stream)?;
-        let msg = deserialize_frame::<Self>(&payload)?;
-        msg.validate()?;
-        Ok(msg)
-    }
-
-    pub fn write_to(&self, stream: &mut impl Write) -> io::Result<()> {
-        self.validate()?;
-        write_framed(stream, self)
-    }
-
-    pub async fn read_from_async(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Self> {
+    pub async fn read_from(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Self> {
         let payload = read_frame_async(stream).await?;
         let msg = deserialize_frame::<Self>(&payload)?;
         msg.validate()?;
         Ok(msg)
     }
 
-    pub async fn write_to_async(&self, stream: &mut (impl AsyncWrite + Unpin)) -> io::Result<()> {
+    pub async fn write_to(&self, stream: &mut (impl AsyncWrite + Unpin)) -> io::Result<()> {
         self.validate()?;
         write_framed_async(stream, self).await
     }
 }
 
-impl NegotiateResult {
-    pub fn read_from(stream: &mut impl Read) -> io::Result<Self> {
-        let payload = read_frame(stream)?;
-        decode_result(&payload)
-    }
-
-    pub async fn read_from_async(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Self> {
+impl Response {
+    pub async fn read_from(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Self> {
         let payload = read_frame_async(stream).await?;
-        decode_result(&payload)
-    }
-}
-
-fn write_framed(stream: &mut impl Write, value: &impl Serialize) -> io::Result<()> {
-    let payload = postcard::to_stdvec(value).map_err(|err| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("serialize Negotiate frame: {err}"),
-        )
-    })?;
-
-    if payload.len() > MAX_NEGOTIATE_FRAME_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Negotiate frame exceeded max size",
-        ));
+        let response = deserialize_frame::<Self>(&payload)?;
+        match &response {
+            Self::Accept(accept) => accept.validate()?,
+            Self::Reject(reject) => reject.validate()?,
+        }
+        Ok(response)
     }
 
-    let len = payload.len() as u32;
-    stream.write_all(&len.to_le_bytes())?;
-    stream.write_all(&payload)?;
-    stream.flush()
+    pub async fn write_to(&self, stream: &mut (impl AsyncWrite + Unpin)) -> io::Result<()> {
+        write_framed_async(stream, self).await
+    }
 }
 
 async fn write_framed_async(
@@ -314,23 +261,6 @@ async fn write_framed_async(
     stream.write_all(&len.to_le_bytes()).await?;
     stream.write_all(&payload).await?;
     stream.flush().await
-}
-
-fn read_frame(stream: &mut impl Read) -> io::Result<Vec<u8>> {
-    let mut header = [0u8; 4];
-    stream.read_exact(&mut header)?;
-    let len = u32::from_le_bytes(header) as usize;
-
-    if len > MAX_NEGOTIATE_FRAME_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Negotiate frame exceeded max size",
-        ));
-    }
-
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload)?;
-    Ok(payload)
 }
 
 async fn read_frame_async(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
@@ -359,19 +289,193 @@ fn deserialize_frame<T: for<'de> Deserialize<'de>>(payload: &[u8]) -> io::Result
     })
 }
 
-fn decode_result(payload: &[u8]) -> io::Result<NegotiateResult> {
-    if let Ok(accept) = postcard::from_bytes::<Accept>(payload) {
-        accept.validate()?;
-        return Ok(NegotiateResult::Accept(accept));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_accept_round_trip() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let (mut writer, mut reader) = tokio::io::duplex(4096);
+            let expected = Response::Accept(Accept {
+                request_id: 7,
+                message: Some("ok".to_string()),
+            });
+
+            let write_task = tokio::spawn(async move {
+                expected
+                    .write_to(&mut writer)
+                    .await
+                    .expect("write accept response")
+            });
+
+            let decoded = Response::read_from(&mut reader)
+                .await
+                .expect("read response frame");
+
+            write_task.await.expect("writer task join");
+            assert_eq!(
+                decoded,
+                Response::Accept(Accept {
+                    request_id: 7,
+                    message: Some("ok".to_string())
+                })
+            );
+        });
     }
 
-    if let Ok(reject) = postcard::from_bytes::<Reject>(payload) {
-        reject.validate()?;
-        return Ok(NegotiateResult::Reject(reject));
+    #[test]
+    fn response_reject_round_trip() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let (mut writer, mut reader) = tokio::io::duplex(4096);
+            let expected = Response::Reject(Reject {
+                request_id: 9,
+                code: RejectCode::UnsupportedService,
+                message: "unsupported".to_string(),
+                retry_after_ms: None,
+            });
+
+            let write_task = tokio::spawn(async move {
+                expected
+                    .write_to(&mut writer)
+                    .await
+                    .expect("write reject response")
+            });
+
+            let decoded = Response::read_from(&mut reader)
+                .await
+                .expect("read response frame");
+
+            write_task.await.expect("writer task join");
+            assert_eq!(
+                decoded,
+                Response::Reject(Reject {
+                    request_id: 9,
+                    code: RejectCode::UnsupportedService,
+                    message: "unsupported".to_string(),
+                    retry_after_ms: None,
+                })
+            );
+        });
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "decode Negotiate result frame failed",
-    ))
+    #[test]
+    fn oversized_frame_is_rejected() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let (mut writer, mut reader) = tokio::io::duplex(64);
+            let oversized_len = (MAX_NEGOTIATE_FRAME_BYTES as u32) + 1;
+
+            writer
+                .write_all(&oversized_len.to_le_bytes())
+                .await
+                .expect("write frame header");
+            writer.flush().await.expect("flush frame header");
+            drop(writer);
+
+            let err = Response::read_from(&mut reader)
+                .await
+                .expect_err("oversized frame should fail");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err.to_string().contains("exceeded max size"));
+        });
+    }
+
+    #[test]
+    fn client_upgrade_stream_accepts_response() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let (client, mut server) =
+                tokio::net::UnixStream::pair().expect("create unix stream pair");
+
+            let server_task = tokio::spawn(async move {
+                let request = Negotiate::read_from(&mut server)
+                    .await
+                    .expect("read negotiate request");
+                assert_eq!(request.protocol_version, NEGOTIATE_PROTOCOL_VERSION);
+
+                Response::Accept(Accept {
+                    request_id: request.request_id,
+                    message: None,
+                })
+                .write_to(&mut server)
+                .await
+                .expect("write accept response");
+            });
+
+            let result = Negotiate::client_upgrade_stream_v1(
+                client,
+                Upgrade::InstanceControl { api_version: 1 },
+            )
+            .await;
+
+            server_task.await.expect("server task join");
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn client_upgrade_stream_returns_reject() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+
+        rt.block_on(async {
+            let (client, mut server) =
+                tokio::net::UnixStream::pair().expect("create unix stream pair");
+
+            let server_task = tokio::spawn(async move {
+                let request = Negotiate::read_from(&mut server)
+                    .await
+                    .expect("read negotiate request");
+
+                Response::Reject(Reject {
+                    request_id: request.request_id,
+                    code: RejectCode::UnsupportedUpgrade,
+                    message: "not supported yet".to_string(),
+                    retry_after_ms: None,
+                })
+                .write_to(&mut server)
+                .await
+                .expect("write reject response");
+            });
+
+            let result = Negotiate::client_upgrade_stream_v1(
+                client,
+                Upgrade::InstanceControl { api_version: 1 },
+            )
+            .await;
+
+            server_task.await.expect("server task join");
+            match result {
+                Ok(_) => panic!("expected reject error"),
+                Err(ClientUpgradeStreamError::Reject(reject)) => {
+                    assert_eq!(reject.code, RejectCode::UnsupportedUpgrade);
+                    assert_eq!(reject.message, "not supported yet");
+                }
+                Err(ClientUpgradeStreamError::Io(err)) => {
+                    panic!("unexpected io error: {err}");
+                }
+            }
+        });
+    }
 }

@@ -17,7 +17,7 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub fn run(&self) -> eyre::Result<()> {
+    pub async fn run(&self) -> eyre::Result<()> {
         let manager = InstanceManager::new(NixDaemon::new("123"));
         let instances = manager.list()?;
         let host_arch = std::env::consts::ARCH;

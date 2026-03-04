@@ -52,7 +52,7 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub fn run(&self) -> eyre::Result<()> {
+    pub async fn run(&self) -> eyre::Result<()> {
         let daemon = NixDaemon::new("123");
         let manager = InstanceManager::new(daemon);
         let mut store = ImageStore::open()?;

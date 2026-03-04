@@ -4,12 +4,12 @@ use std::time::{Duration, Instant};
 
 use bento_instanced::daemon::NixDaemon;
 use bento_runtime::instance::{InstanceFile, InstanceStatus};
-use bento_runtime::instance_control::SERVICE_SSH;
 use bento_runtime::instance_manager::InstanceManager;
 use bento_runtime::negotiate::{
     ClientUpgradeStreamError, Negotiate, ProxyMode, RejectCode, Upgrade,
 };
 use bento_runtime::service_readiness;
+use bento_runtime::services::SERVICE_SSH;
 use clap::Args;
 use eyre::{bail, Context};
 use tokio::io::AsyncWriteExt;
@@ -31,15 +31,7 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub fn run(&self) -> eyre::Result<()> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .context("build tokio runtime for shell proxy")?;
-        runtime.block_on(self.run_async())
-    }
-
-    async fn run_async(&self) -> eyre::Result<()> {
+    pub async fn run(&self) -> eyre::Result<()> {
         let manager = InstanceManager::new(NixDaemon::new("123"));
         let inst = manager.inspect(&self.name)?;
         let socket_path = inst.file(InstanceFile::InstancedSocket);

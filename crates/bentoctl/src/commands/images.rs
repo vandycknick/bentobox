@@ -62,7 +62,7 @@ pub struct RmCmd {
 }
 
 impl Cmd {
-    pub fn run(&self) -> eyre::Result<()> {
+    pub async fn run(&self) -> eyre::Result<()> {
         match &self.command {
             ImageSubcommand::List => {
                 let store = ImageStore::open()?;

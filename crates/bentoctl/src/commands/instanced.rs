@@ -1,6 +1,5 @@
 use bento_instanced::daemon::InstanceDaemon;
 use clap::Args;
-use eyre::Context;
 use std::fmt::{Display, Formatter};
 
 #[derive(Args, Debug)]
@@ -16,12 +15,7 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub fn run(&self) -> eyre::Result<()> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .context("build tokio runtime for instanced")?;
-
-        runtime.block_on(InstanceDaemon::new(&self.name).run())
+    pub async fn run(&self) -> eyre::Result<()> {
+        InstanceDaemon::new(&self.name).run().await
     }
 }

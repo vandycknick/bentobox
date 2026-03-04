@@ -13,7 +13,7 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub fn run(&self) -> eyre::Result<()> {
+    pub async fn run(&self) -> eyre::Result<()> {
         // TODO: implement status output by inspecting instance config and daemon liveness.
 
         Ok(())

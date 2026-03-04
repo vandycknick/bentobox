@@ -1,7 +1,7 @@
 use crate::async_fd::AsyncFdStream;
 use bento_protocol::{GuestDiscoveryClient, HealthStatus, DEFAULT_DISCOVERY_PORT};
 use bento_runtime::driver::{Driver, OpenDeviceRequest, OpenDeviceResponse};
-use bento_runtime::instance_control::{SERVICE_SERIAL, SERVICE_SSH};
+use bento_runtime::services::{SERVICE_SERIAL, SERVICE_SSH};
 use eyre::Context;
 use std::collections::BTreeMap;
 use std::time::Duration;
