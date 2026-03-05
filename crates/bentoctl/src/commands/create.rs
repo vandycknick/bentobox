@@ -1,4 +1,4 @@
-use bento_instanced::daemon::NixDaemon;
+use bento_instanced::launcher::NixLauncher;
 use bento_runtime::images::capabilities::GuestCapabilities;
 use bento_runtime::images::store::ImageStore;
 use bento_runtime::instance::{InstanceFile, MountConfig, NetworkConfig, NetworkMode};
@@ -52,9 +52,7 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self) -> eyre::Result<()> {
-        let daemon = NixDaemon::new("123");
-        let manager = InstanceManager::new(daemon);
+    pub async fn run(&self, manager: &InstanceManager<NixLauncher>) -> eyre::Result<()> {
         let mut store = ImageStore::open()?;
 
         let kernel_path = resolve_optional_path(self.kernel.as_deref(), "kernel")?;

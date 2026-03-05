@@ -1,8 +1,7 @@
 use std::{
-    fs::{self, OpenOptions},
-    io,
+    fs, io,
     path::{Path, PathBuf},
-    process::{Child, Stdio},
+    process::Child,
     time::{Duration, Instant},
 };
 
@@ -26,10 +25,7 @@ use crate::{
     utils::read_pid_file,
 };
 
-pub trait Daemon {
-    fn stdin<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self;
-    fn stdout<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self;
-    fn stderr<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self;
+pub trait Launcher {
     fn spawn(&mut self) -> io::Result<Child>;
 }
 
@@ -81,13 +77,15 @@ pub enum InstanceError {
     Driver(#[from] crate::driver::DriverError),
 }
 
-pub struct InstanceManager<D: Daemon> {
-    instanced: D,
+pub struct InstanceManager<L: Launcher> {
+    instanced: L,
 }
 
-impl<D: Daemon> InstanceManager<D> {
-    pub fn new(daemon: D) -> Self {
-        Self { instanced: daemon }
+impl<L: Launcher> InstanceManager<L> {
+    pub fn new(launcher: L) -> Self {
+        Self {
+            instanced: launcher,
+        }
     }
 
     pub fn create(
@@ -267,28 +265,11 @@ impl<D: Daemon> InstanceManager<D> {
         }
 
         let pid_path = inst.file(InstanceFile::InstancedPid);
-        let stdout_path = inst.file(InstanceFile::InstancedStdoutLog);
-        let stderr_path = inst.file(InstanceFile::InstancedSterrLog);
+        let trace_path = inst.file(InstanceFile::InstancedTraceLog);
 
-        let stdout = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&stdout_path)?;
+        self.instanced.spawn()?;
 
-        let stderr = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&stderr_path)?;
-
-        self.instanced
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
-            .spawn()?;
-
-        wait_for_instanced_start(&pid_path, &stderr_path).await?;
+        wait_for_instanced_start(&pid_path, &trace_path).await?;
 
         if inst.expects_guest_agent() {
             service_readiness::wait_for_guest_running(
@@ -545,7 +526,7 @@ pub fn validate_name(name: &str) -> Result<(), InstanceError> {
     Ok(())
 }
 
-pub async fn wait_for_instanced_start(ha_pid_path: &Path, ha_stderr_path: &Path) -> io::Result<()> {
+pub async fn wait_for_instanced_start(ha_pid_path: &Path, ha_trace_path: &Path) -> io::Result<()> {
     let deadline_duration = Duration::from_secs(5);
     let deadline = Instant::now() + deadline_duration;
     let poll_interval = Duration::from_millis(50);
@@ -564,7 +545,7 @@ pub async fn wait_for_instanced_start(ha_pid_path: &Path, ha_stderr_path: &Path)
                     "instanced ({}) did not start up in {:?} (hint: see {})",
                     ha_pid_path.display(),
                     deadline_duration,
-                    ha_stderr_path.display(),
+                    ha_trace_path.display(),
                 ),
             ));
         }

@@ -1,111 +1,41 @@
-use std::ffi::OsStr;
-use std::io;
-use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
 use bento_runtime::driver;
 use bento_runtime::instance::InstanceFile;
-use bento_runtime::instance_manager::Daemon;
 use bento_runtime::instance_manager::InstanceManager;
 use eyre::Context;
 use futures::future::{FutureExt, LocalBoxFuture};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use nix::unistd::setsid;
 use tokio::signal::unix::signal;
 use tokio::signal::unix::SignalKind;
 
 use crate::control::handle_client;
 use crate::discovery::ServiceRegistry;
 use crate::instance_control_service::InstanceControlState;
+use crate::launcher::NoopLauncher;
 use crate::pid_guard::PidGuard;
 use crate::serial::create_serial_runtime;
 use crate::socket::bind_socket;
 
-pub struct NixDaemon {
-    command: Command,
-}
-
-impl NixDaemon {
-    pub fn new(exe: impl AsRef<OsStr>) -> Self {
-        let mut command = Command::new(exe.as_ref());
-        unsafe {
-            command.pre_exec(|| {
-                setsid()
-                    .map(|_| ())
-                    .map_err(|errno| io::Error::from_raw_os_error(errno as i32))
-            });
-        }
-
-        Self { command }
-    }
-
-    pub fn arg(mut self, arg: &str) -> Self {
-        self.command.arg(arg);
-        self
-    }
-}
-
-impl Daemon for NixDaemon {
-    fn stdin<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self {
-        self.command.stdin(cfg);
-        self
-    }
-
-    fn stdout<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self {
-        self.command.stdout(cfg);
-        self
-    }
-
-    fn stderr<T: Into<Stdio>>(&mut self, cfg: T) -> &mut Self {
-        self.command.stderr(cfg);
-        self
-    }
-
-    fn spawn(&mut self) -> io::Result<Child> {
-        self.command.spawn()
-    }
-}
-
-pub(crate) struct NopDaemon;
-
-impl Daemon for NopDaemon {
-    fn stdin<T: Into<Stdio>>(&mut self, _: T) -> &mut Self {
-        self
-    }
-
-    fn stdout<T: Into<Stdio>>(&mut self, _: T) -> &mut Self {
-        self
-    }
-
-    fn stderr<T: Into<Stdio>>(&mut self, _: T) -> &mut Self {
-        self
-    }
-
-    fn spawn(&mut self) -> io::Result<Child> {
-        Command::new("true").spawn()
-    }
-}
-
 pub struct InstanceDaemon {
     name: String,
-    manager: InstanceManager<NopDaemon>,
+    manager: InstanceManager<NoopLauncher>,
 }
 
 impl InstanceDaemon {
     pub fn new(name: &str) -> Self {
         Self {
             name: String::from(name),
-            manager: InstanceManager::new(NopDaemon),
+            manager: InstanceManager::new(NoopLauncher),
         }
     }
 
     pub async fn run(&self) -> eyre::Result<()> {
-        tracing::info!(instance = %self.name, "instanced starting");
-
         let inst = self.manager.inspect(&self.name)?;
+        let _trace_guard = init_tracing(&inst.file(InstanceFile::InstancedTraceLog))?;
+        tracing::info!(instance = %self.name, "instanced starting");
 
         let _pid_guard = PidGuard::create(&inst.file(InstanceFile::InstancedPid)).await?;
         let socket = bind_socket(&inst.file(InstanceFile::InstancedSocket))?;
@@ -225,4 +155,28 @@ impl InstanceDaemon {
 
         Ok(())
     }
+}
+
+fn init_tracing(
+    trace_path: &std::path::Path,
+) -> eyre::Result<tracing_appender::non_blocking::WorkerGuard> {
+    let trace_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(trace_path)
+        .context(format!("open {}", trace_path.display()))?;
+
+    let (writer, guard) = tracing_appender::non_blocking(trace_file);
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_level(true)
+        .with_writer(writer)
+        .try_init()
+        .map_err(|err| eyre::eyre!("initialize instanced tracing: {err}"))?;
+
+    Ok(guard)
 }

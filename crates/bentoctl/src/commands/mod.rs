@@ -1,6 +1,10 @@
 use clap::{Parser, Subcommand};
 use std::fmt::{Display, Formatter};
 
+use bento_instanced::launcher::NixLauncher;
+use bento_runtime::instance_manager::InstanceManager;
+use eyre::Context;
+
 pub mod create;
 pub mod delete;
 pub mod images;
@@ -69,19 +73,57 @@ impl BentoCtlCmd {
 
     async fn invoke_sub_command(&self) -> eyre::Result<()> {
         match &self.cmd {
-            Command::New(cmd) => cmd.run().await,
-            Command::CreateAlias(cmd) => cmd.run().await,
-            Command::Start(cmd) => cmd.run().await,
-            Command::Stop(cmd) => cmd.run().await,
-            Command::Shell(cmd) => cmd.run().await,
-            Command::Delete(cmd) => cmd.run().await,
-            Command::List(cmd) => cmd.run().await,
+            Command::New(cmd) => {
+                let manager = current_exe_manager()?;
+                cmd.run(&manager).await
+            }
+            Command::CreateAlias(cmd) => {
+                let manager = current_exe_manager()?;
+                cmd.run(&manager).await
+            }
+            Command::Start(cmd) => {
+                let mut manager = start_manager(&cmd.name)?;
+                cmd.run(&mut manager).await
+            }
+            Command::Stop(cmd) => {
+                let manager = current_exe_manager()?;
+                cmd.run(&manager).await
+            }
+            Command::Shell(cmd) => {
+                let manager = current_exe_manager()?;
+                cmd.run(&manager).await
+            }
+            Command::Delete(cmd) => {
+                let manager = current_exe_manager()?;
+                cmd.run(&manager).await
+            }
+            Command::List(cmd) => {
+                let manager = current_exe_manager()?;
+                cmd.run(&manager).await
+            }
             Command::Status(cmd) => cmd.run().await,
 
             Command::Instanced(cmd) => cmd.run().await,
 
             Command::Images(cmd) => cmd.run().await,
-            Command::ShellProxy(cmd) => cmd.run().await,
+            Command::ShellProxy(cmd) => {
+                let manager = current_exe_manager()?;
+                cmd.run(&manager).await
+            }
         }
     }
+}
+
+fn current_exe_manager() -> eyre::Result<InstanceManager<NixLauncher>> {
+    let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
+    Ok(InstanceManager::new(NixLauncher::new(exe)))
+}
+
+fn start_manager(name: &str) -> eyre::Result<InstanceManager<NixLauncher>> {
+    let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
+    let launcher = NixLauncher::new(exe)
+        .arg("instanced")
+        .arg("--name")
+        .arg(name);
+    Ok(InstanceManager::new(launcher))
 }

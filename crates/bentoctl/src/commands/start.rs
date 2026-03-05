@@ -1,7 +1,6 @@
-use bento_instanced::daemon::NixDaemon;
+use bento_instanced::launcher::NixLauncher;
 use bento_runtime::instance_manager::InstanceManager;
 use clap::Args;
-use eyre::Context;
 use std::fmt::{Display, Formatter};
 
 #[derive(Args, Debug)]
@@ -16,15 +15,7 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self) -> eyre::Result<()> {
-        let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
-        let daemon = NixDaemon::new(exe)
-            .arg("instanced")
-            .arg("--name")
-            .arg(&self.name);
-
-        let mut manager = InstanceManager::new(daemon);
-
+    pub async fn run(&self, manager: &mut InstanceManager<NixLauncher>) -> eyre::Result<()> {
         let inst = manager.inspect(&self.name)?;
         manager.start(&inst).await?;
         Ok(())

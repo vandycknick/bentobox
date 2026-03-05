@@ -3,17 +3,12 @@ mod terminal;
 
 use crate::commands::BentoCtlCmd;
 use std::process::ExitCode;
-use std::sync::Once;
 
 use clap::Parser;
 use eyre::Report;
-use tracing_subscriber::EnvFilter;
-
-static TRACING_INIT: Once = Once::new();
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
-    init_tracing();
     let cmd = BentoCtlCmd::parse();
 
     match cmd.run().await {
@@ -23,19 +18,6 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-fn init_tracing() {
-    TRACING_INIT.call_once(|| {
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("warn,bento_instanced=info,bentoctl=info"));
-
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::io::stderr)
-            .with_target(true)
-            .try_init();
-    });
 }
 
 fn print_error(err: &Report, verbose: u8) {

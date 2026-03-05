@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 
-use bento_instanced::daemon::NixDaemon;
+use bento_instanced::launcher::NixLauncher;
 use bento_runtime::instance::InstanceStatus;
 use bento_runtime::instance_manager::InstanceManager;
 use clap::Args;
@@ -17,8 +17,7 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self) -> eyre::Result<()> {
-        let manager = InstanceManager::new(NixDaemon::new("123"));
+    pub async fn run(&self, manager: &InstanceManager<NixLauncher>) -> eyre::Result<()> {
         let instances = manager.list()?;
         let host_arch = std::env::consts::ARCH;
 

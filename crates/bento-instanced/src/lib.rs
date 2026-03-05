@@ -3,6 +3,7 @@ mod control;
 pub mod daemon;
 mod discovery;
 mod instance_control_service;
+pub mod launcher;
 mod pid_guard;
 mod serial;
 mod socket;
