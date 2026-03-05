@@ -13,11 +13,11 @@ use tokio::signal::unix::SignalKind;
 
 use crate::control::handle_client;
 use crate::discovery::ServiceRegistry;
-use crate::instance_control_service::InstanceControlState;
 use crate::launcher::NoopLauncher;
 use crate::pid_guard::PidGuard;
 use crate::serial::create_serial_runtime;
 use crate::socket::bind_socket;
+use crate::state::{new_instance_store, Action};
 
 pub struct InstanceDaemon {
     name: String,
@@ -41,24 +41,24 @@ impl InstanceDaemon {
         let socket = bind_socket(&inst.file(InstanceFile::InstancedSocket))?;
 
         let mut driver = driver::get_driver_for(&inst)?;
-        let control_state = Arc::new(InstanceControlState::new());
-        control_state.publish_vm_state(
-            bento_protocol::instance::v1::LifecycleState::Starting,
-            "vm starting",
-        );
+        let control_state = Arc::new(new_instance_store());
+        control_state.dispatch(Action::VmTransition {
+            state: bento_protocol::instance::v1::LifecycleState::Starting,
+            message: String::from("vm starting"),
+        });
 
         driver.start()?;
-        control_state.publish_vm_state(
-            bento_protocol::instance::v1::LifecycleState::Running,
-            "vm running",
-        );
+        control_state.dispatch(Action::VmTransition {
+            state: bento_protocol::instance::v1::LifecycleState::Running,
+            message: String::from("vm running"),
+        });
 
         let expects_guest_agent = inst.expects_guest_agent();
         if expects_guest_agent {
-            control_state.publish_guest_state(
-                bento_protocol::instance::v1::LifecycleState::Starting,
-                "waiting for guest services",
-            );
+            control_state.dispatch(Action::GuestTransition {
+                state: bento_protocol::instance::v1::LifecycleState::Starting,
+                message: String::from("waiting for guest services"),
+            });
         }
 
         let serial_runtime = match create_serial_runtime(&inst, &*driver) {
@@ -110,10 +110,10 @@ impl InstanceDaemon {
                     match ServiceRegistry::discover(&*driver).await {
                         Ok(_) => {
                             guest_ready = true;
-                            control_state.publish_guest_state(
-                                bento_protocol::instance::v1::LifecycleState::Running,
-                                "guest services ready",
-                            );
+                            control_state.dispatch(Action::GuestTransition {
+                                state: bento_protocol::instance::v1::LifecycleState::Running,
+                                message: String::from("guest services ready"),
+                            });
                         }
                         Err(err) => {
                             tracing::info!(error = %err, "guest services not ready yet");
@@ -123,18 +123,18 @@ impl InstanceDaemon {
                 Some(_) = client_tasks.next(), if !client_tasks.is_empty() => {}
                 _ = sigint.recv() => {
                     tracing::info!(instance = %self.name, "received SIGINT, shutting down instanced");
-                    control_state.publish_vm_state(
-                        bento_protocol::instance::v1::LifecycleState::Stopping,
-                        "received SIGINT",
-                    );
+                    control_state.dispatch(Action::VmTransition {
+                        state: bento_protocol::instance::v1::LifecycleState::Stopping,
+                        message: String::from("received SIGINT"),
+                    });
                     break;
                 }
                 _ = sigterm.recv() => {
                     tracing::info!(instance = %self.name, "received SIGTERM, shutting down instanced");
-                    control_state.publish_vm_state(
-                        bento_protocol::instance::v1::LifecycleState::Stopping,
-                        "received SIGTERM",
-                    );
+                    control_state.dispatch(Action::VmTransition {
+                        state: bento_protocol::instance::v1::LifecycleState::Stopping,
+                        message: String::from("received SIGTERM"),
+                    });
                     break;
                 }
             }
@@ -146,10 +146,10 @@ impl InstanceDaemon {
 
         driver.stop()?;
 
-        control_state.publish_vm_state(
-            bento_protocol::instance::v1::LifecycleState::Stopped,
-            "vm stopped",
-        );
+        control_state.dispatch(Action::VmTransition {
+            state: bento_protocol::instance::v1::LifecycleState::Stopped,
+            message: String::from("vm stopped"),
+        });
 
         tracing::info!(instance = %self.name, "instance stopped");
 

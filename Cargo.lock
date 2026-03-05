@@ -276,7 +276,6 @@ version = "0.1.0"
 dependencies = [
  "bento-protocol",
  "bento-runtime",
- "chrono",
  "eyre",
  "futures",
  "hyper-util",

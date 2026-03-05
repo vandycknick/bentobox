@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 bento-protocol = { path = "../bento-protocol" }
 bento-runtime = { path = "../bento-runtime" }
-chrono = "0.4.43"
 eyre = "0.6.12"
 futures = "0.3.31"
 hyper-util = { version = "0.1.20", features = ["tokio"] }
