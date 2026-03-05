@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 
 use crate::discovery::{ServiceRegistry, ServiceTarget};
-use crate::instance_control_service;
+use crate::instance_control_service::{self, InstanceControlState};
 use crate::serial::{spawn_serial_tunnel, SerialAccess, SerialRuntime};
 use crate::tunnel::spawn_tunnel;
 
@@ -21,6 +21,7 @@ pub(crate) async fn handle_client(
     mut stream: UnixStream,
     driver: &dyn Driver,
     serial_runtime: Arc<SerialRuntime>,
+    control_state: Arc<InstanceControlState>,
 ) -> eyre::Result<()> {
     let request =
         match tokio::time::timeout(HANDSHAKE_TIMEOUT, Negotiate::read_from(&mut stream)).await {
@@ -118,16 +119,8 @@ pub(crate) async fn handle_client(
             }
         }
         Upgrade::InstanceControl { .. } => {
-            let ready = match ServiceRegistry::discover(driver).await {
-                Ok(_) => true,
-                Err(err) => {
-                    tracing::info!(error = %err, "instance control not ready yet");
-                    false
-                }
-            };
-
             accept(&mut stream, request.request_id, None).await?;
-            instance_control_service::serve(stream, ready).await
+            instance_control_service::serve(stream, control_state).await
         }
     }
 }

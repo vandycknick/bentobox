@@ -22,7 +22,6 @@ use crate::{
         resolve_mount_location, validate_network_mode, DiskConfig, DiskRole, Instance,
         InstanceConfig, InstanceFile, InstanceStatus, MountConfig, NetworkConfig,
     },
-    log_watcher::{LogWatcher, StreamKind, WatchError},
     service_readiness, ssh_keys,
     utils::read_pid_file,
 };
@@ -291,64 +290,18 @@ impl<D: Daemon> InstanceManager<D> {
 
         wait_for_instanced_start(&pid_path, &stderr_path).await?;
 
-        let mut watcher = LogWatcher::spawn(
-            stdout_path,
-            stderr_path,
-            Duration::from_secs(60 * 10),
-            Duration::from_millis(50),
-        );
-
-        loop {
-            match watcher.recv().await {
-                Some(Ok(line)) => {
-                    // TODO: I might want to handle this differently
-                    if line.stream == StreamKind::Stderr {
-                        // eprintln!("[instanced] {}", line.text.trim_end());
-                        continue;
-                    }
-
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line.text) {
-                        match v.get("type").and_then(|t| t.as_str()) {
-                            Some("Running") => {
-                                if inst.expects_guest_agent() {
-                                    service_readiness::wait_for_services(
-                                        &inst.file(InstanceFile::InstancedSocket),
-                                    )
-                                    .await
-                                    .map_err(|err| {
-                                        InstanceError::GenericError {
-                                            reason: format!(
-                                            "guest service discovery readiness check failed: {err}"
-                                        ),
-                                        }
-                                    })?;
-                                }
-
-                                return Ok(());
-                            }
-                            Some("Exiting") => {
-                                return Err(InstanceError::GenericError {
-                                    reason: "instanced exited before running".to_string(),
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Some(Err(WatchError::TimedOut)) => {
-                    return Err(InstanceError::Io(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "timed out waiting for Running event",
-                    )));
-                }
-                Some(Err(WatchError::Io(err))) => return Err(err.into()),
-                None => {
-                    return Err(InstanceError::GenericError {
-                        reason: String::from("log watcher terminated unexpectedly"),
-                    });
-                }
-            }
+        if inst.expects_guest_agent() {
+            service_readiness::wait_for_guest_running(
+                &inst.file(InstanceFile::InstancedSocket),
+                Duration::from_secs(60 * 10),
+            )
+            .await
+            .map_err(|err| InstanceError::GenericError {
+                reason: format!("guest service discovery readiness check failed: {err}"),
+            })?;
         }
+
+        Ok(())
     }
 
     pub fn stop(&self, inst: &Instance) -> Result<(), InstanceError> {

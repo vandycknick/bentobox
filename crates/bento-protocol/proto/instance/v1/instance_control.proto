@@ -4,6 +4,7 @@ package instance.v1;
 
 service InstanceControlService {
   rpc Health(HealthRequest) returns (HealthResponse);
+  rpc WatchStatus(WatchStatusRequest) returns (stream StatusUpdate);
 }
 
 message HealthRequest {}
@@ -11,4 +12,28 @@ message HealthRequest {}
 message HealthResponse {
   bool ok = 1;
   string message = 2;
+}
+
+message WatchStatusRequest {}
+
+enum StatusSource {
+  STATUS_SOURCE_UNSPECIFIED = 0;
+  STATUS_SOURCE_VM = 1;
+  STATUS_SOURCE_GUEST = 2;
+}
+
+enum LifecycleState {
+  LIFECYCLE_STATE_UNSPECIFIED = 0;
+  LIFECYCLE_STATE_STARTING = 1;
+  LIFECYCLE_STATE_RUNNING = 2;
+  LIFECYCLE_STATE_STOPPING = 3;
+  LIFECYCLE_STATE_STOPPED = 4;
+  LIFECYCLE_STATE_ERROR = 5;
+}
+
+message StatusUpdate {
+  StatusSource source = 1;
+  LifecycleState state = 2;
+  string message = 3;
+  int64 timestamp_unix_ms = 4;
 }
