@@ -2,13 +2,13 @@ mod port;
 mod server;
 mod services;
 
-use bento_protocol::ServiceEndpoint;
+use bento_protocol::guest::v1::ServiceEndpoint;
 use std::io;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
 
 use crate::server::VsockServer;
-use crate::services::{serve_discovery_connection, GuestDiscoveryService};
+use crate::services::{serve_discovery_connection, GuestDiscoveryState};
 
 const SSH_SERVICE_NAME: &str = "ssh";
 
@@ -16,6 +16,7 @@ const SSH_SERVICE_NAME: &str = "ssh";
 async fn main() -> eyre::Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -38,7 +39,7 @@ async fn main() -> eyre::Result<()> {
 
     tracing::info!("setting up services for discovery: {}", "ssh");
 
-    let discovery_service = GuestDiscoveryService::new(vec![ServiceEndpoint {
+    let discovery_service = GuestDiscoveryState::new(vec![ServiceEndpoint {
         name: SSH_SERVICE_NAME.to_string(),
         port: ssh_server.port,
     }]);

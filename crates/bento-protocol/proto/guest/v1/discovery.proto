@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package guest.v1;
+
+service GuestDiscoveryService {
+  rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
+  rpc ResolveService(ResolveServiceRequest) returns (ResolveServiceResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message ServiceEndpoint {
+  string name = 1;
+  uint32 port = 2;
+}
+
+message ListServicesRequest {}
+
+message ListServicesResponse {
+  repeated ServiceEndpoint services = 1;
+}
+
+message ResolveServiceRequest {
+  string name = 1;
+}
+
+message ResolveServiceResponse {
+  ServiceEndpoint service = 1;
+}
+
+enum ServiceStatus {
+  SERVICE_STATUS_UNKNOWN = 0;
+  SERVICE_STATUS_RUNNING = 1;
+  SERVICE_STATUS_FAILED = 2;
+}
+
+message ServiceHealth {
+  string name = 1;
+  ServiceStatus status = 2;
+  string message = 3;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  repeated ServiceHealth services = 2;
+}

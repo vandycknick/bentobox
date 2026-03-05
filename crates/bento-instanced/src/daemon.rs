@@ -3,17 +3,22 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bento_runtime::driver;
 use bento_runtime::instance::InstanceFile;
 use bento_runtime::instance_manager::Daemon;
 use bento_runtime::instance_manager::InstanceManager;
 use eyre::Context;
+use futures::future::{FutureExt, LocalBoxFuture};
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use nix::unistd::setsid;
 use tokio::signal::unix::signal;
 use tokio::signal::unix::SignalKind;
 
 use crate::control::handle_client;
+use crate::discovery::ServiceRegistry;
 use crate::instance_control_service::InstanceControlState;
 use crate::pid_guard::PidGuard;
 use crate::serial::create_serial_runtime;
@@ -117,10 +122,14 @@ impl InstanceDaemon {
             bento_protocol::instance::v1::LifecycleState::Running,
             "vm running",
         );
-        control_state.publish_guest_state(
-            bento_protocol::instance::v1::LifecycleState::Running,
-            "mock guest ready",
-        );
+
+        let expects_guest_agent = inst.expects_guest_agent();
+        if expects_guest_agent {
+            control_state.publish_guest_state(
+                bento_protocol::instance::v1::LifecycleState::Starting,
+                "waiting for guest services",
+            );
+        }
 
         let serial_runtime = match create_serial_runtime(&inst, &*driver) {
             Ok(runtime) => runtime,
@@ -134,6 +143,9 @@ impl InstanceDaemon {
 
         let mut sigint = signal(SignalKind::interrupt()).context("register SIGINT handler")?;
         let mut sigterm = signal(SignalKind::terminate()).context("register SIGTERM handler")?;
+        let mut guest_probe_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut guest_ready = !expects_guest_agent;
+        let mut client_tasks = FuturesUnordered::<LocalBoxFuture<'_, ()>>::new();
 
         loop {
             tokio::select! {
@@ -143,18 +155,42 @@ impl InstanceDaemon {
                             let serial_runtime = serial_runtime.clone();
                             let control_state = control_state.clone();
                             let driver_ref = &*driver;
-                            let result =
-                                handle_client(stream, driver_ref, serial_runtime, control_state)
+                            client_tasks.push(
+                                async move {
+                                    let result = handle_client(
+                                        stream,
+                                        driver_ref,
+                                        serial_runtime,
+                                        control_state,
+                                    )
                                     .await;
-                            if let Err(err) = result {
-                                tracing::warn!(error = %err, "shell control request failed");
-                            }
+                                    if let Err(err) = result {
+                                        tracing::warn!(error = %err, "shell control request failed");
+                                    }
+                                }
+                                .boxed_local(),
+                            );
                         }
                         Err(err) => {
                             tracing::error!(error = %err, "control socket accept error");
                         }
                     }
                 }
+                _ = guest_probe_tick.tick(), if !guest_ready && expects_guest_agent => {
+                    match ServiceRegistry::discover(&*driver).await {
+                        Ok(_) => {
+                            guest_ready = true;
+                            control_state.publish_guest_state(
+                                bento_protocol::instance::v1::LifecycleState::Running,
+                                "guest services ready",
+                            );
+                        }
+                        Err(err) => {
+                            tracing::info!(error = %err, "guest services not ready yet");
+                        }
+                    }
+                }
+                Some(_) = client_tasks.next(), if !client_tasks.is_empty() => {}
                 _ = sigint.recv() => {
                     tracing::info!(instance = %self.name, "received SIGINT, shutting down instanced");
                     control_state.publish_vm_state(
@@ -175,6 +211,8 @@ impl InstanceDaemon {
         }
 
         tracing::info!(instance = %self.name, "sending stop signal to vm");
+
+        drop(client_tasks);
 
         driver.stop()?;
 
