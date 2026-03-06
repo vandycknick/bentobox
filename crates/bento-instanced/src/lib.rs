@@ -1,5 +1,4 @@
 mod async_fd;
-mod control;
 pub mod daemon;
 mod discovery;
 mod instance_control_service;

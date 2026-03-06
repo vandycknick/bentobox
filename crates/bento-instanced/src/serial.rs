@@ -1,8 +1,10 @@
-use bento_machine::{MachineHandle, OpenDeviceRequest, OpenDeviceResponse};
-use bento_runtime::instance::InstanceFile;
-use eyre::Context;
 use std::io;
+use std::os::fd::OwnedFd;
+use std::path::Path;
 use std::sync::Arc;
+
+use bento_machine::{MachineHandle, OpenDeviceRequest, OpenDeviceResponse};
+use eyre::Context;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
@@ -56,93 +58,221 @@ impl SerialHub {
 }
 
 #[derive(Debug)]
-pub(crate) struct SerialRuntime {
+struct SerialAttachment {
+    guest_input: AsyncFdStream,
+    reader_task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Debug)]
+pub(crate) struct SerialConsole {
+    machine: MachineHandle,
     hub: Arc<Mutex<SerialHub>>,
-    guest_input: Arc<Mutex<AsyncFdStream>>,
+    attachment: Arc<Mutex<Option<SerialAttachment>>>,
+    file_sinks: Arc<Mutex<Vec<tokio::fs::File>>>,
     output_tx: broadcast::Sender<Vec<u8>>,
+    attach_lock: Arc<Mutex<()>>,
 }
 
-pub(crate) async fn create_serial_runtime(
-    inst: &bento_runtime::instance::Instance,
-    machine: &MachineHandle,
-) -> eyre::Result<Arc<SerialRuntime>> {
-    let device = machine
-        .open_device(OpenDeviceRequest::Serial)
-        .await
-        .context("open serial device")?;
-
-    let (guest_input, guest_output) = match device {
-        OpenDeviceResponse::Serial {
-            guest_input,
-            guest_output,
-        } => (guest_input, guest_output),
-        OpenDeviceResponse::Vsock { .. } => {
-            eyre::bail!("driver returned unexpected device type when opening serial")
-        }
-    };
-
-    let serial_log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(inst.file(InstanceFile::SerialLog))
-        .context("open serial.log")?;
-
-    let (output_tx, _) = broadcast::channel(256);
-    let runtime = Arc::new(SerialRuntime {
-        hub: Arc::new(Mutex::new(SerialHub::new())),
-        guest_input: Arc::new(Mutex::new(AsyncFdStream::new(std::fs::File::from(
-            guest_input,
-        ))?)),
-        output_tx,
-    });
-
-    spawn_serial_reader(
-        AsyncFdStream::new(std::fs::File::from(guest_output)).context("wrap serial output fd")?,
-        tokio::fs::File::from_std(serial_log),
-        runtime.output_tx.clone(),
-    );
-
-    Ok(runtime)
-}
-
-fn spawn_serial_reader(
-    mut guest_output: AsyncFdStream,
-    mut serial_log: tokio::fs::File,
-    output_tx: broadcast::Sender<Vec<u8>>,
-) {
-    tokio::spawn(async move {
-        let mut buf = [0u8; 8192];
-
-        loop {
-            let n = match guest_output.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) => {
-                    tracing::error!(error = %err, "serial read failed");
-                    break;
-                }
-            };
-
-            let chunk = &buf[..n];
-
-            if let Err(err) = serial_log.write_all(chunk).await {
-                tracing::error!(error = %err, "serial log write failed");
-            }
-
-            let _ = serial_log.flush().await;
-            let _ = output_tx.send(chunk.to_vec());
-        }
-    });
-}
-
-pub(crate) fn spawn_serial_tunnel(
-    stream: UnixStream,
-    runtime: Arc<SerialRuntime>,
+#[derive(Debug)]
+pub(crate) struct SerialStream {
+    console: Arc<SerialConsole>,
+    client_id: u64,
     access: SerialAccess,
+    output_rx: broadcast::Receiver<Vec<u8>>,
+}
+
+impl SerialConsole {
+    pub(crate) fn new(machine: MachineHandle) -> Arc<Self> {
+        let (output_tx, _) = broadcast::channel(256);
+        Arc::new(Self {
+            machine,
+            hub: Arc::new(Mutex::new(SerialHub::new())),
+            attachment: Arc::new(Mutex::new(None)),
+            file_sinks: Arc::new(Mutex::new(Vec::new())),
+            output_tx,
+            attach_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    pub(crate) async fn stream_to_file(&self, path: &Path) -> eyre::Result<()> {
+        self.ensure_attached().await?;
+
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await
+            .with_context(|| format!("open {}", path.display()))?;
+
+        self.file_sinks.lock().await.push(file);
+        Ok(())
+    }
+
+    pub(crate) async fn open_stream(
+        self: &Arc<Self>,
+        access: SerialAccess,
+    ) -> eyre::Result<SerialStream> {
+        self.ensure_attached().await?;
+
+        let client_id = {
+            let mut hub = self.hub.lock().await;
+            hub.attach(access)?
+        };
+
+        Ok(SerialStream {
+            console: self.clone(),
+            client_id,
+            access,
+            output_rx: self.output_tx.subscribe(),
+        })
+    }
+
+    async fn ensure_attached(&self) -> eyre::Result<()> {
+        if self.attachment.lock().await.is_some() {
+            return Ok(());
+        }
+
+        let _guard = self.attach_lock.lock().await;
+        if self.attachment.lock().await.is_some() {
+            return Ok(());
+        }
+
+        let (guest_input, guest_output) = self.open_serial_device().await?;
+        let output_tx = self.output_tx.clone();
+        let file_sinks = self.file_sinks.clone();
+        let reader_task = tokio::spawn(async move {
+            run_serial_reader(guest_output, file_sinks, output_tx).await;
+        });
+
+        let attachment = SerialAttachment {
+            guest_input: AsyncFdStream::new(std::fs::File::from(guest_input))
+                .context("wrap serial input fd")?,
+            reader_task,
+        };
+
+        *self.attachment.lock().await = Some(attachment);
+        Ok(())
+    }
+
+    async fn open_serial_device(&self) -> eyre::Result<(OwnedFd, AsyncFdStream)> {
+        let device = self
+            .machine
+            .open_device(OpenDeviceRequest::Serial)
+            .await
+            .context("open serial device")?;
+
+        let (guest_input, guest_output) = match device {
+            OpenDeviceResponse::Serial {
+                guest_input,
+                guest_output,
+            } => (guest_input, guest_output),
+            OpenDeviceResponse::Vsock { .. } => {
+                eyre::bail!("machine returned unexpected device type when opening serial")
+            }
+        };
+
+        Ok((
+            guest_input,
+            AsyncFdStream::new(std::fs::File::from(guest_output))
+                .context("wrap serial output fd")?,
+        ))
+    }
+
+    async fn write_input(&self, client_id: u64, chunk: &[u8]) -> io::Result<()> {
+        let is_owner = self.hub.lock().await.can_write_input(client_id);
+        if !is_owner {
+            return Ok(());
+        }
+
+        let mut attachment = self.attachment.lock().await;
+        let Some(attachment) = attachment.as_mut() else {
+            return Err(io::Error::other("serial console is not attached"));
+        };
+
+        attachment.guest_input.write_all(chunk).await?;
+        attachment.guest_input.flush().await
+    }
+
+    async fn detach(&self, client_id: u64) {
+        let mut hub = self.hub.lock().await;
+        hub.detach(client_id);
+    }
+}
+
+impl SerialStream {
+    async fn write_input(&self, chunk: &[u8]) -> io::Result<()> {
+        match self.access {
+            SerialAccess::Interactive => self.console.write_input(self.client_id, chunk).await,
+            SerialAccess::Watch => Ok(()),
+        }
+    }
+}
+
+impl Drop for SerialStream {
+    fn drop(&mut self) {
+        let console = self.console.clone();
+        let client_id = self.client_id;
+        tokio::spawn(async move {
+            console.detach(client_id).await;
+        });
+    }
+}
+
+impl Drop for SerialConsole {
+    fn drop(&mut self) {
+        if let Ok(mut attachment) = self.attachment.try_lock() {
+            if let Some(attachment) = attachment.take() {
+                attachment.reader_task.abort();
+            }
+        }
+    }
+}
+
+async fn run_serial_reader(
+    mut guest_output: AsyncFdStream,
+    file_sinks: Arc<Mutex<Vec<tokio::fs::File>>>,
+    output_tx: broadcast::Sender<Vec<u8>>,
 ) {
+    let mut buf = [0u8; 8192];
+
+    loop {
+        let n = match guest_output.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                tracing::error!(error = %err, "serial read failed");
+                break;
+            }
+        };
+
+        let chunk = buf[..n].to_vec();
+
+        {
+            let mut sinks = file_sinks.lock().await;
+            let mut index = 0;
+            while index < sinks.len() {
+                let file = &mut sinks[index];
+                match file.write_all(&chunk).await {
+                    Ok(()) => {
+                        let _ = file.flush().await;
+                        index += 1;
+                    }
+                    Err(err) => {
+                        tracing::error!(error = %err, "serial log write failed");
+                        sinks.remove(index);
+                    }
+                }
+            }
+        }
+
+        let _ = output_tx.send(chunk);
+    }
+}
+
+pub(crate) fn spawn_serial_tunnel(stream: UnixStream, serial_stream: SerialStream) {
     tokio::spawn(async move {
-        if let Err(err) = proxy_serial_stream(stream, runtime, access).await {
+        if let Err(err) = proxy_serial_stream(stream, serial_stream).await {
             if is_expected_disconnect(&err) {
                 tracing::debug!(error = %err, "serial relay closed");
             } else {
@@ -154,17 +284,14 @@ pub(crate) fn spawn_serial_tunnel(
 
 async fn proxy_serial_stream(
     client_stream: UnixStream,
-    runtime: Arc<SerialRuntime>,
-    access: SerialAccess,
+    mut serial_stream: SerialStream,
 ) -> io::Result<()> {
-    let client_id = {
-        let mut hub = runtime.hub.lock().await;
-        hub.attach(access)
-            .map_err(|err| io::Error::other(format!("{err}")))?
-    };
-
-    let mut output_rx = runtime.output_tx.subscribe();
+    let access = serial_stream.access;
     let (mut client_read, mut client_write) = client_stream.into_split();
+    let mut output_rx = std::mem::replace(
+        &mut serial_stream.output_rx,
+        serial_stream.console.output_tx.subscribe(),
+    );
 
     let output_task: tokio::task::JoinHandle<io::Result<()>> = tokio::spawn(async move {
         loop {
@@ -180,16 +307,9 @@ async fn proxy_serial_stream(
     });
 
     let relay_result = match access {
-        SerialAccess::Interactive => {
-            relay_client_input(client_id, runtime.clone(), &mut client_read).await
-        }
+        SerialAccess::Interactive => relay_client_input(&mut serial_stream, &mut client_read).await,
         SerialAccess::Watch => wait_for_client_disconnect(&mut client_read).await,
     };
-
-    {
-        let mut hub = runtime.hub.lock().await;
-        hub.detach(client_id);
-    }
 
     output_task.abort();
     let _ = output_task.await;
@@ -198,8 +318,7 @@ async fn proxy_serial_stream(
 }
 
 async fn relay_client_input(
-    client_id: u64,
-    runtime: Arc<SerialRuntime>,
+    serial_stream: &mut SerialStream,
     client_read: &mut tokio::net::unix::OwnedReadHalf,
 ) -> io::Result<()> {
     let mut buf = [0u8; 4096];
@@ -210,14 +329,7 @@ async fn relay_client_input(
             return Ok(());
         }
 
-        let is_owner = runtime.hub.lock().await.can_write_input(client_id);
-        if !is_owner {
-            return Ok(());
-        }
-
-        let mut guest_input = runtime.guest_input.lock().await;
-        guest_input.write_all(&buf[..n]).await?;
-        guest_input.flush().await?;
+        serial_stream.write_input(&buf[..n]).await?;
     }
 }
 

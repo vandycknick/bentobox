@@ -12,7 +12,7 @@ use tokio::signal::unix::SignalKind;
 use crate::discovery::ServiceRegistry;
 use crate::launcher::NoopLauncher;
 use crate::pid_guard::PidGuard;
-use crate::serial::create_serial_runtime;
+use crate::serial::SerialConsole;
 use crate::server::InstanceServer;
 use crate::state::{new_instance_store, Action};
 
@@ -41,28 +41,26 @@ impl InstanceDaemon {
 
         let machine_spec = machine_spec_for_instance(&inst)?;
         let machine = Machine::create_or_get(machine_spec.clone()).await?;
+        let serial_console = SerialConsole::new(machine.clone());
         let store = Arc::new(new_instance_store());
         let expects_guest_agent = inst.expects_guest_agent();
+
+        let server = InstanceServer::new(machine.clone(), serial_console.clone(), store.clone());
+        let server_task = server.listen(&inst.file(InstanceFile::InstancedSocket))?;
+
+        let _pid_guard = PidGuard::create(&inst.file(InstanceFile::InstancedPid)).await?;
 
         store.dispatch(Action::vm_starting());
 
         machine.start().await?;
 
-        // FIX: this bit of code depends on a running machine. It should be able to work or create
-        // this serial runtime without it.
-        let serial_runtime = match create_serial_runtime(&inst, &machine).await {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                let _ = Machine::release(&machine_spec.id).await;
-                return Err(err);
-            }
-        };
-
-        let server = InstanceServer::new(machine.clone(), serial_runtime, store.clone());
-        let server_task = server.listen(&inst.file(InstanceFile::InstancedSocket))?;
-
-        // FIX: PID lock should be created immediately.
-        let _pid_guard = PidGuard::create(&inst.file(InstanceFile::InstancedPid)).await?;
+        if let Err(err) = serial_console
+            .stream_to_file(&inst.file(InstanceFile::SerialLog))
+            .await
+        {
+            let _ = Machine::release(&machine_spec.id).await;
+            return Err(err);
+        }
 
         store.dispatch(Action::vm_running());
 
