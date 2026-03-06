@@ -6,19 +6,18 @@ use bento_runtime::instance::InstanceFile;
 use bento_runtime::instance_manager::InstanceManager;
 use bento_runtime::machine::machine_spec_for_instance;
 use eyre::Context;
-use futures::future::{FutureExt, LocalBoxFuture};
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
 use tokio::signal::unix::signal;
 use tokio::signal::unix::SignalKind;
 
-use crate::control::handle_client;
 use crate::discovery::ServiceRegistry;
 use crate::launcher::NoopLauncher;
 use crate::pid_guard::PidGuard;
 use crate::serial::create_serial_runtime;
-use crate::socket::bind_socket;
+use crate::server::InstanceServer;
 use crate::state::{new_instance_store, Action};
+
+const GUEST_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60 * 5);
+const GUEST_DISCOVERY_RETRY: Duration = Duration::from_secs(1);
 
 pub struct InstanceDaemon {
     name: String,
@@ -38,22 +37,19 @@ impl InstanceDaemon {
         let _trace_guard = init_tracing(&inst.file(InstanceFile::InstancedTraceLog))?;
         tracing::info!(instance = %self.name, "instanced starting");
 
-        let _pid_guard = PidGuard::create(&inst.file(InstanceFile::InstancedPid)).await?;
-        let socket = bind_socket(&inst.file(InstanceFile::InstancedSocket))?;
+        remove_stale_socket(&inst.file(InstanceFile::InstancedSocket))?;
 
         let machine_spec = machine_spec_for_instance(&inst)?;
         let machine = Machine::create_or_get(machine_spec.clone()).await?;
         let store = Arc::new(new_instance_store());
+        let expects_guest_agent = inst.expects_guest_agent();
+
         store.dispatch(Action::vm_starting());
 
         machine.start().await?;
-        store.dispatch(Action::vm_running());
 
-        let expects_guest_agent = inst.expects_guest_agent();
-        if expects_guest_agent {
-            store.dispatch(Action::guest_starting());
-        }
-
+        // FIX: this bit of code depends on a running machine. It should be able to work or create
+        // this serial runtime without it.
         let serial_runtime = match create_serial_runtime(&inst, &machine).await {
             Ok(runtime) => runtime,
             Err(err) => {
@@ -62,77 +58,53 @@ impl InstanceDaemon {
             }
         };
 
+        let server = InstanceServer::new(machine.clone(), serial_runtime, store.clone());
+        let server_task = server.listen(&inst.file(InstanceFile::InstancedSocket))?;
+
+        // FIX: PID lock should be created immediately.
+        let _pid_guard = PidGuard::create(&inst.file(InstanceFile::InstancedPid)).await?;
+
+        store.dispatch(Action::vm_running());
+
         tracing::info!(instance = %self.name, "instanced running");
 
         let mut sigint = signal(SignalKind::interrupt()).context("register SIGINT handler")?;
         let mut sigterm = signal(SignalKind::terminate()).context("register SIGTERM handler")?;
-        let mut guest_probe_tick = tokio::time::interval(Duration::from_secs(1));
-        let mut guest_ready = !expects_guest_agent;
-        let mut client_tasks = FuturesUnordered::<LocalBoxFuture<'_, ()>>::new();
 
-        loop {
-            tokio::select! {
-                accepted = socket.listener.accept() => {
-                    match accepted {
-                        Ok((stream, _)) => {
-                            let serial_runtime = serial_runtime.clone();
-                            let control_state = store.clone();
-                            let machine = machine.clone();
-                            client_tasks.push(
-                                async move {
-                                    let result = handle_client(
-                                        stream,
-                                        machine,
-                                        serial_runtime,
-                                        control_state,
-                                    )
-                                    .await;
-                                    if let Err(err) = result {
-                                        tracing::warn!(error = %err, "shell control request failed");
-                                    }
-                                }
-                                .boxed_local(),
-                            );
-                        }
-                        Err(err) => {
-                            tracing::error!(error = %err, "control socket accept error");
-                        }
+        if expects_guest_agent {
+            store.dispatch(Action::guest_starting());
+            wait_for_guest_ready(&machine, &store).await;
+        }
+
+        tokio::select! {
+            _ = sigint.recv() => {
+                tracing::info!(instance = %self.name, "received SIGINT, shutting down instanced");
+                store.dispatch(Action::VmTransition {
+                    state: bento_protocol::instance::v1::LifecycleState::Stopping,
+                    message: String::from("received SIGINT"),
+                });
+            }
+            _ = sigterm.recv() => {
+                tracing::info!(instance = %self.name, "received SIGTERM, shutting down instanced");
+                store.dispatch(Action::VmTransition {
+                    state: bento_protocol::instance::v1::LifecycleState::Stopping,
+                    message: String::from("received SIGTERM"),
+                });
+            }
+            result = server_task => {
+                match result {
+                    Ok(Ok(())) => {
+                        tracing::warn!(instance = %self.name, "instance server exited");
                     }
-                }
-                _ = guest_probe_tick.tick(), if !guest_ready && expects_guest_agent => {
-                    match ServiceRegistry::discover(&machine).await {
-                        Ok(_) => {
-                            guest_ready = true;
-                            store.dispatch(Action::guest_running());
-                        }
-                        Err(err) => {
-                            tracing::info!(error = %err, "guest services not ready yet");
-                        }
+                    Ok(Err(err)) => return Err(err),
+                    Err(err) => {
+                        return Err(eyre::eyre!("instance server task failed: {err}"));
                     }
-                }
-                Some(_) = client_tasks.next(), if !client_tasks.is_empty() => {}
-                _ = sigint.recv() => {
-                    tracing::info!(instance = %self.name, "received SIGINT, shutting down instanced");
-                    store.dispatch(Action::VmTransition {
-                        state: bento_protocol::instance::v1::LifecycleState::Stopping,
-                        message: String::from("received SIGINT"),
-                    });
-                    break;
-                }
-                _ = sigterm.recv() => {
-                    tracing::info!(instance = %self.name, "received SIGTERM, shutting down instanced");
-                    store.dispatch(Action::VmTransition {
-                        state: bento_protocol::instance::v1::LifecycleState::Stopping,
-                        message: String::from("received SIGTERM"),
-                    });
-                    break;
                 }
             }
         }
 
         tracing::info!(instance = %self.name, "sending stop signal to vm");
-
-        drop(client_tasks);
 
         Machine::release(&machine_spec.id).await?;
 
@@ -145,6 +117,42 @@ impl InstanceDaemon {
 
         Ok(())
     }
+}
+
+async fn wait_for_guest_ready(
+    machine: &bento_machine::MachineHandle,
+    store: &crate::state::InstanceStore,
+) {
+    let deadline = tokio::time::Instant::now() + GUEST_DISCOVERY_TIMEOUT;
+    let mut guest_probe_tick = tokio::time::interval(GUEST_DISCOVERY_RETRY);
+
+    loop {
+        guest_probe_tick.tick().await;
+
+        match ServiceRegistry::discover(machine).await {
+            Ok(_) => {
+                store.dispatch(Action::guest_running());
+                return;
+            }
+            Err(err) if tokio::time::Instant::now() >= deadline => {
+                tracing::warn!(error = %err, timeout = ?GUEST_DISCOVERY_TIMEOUT, "guest services did not become ready before timeout");
+                return;
+            }
+            Err(err) => {
+                tracing::info!(error = %err, "guest services not ready yet");
+            }
+        }
+    }
+}
+
+fn remove_stale_socket(path: &std::path::Path) -> eyre::Result<()> {
+    if let Err(err) = std::fs::remove_file(path) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(err).context(format!("remove stale socket {}", path.display()));
+        }
+    }
+
+    Ok(())
 }
 
 fn init_tracing(

@@ -6,6 +6,6 @@ mod instance_control_service;
 pub mod launcher;
 mod pid_guard;
 mod serial;
-mod socket;
+mod server;
 mod state;
 mod tunnel;
