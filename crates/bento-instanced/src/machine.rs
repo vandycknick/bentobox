@@ -1,10 +1,10 @@
 use bento_machine::{
-    DiskImage, MachineConfig, MachineError, MachineId, MachineKind, MachineSpec, NetworkMode,
-    SharedDirectory,
+    DiskImage, Machine, MachineConfig, MachineError, MachineId, MachineKind, MachineSpec,
+    NetworkMode, SharedDirectory,
 };
 use thiserror::Error;
 
-use crate::instance::{
+use bento_runtime::instance::{
     resolve_mount_location, EngineType, Instance, InstanceFile, NetworkMode as InstanceNetworkMode,
 };
 
@@ -14,16 +14,23 @@ pub enum MachineSpecError {
     Machine(#[from] MachineError),
 
     #[error(transparent)]
-    InstanceDisk(#[from] crate::instance::InstanceDiskError),
+    InstanceDisk(#[from] bento_runtime::instance::InstanceDiskError),
 
     #[error(transparent)]
-    InstanceBoot(#[from] crate::instance::InstanceBootError),
+    InstanceBoot(#[from] bento_runtime::instance::InstanceBootError),
 
     #[error("invalid mount location: {0}")]
     InvalidMountLocation(String),
 }
 
-pub fn machine_spec_for_instance(inst: &Instance) -> Result<MachineSpec, MachineSpecError> {
+pub fn prepare_instance(inst: &Instance) -> Result<(), MachineSpecError> {
+    let spec = machine_spec_for_instance(inst)?;
+    Machine::validate(&spec)?;
+    Machine::prepare(&spec)?;
+    Ok(())
+}
+
+pub(crate) fn machine_spec_for_instance(inst: &Instance) -> Result<MachineSpec, MachineSpecError> {
     Ok(MachineSpec {
         id: MachineId::from(inst.name.as_str()),
         kind: Some(machine_kind(inst.engine())?),

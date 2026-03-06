@@ -1,7 +1,8 @@
-use bento_instanced::launcher::NixLauncher;
-use bento_runtime::instance_manager::InstanceManager;
+use bento_runtime::instance_store::InstanceStore;
 use clap::Args;
 use std::fmt::{Display, Formatter};
+
+use crate::daemon_control::{launch_instance, InstancedLauncher};
 
 #[derive(Args, Debug)]
 pub struct Cmd {
@@ -15,9 +16,13 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, manager: &mut InstanceManager<NixLauncher>) -> eyre::Result<()> {
-        let inst = manager.inspect(&self.name)?;
-        manager.start(&inst).await?;
+    pub async fn run(
+        &self,
+        store: &InstanceStore,
+        mut launcher: InstancedLauncher,
+    ) -> eyre::Result<()> {
+        let inst = store.inspect(&self.name)?;
+        launch_instance(&mut launcher, &inst).await?;
         Ok(())
     }
 }

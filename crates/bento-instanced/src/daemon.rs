@@ -3,14 +3,13 @@ use std::time::Duration;
 
 use bento_machine::Machine;
 use bento_runtime::instance::InstanceFile;
-use bento_runtime::instance_manager::InstanceManager;
-use bento_runtime::machine::machine_spec_for_instance;
+use bento_runtime::instance_store::InstanceStore;
 use eyre::Context;
 use tokio::signal::unix::signal;
 use tokio::signal::unix::SignalKind;
 
 use crate::discovery::ServiceRegistry;
-use crate::launcher::NoopLauncher;
+use crate::machine::machine_spec_for_instance;
 use crate::pid_guard::PidGuard;
 use crate::serial::SerialConsole;
 use crate::server::InstanceServer;
@@ -21,19 +20,19 @@ const GUEST_DISCOVERY_RETRY: Duration = Duration::from_secs(1);
 
 pub struct InstanceDaemon {
     name: String,
-    manager: InstanceManager<NoopLauncher>,
+    store: InstanceStore,
 }
 
 impl InstanceDaemon {
     pub fn new(name: &str) -> Self {
         Self {
             name: String::from(name),
-            manager: InstanceManager::new(NoopLauncher),
+            store: InstanceStore::new(),
         }
     }
 
     pub async fn run(&self) -> eyre::Result<()> {
-        let inst = self.manager.inspect(&self.name)?;
+        let inst = self.store.inspect(&self.name)?;
         let _trace_guard = init_tracing(&inst.file(InstanceFile::InstancedTraceLog))?;
         tracing::info!(instance = %self.name, "instanced starting");
 

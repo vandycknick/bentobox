@@ -1,8 +1,8 @@
-use bento_instanced::launcher::NixLauncher;
+use bento_instanced::machine::prepare_instance;
 use bento_runtime::images::capabilities::GuestCapabilities;
 use bento_runtime::images::store::ImageStore;
 use bento_runtime::instance::{InstanceFile, MountConfig, NetworkConfig, NetworkMode};
-use bento_runtime::instance_manager::{InstanceCreateOptions, InstanceManager};
+use bento_runtime::instance_store::{InstanceCreateOptions, InstanceStore};
 use clap::Args;
 use eyre::Context;
 use std::{
@@ -52,8 +52,8 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, manager: &InstanceManager<NixLauncher>) -> eyre::Result<()> {
-        let mut store = ImageStore::open()?;
+    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
+        let mut image_store = ImageStore::open()?;
 
         let kernel_path = resolve_optional_path(self.kernel.as_deref(), "kernel")?;
         let initramfs_path = resolve_optional_path(self.initramfs.as_deref(), "initramfs")?;
@@ -64,9 +64,9 @@ impl Cmd {
             .image
             .as_deref()
             .map(|image_arg| -> eyre::Result<_> {
-                Ok(match store.resolve(image_arg)? {
+                Ok(match image_store.resolve(image_arg)? {
                     Some(image) => image,
-                    None => store.pull(image_arg, None)?,
+                    None => image_store.pull(image_arg, None)?,
                 })
             })
             .transpose()?;
@@ -87,10 +87,11 @@ impl Cmd {
             .with_capabilities(capabilities)
             .with_userdata(userdata_path);
 
-        let inst = manager.create(&self.name, options)?;
+        let inst = store.create(&self.name, options)?;
+        prepare_instance(&inst)?;
 
         if let Some(image) = selected_image {
-            store.clone_base_image(&image, &inst.file(InstanceFile::RootDisk))?;
+            image_store.clone_base_image(&image, &inst.file(InstanceFile::RootDisk))?;
         }
 
         println!("created {}", self.name);

@@ -1,14 +1,8 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    process::Child,
-    time::{Duration, Instant},
 };
 
-use nix::{
-    sys::signal::{self, Signal},
-    unistd::Pid,
-};
 use thiserror::Error;
 
 use crate::{
@@ -20,15 +14,9 @@ use crate::{
         resolve_mount_location, validate_network_mode, DiskConfig, DiskRole, Instance,
         InstanceConfig, InstanceFile, InstanceStatus, MountConfig, NetworkConfig,
     },
-    machine::machine_spec_for_instance,
-    service_readiness, ssh_keys,
+    ssh_keys,
     utils::read_pid_file,
 };
-use bento_machine::Machine;
-
-pub trait Launcher {
-    fn spawn(&mut self) -> io::Result<Child>;
-}
 
 #[derive(Debug, Error)]
 pub enum InstanceError {
@@ -73,23 +61,19 @@ pub enum InstanceError {
 
     #[error(transparent)]
     Nix(#[from] nix::errno::Errno),
-
-    #[error(transparent)]
-    Machine(#[from] bento_machine::MachineError),
-
-    #[error(transparent)]
-    MachineSpec(#[from] crate::machine::MachineSpecError),
 }
 
-pub struct InstanceManager<L: Launcher> {
-    instanced: L,
+pub struct InstanceStore;
+
+impl Default for InstanceStore {
+    fn default() -> Self {
+        Self
+    }
 }
 
-impl<L: Launcher> InstanceManager<L> {
-    pub fn new(launcher: L) -> Self {
-        Self {
-            instanced: launcher,
-        }
+impl InstanceStore {
+    pub fn new() -> Self {
+        Self
     }
 
     pub fn create(
@@ -142,9 +126,6 @@ impl<L: Launcher> InstanceManager<L> {
         fs::write(&config_path, config_yaml)?;
 
         let inst = self.inspect(name)?;
-        let machine_spec = machine_spec_for_instance(&inst)?;
-        Machine::validate(&machine_spec)?;
-        Machine::prepare(&machine_spec)?;
 
         let should_inject_cidata = inst.expects_guest_agent();
 
@@ -255,52 +236,6 @@ impl<L: Launcher> InstanceManager<L> {
         instances.sort_by(|a, b| a.name.cmp(&b.name));
 
         Ok(instances)
-    }
-
-    pub async fn start(&mut self, inst: &Instance) -> Result<(), InstanceError> {
-        inst.validate_network_mode()
-            .map_err(|reason| InstanceError::GenericError { reason })?;
-
-        if inst.status() == InstanceStatus::Running {
-            return Err(InstanceError::InstanceAlreadyRunning {
-                name: inst.name.clone(),
-            });
-        }
-
-        let pid_path = inst.file(InstanceFile::InstancedPid);
-        let trace_path = inst.file(InstanceFile::InstancedTraceLog);
-
-        self.instanced.spawn()?;
-
-        wait_for_instanced_start(&pid_path, &trace_path).await?;
-
-        if inst.expects_guest_agent() {
-            service_readiness::wait_for_guest_running(
-                &inst.file(InstanceFile::InstancedSocket),
-                Duration::from_secs(60 * 10),
-            )
-            .await
-            .map_err(|err| InstanceError::GenericError {
-                reason: format!("guest service discovery readiness check failed: {err}"),
-            })?;
-        }
-
-        Ok(())
-    }
-
-    pub fn stop(&self, inst: &Instance) -> Result<(), InstanceError> {
-        let daemon_pid = inst
-            .daemon_pid
-            .ok_or_else(|| InstanceError::InstanceNotRunning {
-                name: inst.name.clone(),
-            })?;
-
-        let pid = Pid::from_raw(daemon_pid.get());
-        signal::kill(pid, Signal::SIGINT)?;
-
-        println!("Send signal to {}", pid);
-
-        Ok(())
     }
 
     pub fn delete(&self, inst: &Instance) -> Result<(), InstanceError> {
@@ -527,32 +462,4 @@ pub fn validate_name(name: &str) -> Result<(), InstanceError> {
     }
 
     Ok(())
-}
-
-pub async fn wait_for_instanced_start(ha_pid_path: &Path, ha_trace_path: &Path) -> io::Result<()> {
-    let deadline_duration = Duration::from_secs(5);
-    let deadline = Instant::now() + deadline_duration;
-    let poll_interval = Duration::from_millis(50);
-
-    loop {
-        match tokio::fs::metadata(ha_pid_path).await {
-            Ok(_) => return Ok(()),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
-        }
-
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "instanced ({}) did not start up in {:?} (hint: see {})",
-                    ha_pid_path.display(),
-                    deadline_duration,
-                    ha_trace_path.display(),
-                ),
-            ));
-        }
-
-        tokio::time::sleep(poll_interval).await;
-    }
 }

@@ -11,7 +11,7 @@ use nix::unistd::Pid;
 /// - `Ok(None)` if file is missing OR PID is stale (stale file is removed)
 /// - `Ok(Some(pid))` if process is considered alive
 /// - `Err(...)` on unexpected I/O or parsing errors
-pub fn read_pid_file(path: &Path) -> io::Result<Option<NonZeroI32>> {
+pub(crate) fn read_pid_file(path: &Path) -> io::Result<Option<NonZeroI32>> {
     let raw = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),

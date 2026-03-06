@@ -284,6 +284,7 @@ dependencies = [
  "nix 0.31.1",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tonic",
  "tower 0.5.3",
@@ -325,14 +326,11 @@ dependencies = [
 name = "bento-runtime"
 version = "0.1.0"
 dependencies = [
- "bento-machine",
- "bento-protocol",
  "chrono",
  "eyre",
  "flate2",
  "futures",
  "getrandom 0.3.4",
- "hyper-util",
  "libc",
  "nix 0.31.1",
  "oci-client",
@@ -348,8 +346,6 @@ dependencies = [
  "tarpc",
  "thiserror 2.0.18",
  "tokio",
- "tonic",
- "tower 0.5.3",
  "vsock",
  "zstd",
 ]
@@ -360,10 +356,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bento-instanced",
+ "bento-protocol",
  "bento-runtime",
  "chrono",
  "clap",
  "eyre",
+ "hyper-util",
  "libc",
  "nix 0.31.1",
  "serde",
@@ -373,6 +371,8 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tonic",
+ "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
 ]

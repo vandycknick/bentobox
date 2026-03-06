@@ -2,7 +2,7 @@ mod async_fd;
 pub mod daemon;
 mod discovery;
 mod instance_control_service;
-pub mod launcher;
+pub mod machine;
 mod pid_guard;
 mod serial;
 mod server;

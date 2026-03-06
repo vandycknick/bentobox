@@ -7,30 +7,19 @@ use bento_protocol::instance::v1::instance_control_service_client::InstanceContr
 use bento_protocol::instance::v1::{
     HealthRequest, LifecycleState, StatusSource, WatchStatusRequest,
 };
+use bento_runtime::negotiate::{ClientUpgradeStreamError, Negotiate, RejectCode, Upgrade};
+use bento_runtime::services::{ServiceDescriptor, SERVICE_SERIAL, SERVICE_SSH};
 use eyre::bail;
 use hyper_util::rt::TokioIo;
 use tokio::sync::Mutex;
 use tonic::transport::Endpoint;
 use tower::service_fn;
 
-use crate::negotiate::{ClientUpgradeStreamError, Negotiate, RejectCode, Upgrade};
-use crate::services::{ServiceDescriptor, SERVICE_SERIAL, SERVICE_SSH};
-
 pub const DEFAULT_SERVICE_READINESS_TIMEOUT: Duration = Duration::from_secs(60 * 5);
-const DEFAULT_SERVICE_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 enum ProbeError {
     Retryable(String),
     Fatal(String),
-}
-
-pub async fn wait_for_services(socket_path: &Path) -> eyre::Result<Vec<ServiceDescriptor>> {
-    wait_for_services_with_timeout(
-        socket_path,
-        DEFAULT_SERVICE_READINESS_TIMEOUT,
-        DEFAULT_SERVICE_READINESS_POLL_INTERVAL,
-    )
-    .await
 }
 
 pub async fn wait_for_services_with_timeout(
@@ -263,20 +252,5 @@ fn reject_code_label(code: RejectCode) -> &'static str {
         RejectCode::PermissionDenied => "permission_denied",
         RejectCode::AuthFailed => "auth_failed",
         RejectCode::Internal => "internal_error",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_retryable_io_kind;
-
-    #[test]
-    fn retryable_io_kinds_cover_startup_transients() {
-        assert!(is_retryable_io_kind(std::io::ErrorKind::NotFound));
-        assert!(is_retryable_io_kind(std::io::ErrorKind::ConnectionRefused));
-        assert!(is_retryable_io_kind(std::io::ErrorKind::TimedOut));
-        assert!(is_retryable_io_kind(std::io::ErrorKind::UnexpectedEof));
-        assert!(!is_retryable_io_kind(std::io::ErrorKind::InvalidData));
-        assert!(!is_retryable_io_kind(std::io::ErrorKind::PermissionDenied));
     }
 }

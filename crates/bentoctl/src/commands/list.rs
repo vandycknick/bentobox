@@ -1,9 +1,8 @@
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 
-use bento_instanced::launcher::NixLauncher;
 use bento_runtime::instance::InstanceStatus;
-use bento_runtime::instance_manager::InstanceManager;
+use bento_runtime::instance_store::InstanceStore;
 use clap::Args;
 use tabwriter::TabWriter;
 
@@ -17,8 +16,8 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, manager: &InstanceManager<NixLauncher>) -> eyre::Result<()> {
-        let instances = manager.list()?;
+    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
+        let instances = store.list()?;
         let host_arch = std::env::consts::ARCH;
 
         let mut out = TabWriter::new(std::io::stdout()).padding(2);

@@ -3,10 +3,9 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use bento_instanced::launcher::NixLauncher;
 use bento_runtime::images::capabilities::Capability;
 use bento_runtime::instance::{InstanceFile, InstanceStatus};
-use bento_runtime::instance_manager::{InstanceError, InstanceManager};
+use bento_runtime::instance_store::{InstanceError, InstanceStore};
 use bento_runtime::{host_user, ssh_keys};
 use clap::{Args, ValueEnum};
 use eyre::{bail, Context};
@@ -53,8 +52,8 @@ impl Display for AttachMode {
 }
 
 impl Cmd {
-    pub async fn run(&self, manager: &InstanceManager<NixLauncher>) -> eyre::Result<()> {
-        let inst = manager.inspect(&self.name)?;
+    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
+        let inst = store.inspect(&self.name)?;
 
         if inst.status() != InstanceStatus::Running {
             return Err(InstanceError::InstanceNotRunning {

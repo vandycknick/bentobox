@@ -2,17 +2,17 @@ use std::fmt::{Display, Formatter};
 use std::io;
 use std::time::{Duration, Instant};
 
-use bento_instanced::launcher::NixLauncher;
 use bento_runtime::instance::{InstanceFile, InstanceStatus};
-use bento_runtime::instance_manager::InstanceManager;
+use bento_runtime::instance_store::InstanceStore;
 use bento_runtime::negotiate::{
     ClientUpgradeStreamError, Negotiate, ProxyMode, RejectCode, Upgrade,
 };
-use bento_runtime::service_readiness;
 use bento_runtime::services::SERVICE_SSH;
 use clap::Args;
 use eyre::{bail, Context};
 use tokio::io::AsyncWriteExt;
+
+use crate::service_readiness;
 
 #[derive(Args, Debug)]
 #[command(hide = true)]
@@ -31,8 +31,8 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, manager: &InstanceManager<NixLauncher>) -> eyre::Result<()> {
-        let inst = manager.inspect(&self.name)?;
+    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
+        let inst = store.inspect(&self.name)?;
         let socket_path = inst.file(InstanceFile::InstancedSocket);
 
         let should_wait_for_guest_readiness =

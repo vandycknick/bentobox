@@ -7,6 +7,7 @@ default-run = "bentoctl"
 [dependencies]
 anyhow = "1.0.89"
 bento-instanced = { path = "../bento-instanced" }
+bento-protocol = { path = "../bento-protocol" }
 bento-runtime = { path = "../bento-runtime" }
 clap = { version = "4.5.31", features = ["derive"] }
 serde = { version = "1.0.217", features = ["derive"] }
@@ -16,9 +17,12 @@ libc = "0.2.169"
 time = { version = "0.3.36", features = ["formatting"] }
 chrono = "0.4.43"
 eyre = "0.6.12"
+hyper-util = { version = "0.1.20", features = ["tokio"] }
 nix = { version = "0.31.1", features = ["fs"] }
 tabwriter = "1.4.1"
 tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "io-std"] }
+tonic = { version = "0.12.3", features = ["transport"] }
+tower = "0.5.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter"] }
 

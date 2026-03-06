@@ -1,7 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use bento_instanced::launcher::NixLauncher;
-use bento_runtime::instance_manager::InstanceManager;
+use bento_runtime::instance_store::InstanceStore;
 use clap::Args;
 
 #[derive(Args, Debug)]
@@ -16,10 +15,10 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, manager: &InstanceManager<NixLauncher>) -> eyre::Result<()> {
-        let inst = manager.inspect(&self.name)?;
+    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
+        let inst = store.inspect(&self.name)?;
 
-        manager.delete(&inst)?;
+        store.delete(&inst)?;
 
         println!("deleted {}", self.name);
         Ok(())

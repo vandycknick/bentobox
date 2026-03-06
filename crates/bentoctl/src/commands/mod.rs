@@ -1,9 +1,10 @@
 use clap::{Parser, Subcommand};
 use std::fmt::{Display, Formatter};
 
-use bento_instanced::launcher::NixLauncher;
-use bento_runtime::instance_manager::InstanceManager;
+use bento_runtime::instance_store::InstanceStore;
 use eyre::Context;
+
+use crate::daemon_control::InstancedLauncher;
 
 pub mod create;
 pub mod delete;
@@ -74,32 +75,33 @@ impl BentoCtlCmd {
     async fn invoke_sub_command(&self) -> eyre::Result<()> {
         match &self.cmd {
             Command::New(cmd) => {
-                let manager = current_exe_manager()?;
-                cmd.run(&manager).await
+                let store = instance_store();
+                cmd.run(&store).await
             }
             Command::CreateAlias(cmd) => {
-                let manager = current_exe_manager()?;
-                cmd.run(&manager).await
+                let store = instance_store();
+                cmd.run(&store).await
             }
             Command::Start(cmd) => {
-                let mut manager = start_manager(&cmd.name)?;
-                cmd.run(&mut manager).await
+                let store = instance_store();
+                let launcher = start_launcher(&cmd.name)?;
+                cmd.run(&store, launcher).await
             }
             Command::Stop(cmd) => {
-                let manager = current_exe_manager()?;
-                cmd.run(&manager).await
+                let store = instance_store();
+                cmd.run(&store).await
             }
             Command::Shell(cmd) => {
-                let manager = current_exe_manager()?;
-                cmd.run(&manager).await
+                let store = instance_store();
+                cmd.run(&store).await
             }
             Command::Delete(cmd) => {
-                let manager = current_exe_manager()?;
-                cmd.run(&manager).await
+                let store = instance_store();
+                cmd.run(&store).await
             }
             Command::List(cmd) => {
-                let manager = current_exe_manager()?;
-                cmd.run(&manager).await
+                let store = instance_store();
+                cmd.run(&store).await
             }
             Command::Status(cmd) => cmd.run().await,
 
@@ -107,23 +109,18 @@ impl BentoCtlCmd {
 
             Command::Images(cmd) => cmd.run().await,
             Command::ShellProxy(cmd) => {
-                let manager = current_exe_manager()?;
-                cmd.run(&manager).await
+                let store = instance_store();
+                cmd.run(&store).await
             }
         }
     }
 }
 
-fn current_exe_manager() -> eyre::Result<InstanceManager<NixLauncher>> {
-    let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
-    Ok(InstanceManager::new(NixLauncher::new(exe)))
+fn instance_store() -> InstanceStore {
+    InstanceStore::new()
 }
 
-fn start_manager(name: &str) -> eyre::Result<InstanceManager<NixLauncher>> {
+fn start_launcher(name: &str) -> eyre::Result<InstancedLauncher> {
     let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
-    let launcher = NixLauncher::new(exe)
-        .arg("instanced")
-        .arg("--name")
-        .arg(name);
-    Ok(InstanceManager::new(launcher))
+    Ok(InstancedLauncher::for_instance(exe, name))
 }
