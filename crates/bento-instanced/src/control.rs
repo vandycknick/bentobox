@@ -1,4 +1,4 @@
-use bento_runtime::driver::{Driver, OpenDeviceRequest, OpenDeviceResponse};
+use bento_machine::{MachineHandle, OpenDeviceRequest, OpenDeviceResponse};
 use bento_runtime::negotiate::{
     Accept, Negotiate, ProxyMode, Reject, RejectCode, Response, Upgrade, NEGOTIATE_PROTOCOL_VERSION,
 };
@@ -20,7 +20,7 @@ const RETRY_AFTER_STARTING_MS: u32 = 1000;
 
 pub(crate) async fn handle_client(
     mut stream: UnixStream,
-    driver: &dyn Driver,
+    machine: MachineHandle,
     serial_runtime: Arc<SerialRuntime>,
     store: Arc<InstanceStore>,
 ) -> eyre::Result<()> {
@@ -64,7 +64,7 @@ pub(crate) async fn handle_client(
 
     match request.upgrade {
         Upgrade::Proxy { service, mode } => {
-            let target = resolve_proxy_target(driver, &service).await;
+            let target = resolve_proxy_target(&machine, &service).await;
             let Some(target) = target else {
                 return reject(
                     &mut stream,
@@ -78,7 +78,7 @@ pub(crate) async fn handle_client(
 
             match target {
                 ServiceTarget::VsockPort(port) => {
-                    match driver.open_device(OpenDeviceRequest::Vsock { port }) {
+                    match machine.open_device(OpenDeviceRequest::Vsock { port }).await {
                         Ok(OpenDeviceResponse::Vsock { stream: vsock_fd }) => {
                             accept(&mut stream, request.request_id, None).await?;
                             spawn_tunnel(stream, vsock_fd);
@@ -126,12 +126,12 @@ pub(crate) async fn handle_client(
     }
 }
 
-async fn resolve_proxy_target(driver: &dyn Driver, service: &str) -> Option<ServiceTarget> {
+async fn resolve_proxy_target(machine: &MachineHandle, service: &str) -> Option<ServiceTarget> {
     if service == SERVICE_SERIAL {
         return Some(ServiceTarget::Serial);
     }
 
-    ServiceRegistry::discover(driver)
+    ServiceRegistry::discover(machine)
         .await
         .ok()
         .and_then(|registry| registry.resolve(service))

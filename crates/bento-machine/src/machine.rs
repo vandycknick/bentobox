@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::backend;
 use crate::registry::{self, MachineInner};
 use crate::types::{
     MachineError, MachineId, MachineSpec, MachineState, OpenDeviceRequest, OpenDeviceResponse,
@@ -21,6 +22,16 @@ impl std::fmt::Debug for MachineHandle {
 }
 
 impl Machine {
+    pub fn validate(spec: &MachineSpec) -> Result<(), MachineError> {
+        let resolved = spec.clone().resolve()?;
+        backend::validate(&resolved)
+    }
+
+    pub fn prepare(spec: &MachineSpec) -> Result<(), MachineError> {
+        let resolved = spec.clone().resolve()?;
+        backend::prepare(&resolved)
+    }
+
     pub async fn create_or_get(spec: MachineSpec) -> Result<MachineHandle, MachineError> {
         let spec = spec.resolve()?;
         let inner = registry::create_or_get(spec)?;
@@ -72,19 +83,30 @@ impl MachineHandle {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::{Machine, MachineHandle};
-    use crate::types::{MachineConfig, MachineError, MachineId, MachineSpec};
+    use crate::types::{MachineConfig, MachineError, MachineId, MachineSpec, NetworkMode};
+    use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn spec(id: &str, cpus: Option<usize>) -> MachineSpec {
+        let dir = temp_dir(id);
+        fs::create_dir_all(&dir).expect("test dir should be creatable");
+        fs::write(dir.join("kernel"), b"kernel").expect("kernel should be creatable");
+        fs::write(dir.join("initramfs"), b"initramfs").expect("initramfs should be creatable");
+
         MachineSpec {
             id: MachineId::from(id),
             kind: None,
             config: MachineConfig {
                 cpus,
                 memory_mib: Some(1024),
+                kernel_path: Some(dir.join("kernel")),
+                initramfs_path: Some(dir.join("initramfs")),
+                machine_identifier_path: Some(dir.join("machine-id")),
+                network: NetworkMode::None,
                 ..MachineConfig::new()
             },
         }
@@ -102,6 +124,15 @@ mod tests {
         format!("{prefix}-{}-{now}", std::process::id())
     }
 
+    fn temp_dir(id: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("bento-machine-test-{id}"))
+    }
+
+    async fn cleanup(id: &str) {
+        let _ = Machine::release(&MachineId::from(id)).await;
+        let _ = fs::remove_dir_all(temp_dir(id));
+    }
+
     #[tokio::test]
     async fn create_or_get_returns_same_handle_for_same_spec() {
         let id = unique_id("same-handle");
@@ -111,7 +142,7 @@ mod tests {
 
         assert!(std::sync::Arc::ptr_eq(&first.inner, &second.inner));
 
-        let _ = Machine::release(&MachineId::from(id.as_str())).await;
+        cleanup(&id).await;
     }
 
     #[tokio::test]
@@ -126,7 +157,7 @@ mod tests {
 
         assert!(matches!(err, MachineError::SpecMismatch { .. }));
 
-        let _ = Machine::release(&MachineId::from(id.as_str())).await;
+        cleanup(&id).await;
     }
 
     #[tokio::test]
@@ -139,6 +170,8 @@ mod tests {
         let second = Machine::release(&MachineId::from(id.as_str())).await;
 
         assert!(second.is_ok());
+
+        let _ = fs::remove_dir_all(temp_dir(&id));
     }
 
     #[tokio::test]
@@ -153,5 +186,7 @@ mod tests {
             .await
             .expect_err("released handle should fail");
         assert!(matches!(err, MachineError::MachineReleased { .. }));
+
+        let _ = fs::remove_dir_all(temp_dir(&id));
     }
 }

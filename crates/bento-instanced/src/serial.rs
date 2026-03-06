@@ -1,4 +1,4 @@
-use bento_runtime::driver::{Driver, OpenDeviceRequest, OpenDeviceResponse};
+use bento_machine::{MachineHandle, OpenDeviceRequest, OpenDeviceResponse};
 use bento_runtime::instance::InstanceFile;
 use eyre::Context;
 use std::io;
@@ -62,12 +62,13 @@ pub(crate) struct SerialRuntime {
     output_tx: broadcast::Sender<Vec<u8>>,
 }
 
-pub(crate) fn create_serial_runtime(
+pub(crate) async fn create_serial_runtime(
     inst: &bento_runtime::instance::Instance,
-    driver: &dyn Driver,
+    machine: &MachineHandle,
 ) -> eyre::Result<Arc<SerialRuntime>> {
-    let device = driver
+    let device = machine
         .open_device(OpenDeviceRequest::Serial)
+        .await
         .context("open serial device")?;
 
     let (guest_input, guest_output) = match device {

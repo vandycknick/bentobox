@@ -14,16 +14,17 @@ use thiserror::Error;
 use crate::{
     cidata,
     directories::Directory,
-    driver::get_driver_for,
     host_user,
     images::capabilities::GuestCapabilities,
     instance::{
         resolve_mount_location, validate_network_mode, DiskConfig, DiskRole, Instance,
         InstanceConfig, InstanceFile, InstanceStatus, MountConfig, NetworkConfig,
     },
+    machine::machine_spec_for_instance,
     service_readiness, ssh_keys,
     utils::read_pid_file,
 };
+use bento_machine::Machine;
 
 pub trait Launcher {
     fn spawn(&mut self) -> io::Result<Child>;
@@ -74,7 +75,10 @@ pub enum InstanceError {
     Nix(#[from] nix::errno::Errno),
 
     #[error(transparent)]
-    Driver(#[from] crate::driver::DriverError),
+    Machine(#[from] bento_machine::MachineError),
+
+    #[error(transparent)]
+    MachineSpec(#[from] crate::machine::MachineSpecError),
 }
 
 pub struct InstanceManager<L: Launcher> {
@@ -138,10 +142,9 @@ impl<L: Launcher> InstanceManager<L> {
         fs::write(&config_path, config_yaml)?;
 
         let inst = self.inspect(name)?;
-        let driver = get_driver_for(&inst)?;
-
-        driver.validate()?;
-        driver.create()?;
+        let machine_spec = machine_spec_for_instance(&inst)?;
+        Machine::validate(&machine_spec)?;
+        Machine::prepare(&machine_spec)?;
 
         let should_inject_cidata = inst.expects_guest_agent();
 

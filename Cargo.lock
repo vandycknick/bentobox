@@ -274,6 +274,7 @@ dependencies = [
 name = "bento-instanced"
 version = "0.1.0"
 dependencies = [
+ "bento-machine",
  "bento-protocol",
  "bento-runtime",
  "eyre",
@@ -324,6 +325,7 @@ dependencies = [
 name = "bento-runtime"
 version = "0.1.0"
 dependencies = [
+ "bento-machine",
  "bento-protocol",
  "block2",
  "chrono",

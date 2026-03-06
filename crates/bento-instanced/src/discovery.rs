@@ -1,8 +1,8 @@
 use crate::async_fd::AsyncFdStream;
+use bento_machine::{MachineHandle, OpenDeviceRequest, OpenDeviceResponse};
 use bento_protocol::guest::v1::guest_discovery_service_client::GuestDiscoveryServiceClient;
 use bento_protocol::guest::v1::{HealthRequest, ListServicesRequest, ServiceStatus};
 use bento_protocol::DEFAULT_DISCOVERY_PORT;
-use bento_runtime::driver::{Driver, OpenDeviceRequest, OpenDeviceResponse};
 use bento_runtime::services::{SERVICE_SERIAL, SERVICE_SSH};
 use eyre::Context;
 use hyper_util::rt::TokioIo;
@@ -26,13 +26,16 @@ pub(crate) struct ServiceRegistry {
 }
 
 impl ServiceRegistry {
-    pub(crate) async fn discover(driver: &dyn Driver) -> eyre::Result<Self> {
+    pub(crate) async fn discover(machine: &MachineHandle) -> eyre::Result<Self> {
         let mut by_name = BTreeMap::new();
         by_name.insert(SERVICE_SERIAL.to_string(), ServiceTarget::Serial);
 
-        let vsock_fd = match driver.open_device(OpenDeviceRequest::Vsock {
-            port: DEFAULT_DISCOVERY_PORT,
-        })? {
+        let vsock_fd = match machine
+            .open_device(OpenDeviceRequest::Vsock {
+                port: DEFAULT_DISCOVERY_PORT,
+            })
+            .await?
+        {
             OpenDeviceResponse::Vsock { stream } => stream,
             OpenDeviceResponse::Serial { .. } => {
                 eyre::bail!("driver returned serial device when opening guest discovery port")

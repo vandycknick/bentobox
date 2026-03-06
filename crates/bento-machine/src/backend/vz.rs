@@ -49,7 +49,7 @@ pub(crate) struct VzMachineBackend {
 
 impl VzMachineBackend {
     pub(crate) fn new(spec: ResolvedMachineSpec) -> Result<Self, MachineError> {
-        validate_support()?;
+        validate(&spec)?;
         Ok(Self {
             spec,
             vm: None,
@@ -133,6 +133,18 @@ fn validate_support() -> Result<(), MachineError> {
         });
     }
 
+    Ok(())
+}
+
+pub(crate) fn validate(spec: &ResolvedMachineSpec) -> Result<(), MachineError> {
+    validate_support()?;
+    validate_machine_config(spec)
+}
+
+pub(crate) fn prepare(spec: &ResolvedMachineSpec) -> Result<(), MachineError> {
+    validate(spec)?;
+    let path = machine_identifier_path(spec.id.as_str(), &spec.config)?;
+    let _ = get_machine_identifier(path)?;
     Ok(())
 }
 
@@ -515,4 +527,124 @@ fn machine_identifier_path<'a>(
             "machine_identifier_path must be configured for a VZ machine".to_string(),
         )
     })
+}
+
+fn validate_machine_config(spec: &ResolvedMachineSpec) -> Result<(), MachineError> {
+    let config = &spec.config;
+
+    let kernel_path = required_path(&spec.id, config.kernel_path.as_ref(), "kernel_path")?;
+    let initramfs_path = required_path(&spec.id, config.initramfs_path.as_ref(), "initramfs_path")?;
+    let machine_identifier_path = machine_identifier_path(spec.id.as_str(), config)?;
+
+    if !kernel_path.is_file() {
+        return Err(MachineError::InvalidConfig {
+            id: spec.id.clone(),
+            reason: format!("kernel path is not a file: {}", kernel_path.display()),
+        });
+    }
+
+    if !initramfs_path.is_file() {
+        return Err(MachineError::InvalidConfig {
+            id: spec.id.clone(),
+            reason: format!("initramfs path is not a file: {}", initramfs_path.display()),
+        });
+    }
+
+    if let Some(parent) = machine_identifier_path.parent() {
+        if !parent.is_dir() {
+            return Err(MachineError::InvalidConfig {
+                id: spec.id.clone(),
+                reason: format!(
+                    "machine identifier parent directory does not exist: {}",
+                    parent.display()
+                ),
+            });
+        }
+    }
+
+    let cpu_count = config.cpus.unwrap_or(2);
+    if cpu_count == 0 {
+        return Err(MachineError::InvalidConfig {
+            id: spec.id.clone(),
+            reason: "cpu count must be greater than zero".to_string(),
+        });
+    }
+
+    let memory_mib = config.memory_mib.unwrap_or(2048);
+    if memory_mib == 0 {
+        return Err(MachineError::InvalidConfig {
+            id: spec.id.clone(),
+            reason: "memory_mib must be greater than zero".to_string(),
+        });
+    }
+
+    if config.nested_virtualization {
+        if !utils::is_os_version_at_least(15, 0, 0) {
+            return Err(MachineError::InvalidConfig {
+                id: spec.id.clone(),
+                reason: "nested virtualization requires macOS 15 or newer".to_string(),
+            });
+        }
+
+        if !utils::vz_nested_virtualization_is_supported() {
+            return Err(MachineError::InvalidConfig {
+                id: spec.id.clone(),
+                reason: "nested virtualization is not supported on this device".to_string(),
+            });
+        }
+    }
+
+    match config.network {
+        NetworkMode::VzNat | NetworkMode::None => {}
+        NetworkMode::Bridged => {
+            return Err(MachineError::InvalidConfig {
+                id: spec.id.clone(),
+                reason: "network mode 'bridged' is not implemented yet".to_string(),
+            });
+        }
+        NetworkMode::Cni => {
+            return Err(MachineError::InvalidConfig {
+                id: spec.id.clone(),
+                reason: "network mode 'cni' is not implemented yet".to_string(),
+            });
+        }
+    }
+
+    for disk in config.root_disk.iter().chain(config.data_disks.iter()) {
+        let metadata =
+            std::fs::metadata(&disk.path).map_err(|err| MachineError::InvalidConfig {
+                id: spec.id.clone(),
+                reason: format!("failed to access disk image {}: {err}", disk.path.display()),
+            })?;
+
+        if !metadata.is_file() {
+            return Err(MachineError::InvalidConfig {
+                id: spec.id.clone(),
+                reason: format!("disk image path is not a file: {}", disk.path.display()),
+            });
+        }
+    }
+
+    for mount in &config.mounts {
+        let metadata =
+            std::fs::metadata(&mount.host_path).map_err(|err| MachineError::InvalidConfig {
+                id: spec.id.clone(),
+                reason: format!(
+                    "failed to access shared directory {}: {err}",
+                    mount.host_path.display()
+                ),
+            })?;
+
+        if !metadata.is_dir() {
+            return Err(MachineError::InvalidConfig {
+                id: spec.id.clone(),
+                reason: format!(
+                    "shared directory path is not a directory: {}",
+                    mount.host_path.display()
+                ),
+            });
+        }
+    }
+
+    Ok(())
 }

@@ -20,6 +20,20 @@ impl FirecrackerMachineBackend {
     }
 }
 
+pub(crate) fn validate(spec: &ResolvedMachineSpec) -> Result<(), MachineError> {
+    Err(MachineError::UnsupportedBackend {
+        kind: spec.kind,
+        reason: "firecracker backend is not implemented yet".to_string(),
+    })
+}
+
+pub(crate) fn prepare(spec: &ResolvedMachineSpec) -> Result<(), MachineError> {
+    Err(MachineError::UnsupportedBackend {
+        kind: spec.kind,
+        reason: "firecracker backend is not implemented yet".to_string(),
+    })
+}
+
 impl MachineBackend for FirecrackerMachineBackend {
     fn state(&self) -> Result<MachineState, MachineError> {
         self.state

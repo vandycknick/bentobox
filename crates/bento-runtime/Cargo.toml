@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bento-machine = { path = "../bento-machine" }
 bento-protocol = { path = "../bento-protocol" }
 block2 = "0.6.0"
 chrono = "0.4.43"

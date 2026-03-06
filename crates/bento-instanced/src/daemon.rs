@@ -1,9 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_runtime::driver;
+use bento_machine::Machine;
 use bento_runtime::instance::InstanceFile;
 use bento_runtime::instance_manager::InstanceManager;
+use bento_runtime::machine::machine_spec_for_instance;
 use eyre::Context;
 use futures::future::{FutureExt, LocalBoxFuture};
 use futures::stream::FuturesUnordered;
@@ -40,11 +41,12 @@ impl InstanceDaemon {
         let _pid_guard = PidGuard::create(&inst.file(InstanceFile::InstancedPid)).await?;
         let socket = bind_socket(&inst.file(InstanceFile::InstancedSocket))?;
 
-        let mut driver = driver::get_driver_for(&inst)?;
+        let machine_spec = machine_spec_for_instance(&inst)?;
+        let machine = Machine::create_or_get(machine_spec.clone()).await?;
         let store = Arc::new(new_instance_store());
         store.dispatch(Action::vm_starting());
 
-        driver.start()?;
+        machine.start().await?;
         store.dispatch(Action::vm_running());
 
         let expects_guest_agent = inst.expects_guest_agent();
@@ -52,10 +54,10 @@ impl InstanceDaemon {
             store.dispatch(Action::guest_starting());
         }
 
-        let serial_runtime = match create_serial_runtime(&inst, &*driver) {
+        let serial_runtime = match create_serial_runtime(&inst, &machine).await {
             Ok(runtime) => runtime,
             Err(err) => {
-                let _ = driver.stop();
+                let _ = Machine::release(&machine_spec.id).await;
                 return Err(err);
             }
         };
@@ -75,12 +77,12 @@ impl InstanceDaemon {
                         Ok((stream, _)) => {
                             let serial_runtime = serial_runtime.clone();
                             let control_state = store.clone();
-                            let driver_ref = &*driver;
+                            let machine = machine.clone();
                             client_tasks.push(
                                 async move {
                                     let result = handle_client(
                                         stream,
-                                        driver_ref,
+                                        machine,
                                         serial_runtime,
                                         control_state,
                                     )
@@ -98,7 +100,7 @@ impl InstanceDaemon {
                     }
                 }
                 _ = guest_probe_tick.tick(), if !guest_ready && expects_guest_agent => {
-                    match ServiceRegistry::discover(&*driver).await {
+                    match ServiceRegistry::discover(&machine).await {
                         Ok(_) => {
                             guest_ready = true;
                             store.dispatch(Action::guest_running());
@@ -132,7 +134,7 @@ impl InstanceDaemon {
 
         drop(client_tasks);
 
-        driver.stop()?;
+        Machine::release(&machine_spec.id).await?;
 
         store.dispatch(Action::VmTransition {
             state: bento_protocol::instance::v1::LifecycleState::Stopped,

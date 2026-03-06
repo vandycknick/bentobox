@@ -7,6 +7,7 @@ pub mod images;
 pub mod instance;
 pub mod instance_manager;
 pub mod log_watcher;
+pub mod machine;
 pub mod negotiate;
 pub mod service_readiness;
 pub mod services;
