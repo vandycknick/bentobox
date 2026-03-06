@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::thread;
+use std::thread::{self, JoinHandle};
 
 use crossbeam::channel;
 use tokio::sync::{mpsc, oneshot};
@@ -12,20 +12,40 @@ use crate::types::{
     ResolvedMachineSpec,
 };
 
-pub(crate) struct MachineInner {
+pub(crate) struct MachineWorker {
     pub(crate) spec: ResolvedMachineSpec,
     released: AtomicBool,
     tx: mpsc::UnboundedSender<MachineCommand>,
+    join: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl MachineInner {
+impl MachineWorker {
     pub(crate) fn new(spec: ResolvedMachineSpec) -> Result<Self, MachineError> {
-        let tx = spawn_machine_worker(spec.clone())?;
+        let (tx, join) = spawn_machine_worker(spec.clone())?;
         Ok(Self {
             spec,
             released: AtomicBool::new(false),
             tx,
+            join: Mutex::new(Some(join)),
         })
+    }
+
+    pub(crate) fn join(&self) -> Result<(), MachineError> {
+        let join = self
+            .join
+            .lock()
+            .map_err(|_| MachineError::RegistryPoisoned)?
+            .take();
+
+        match join {
+            Some(join) => join.join().map_err(|_| {
+                MachineError::Backend(format!(
+                    "machine worker thread panicked for {}",
+                    self.spec.id.as_str()
+                ))
+            }),
+            None => Ok(()),
+        }
     }
 
     pub(crate) fn is_released(&self) -> bool {
@@ -101,7 +121,7 @@ enum MachineCommand {
 
 #[derive(Default)]
 struct Registry {
-    machines: HashMap<MachineId, Arc<MachineInner>>,
+    machines: HashMap<MachineId, Arc<MachineWorker>>,
 }
 
 static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
@@ -110,7 +130,7 @@ fn registry() -> &'static Mutex<Registry> {
     REGISTRY.get_or_init(|| Mutex::new(Registry::default()))
 }
 
-pub(crate) fn create_or_get(spec: ResolvedMachineSpec) -> Result<Arc<MachineInner>, MachineError> {
+pub(crate) fn create_or_get(spec: ResolvedMachineSpec) -> Result<Arc<MachineWorker>, MachineError> {
     let mut registry = registry()
         .lock()
         .map_err(|_| MachineError::RegistryPoisoned)?;
@@ -128,29 +148,29 @@ pub(crate) fn create_or_get(spec: ResolvedMachineSpec) -> Result<Arc<MachineInne
     }
 
     let id = spec.id.clone();
-    let machine = Arc::new(MachineInner::new(spec)?);
-    registry.machines.insert(id, machine.clone());
-    Ok(machine)
+    let worker = Arc::new(MachineWorker::new(spec)?);
+    registry.machines.insert(id, worker.clone());
+    Ok(worker)
 }
 
-pub(crate) fn release(id: &MachineId) -> Result<Option<Arc<MachineInner>>, MachineError> {
+pub(crate) fn release(id: &MachineId) -> Result<Option<Arc<MachineWorker>>, MachineError> {
     let mut registry = registry()
         .lock()
         .map_err(|_| MachineError::RegistryPoisoned)?;
-    let machine = registry.machines.remove(id);
-    if let Some(machine) = machine.as_ref() {
-        machine.mark_released();
+    let worker = registry.machines.remove(id);
+    if let Some(worker) = worker.as_ref() {
+        worker.mark_released();
     }
-    Ok(machine)
+    Ok(worker)
 }
 
 fn spawn_machine_worker(
     spec: ResolvedMachineSpec,
-) -> Result<mpsc::UnboundedSender<MachineCommand>, MachineError> {
+) -> Result<(mpsc::UnboundedSender<MachineCommand>, JoinHandle<()>), MachineError> {
     let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let (startup_tx, startup_rx) = channel::bounded(1);
 
-    thread::Builder::new()
+    let join = thread::Builder::new()
         .name(format!("machine:{}", spec.id.as_str()))
         .spawn(move || {
             let backend = create_backend(&spec);
@@ -187,5 +207,5 @@ fn spawn_machine_worker(
         MachineError::Backend("machine worker failed before initialization".to_string())
     })??;
 
-    Ok(command_tx)
+    Ok((command_tx, join))
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::backend;
-use crate::registry::{self, MachineInner};
+use crate::registry::{self, MachineWorker};
 use crate::types::{
     MachineError, MachineId, MachineSpec, MachineState, OpenDeviceRequest, OpenDeviceResponse,
 };
@@ -10,7 +10,7 @@ pub struct Machine;
 
 #[derive(Clone)]
 pub struct MachineHandle {
-    inner: Arc<MachineInner>,
+    inner: Arc<MachineWorker>,
 }
 
 impl std::fmt::Debug for MachineHandle {
@@ -39,12 +39,22 @@ impl Machine {
     }
 
     pub async fn release(id: &MachineId) -> Result<(), MachineError> {
-        let machine = match registry::release(id)? {
-            Some(machine) => machine,
+        let worker = match registry::release(id)? {
+            Some(worker) => worker,
             None => return Ok(()),
         };
 
-        machine.stop().await
+        let stop_result = worker.stop().await;
+        let join_result = worker.join();
+
+        match (stop_result, join_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(stop_err), Ok(())) => Err(stop_err),
+            (Ok(()), Err(join_err)) => Err(join_err),
+            (Err(stop_err), Err(join_err)) => Err(MachineError::Backend(format!(
+                "machine release failed during stop and join: stop={stop_err}; join={join_err}"
+            ))),
+        }
     }
 }
 
