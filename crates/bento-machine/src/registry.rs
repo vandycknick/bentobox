@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use crossbeam::channel;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::backend::create_backend;
 use crate::types::{
@@ -14,7 +15,7 @@ use crate::types::{
 pub(crate) struct MachineInner {
     pub(crate) spec: ResolvedMachineSpec,
     released: AtomicBool,
-    tx: channel::Sender<MachineCommand>,
+    tx: mpsc::UnboundedSender<MachineCommand>,
 }
 
 impl MachineInner {
@@ -36,58 +37,65 @@ impl MachineInner {
     }
 
     pub(crate) async fn state(&self) -> Result<MachineState, MachineError> {
-        let tx = self.tx.clone();
-        tokio::task::spawn_blocking(move || {
-            send_command(&tx, |reply| MachineCommand::State { reply })
-        })
-        .await
-        .map_err(|_| MachineError::Backend("machine state task failed to join".to_string()))?
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(MachineCommand::State { reply: reply_tx })
+            .map_err(|_| MachineError::Backend("machine worker has stopped".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| MachineError::Backend("machine worker dropped reply".to_string()))?
     }
 
     pub(crate) async fn start(&self) -> Result<(), MachineError> {
-        let tx = self.tx.clone();
-        tokio::task::spawn_blocking(move || {
-            send_command(&tx, |reply| MachineCommand::Start { reply })
-        })
-        .await
-        .map_err(|_| MachineError::Backend("machine start task failed to join".to_string()))?
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(MachineCommand::Start { reply: reply_tx })
+            .map_err(|_| MachineError::Backend("machine worker has stopped".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| MachineError::Backend("machine worker dropped reply".to_string()))?
     }
 
     pub(crate) async fn stop(&self) -> Result<(), MachineError> {
-        let tx = self.tx.clone();
-        tokio::task::spawn_blocking(move || {
-            send_command(&tx, |reply| MachineCommand::Stop { reply })
-        })
-        .await
-        .map_err(|_| MachineError::Backend("machine stop task failed to join".to_string()))?
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(MachineCommand::Stop { reply: reply_tx })
+            .map_err(|_| MachineError::Backend("machine worker has stopped".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| MachineError::Backend("machine worker dropped reply".to_string()))?
     }
 
     pub(crate) async fn open_device(
         &self,
         request: OpenDeviceRequest,
     ) -> Result<OpenDeviceResponse, MachineError> {
-        let tx = self.tx.clone();
-        tokio::task::spawn_blocking(move || {
-            send_command(&tx, |reply| MachineCommand::OpenDevice { request, reply })
-        })
-        .await
-        .map_err(|_| MachineError::Backend("open_device task failed to join".to_string()))?
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(MachineCommand::OpenDevice {
+                request,
+                reply: reply_tx,
+            })
+            .map_err(|_| MachineError::Backend("machine worker has stopped".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| MachineError::Backend("machine worker dropped reply".to_string()))?
     }
 }
 
 enum MachineCommand {
     State {
-        reply: channel::Sender<Result<MachineState, MachineError>>,
+        reply: oneshot::Sender<Result<MachineState, MachineError>>,
     },
     Start {
-        reply: channel::Sender<Result<(), MachineError>>,
+        reply: oneshot::Sender<Result<(), MachineError>>,
     },
     Stop {
-        reply: channel::Sender<Result<(), MachineError>>,
+        reply: oneshot::Sender<Result<(), MachineError>>,
     },
     OpenDevice {
         request: OpenDeviceRequest,
-        reply: channel::Sender<Result<OpenDeviceResponse, MachineError>>,
+        reply: oneshot::Sender<Result<OpenDeviceResponse, MachineError>>,
     },
 }
 
@@ -138,8 +146,8 @@ pub(crate) fn release(id: &MachineId) -> Result<Option<Arc<MachineInner>>, Machi
 
 fn spawn_machine_worker(
     spec: ResolvedMachineSpec,
-) -> Result<channel::Sender<MachineCommand>, MachineError> {
-    let (command_tx, command_rx) = channel::unbounded();
+) -> Result<mpsc::UnboundedSender<MachineCommand>, MachineError> {
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel();
     let (startup_tx, startup_rx) = channel::bounded(1);
 
     thread::Builder::new()
@@ -149,7 +157,7 @@ fn spawn_machine_worker(
             match backend {
                 Ok(mut backend) => {
                     let _ = startup_tx.send(Ok(()));
-                    while let Ok(command) = command_rx.recv() {
+                    while let Some(command) = command_rx.blocking_recv() {
                         match command {
                             MachineCommand::State { reply } => {
                                 let _ = reply.send(backend.state());
@@ -180,16 +188,4 @@ fn spawn_machine_worker(
     })??;
 
     Ok(command_tx)
-}
-
-fn send_command<T>(
-    tx: &channel::Sender<MachineCommand>,
-    build: impl FnOnce(channel::Sender<Result<T, MachineError>>) -> MachineCommand,
-) -> Result<T, MachineError> {
-    let (reply_tx, reply_rx) = channel::bounded(1);
-    tx.send(build(reply_tx))
-        .map_err(|_| MachineError::Backend("machine worker has stopped".to_string()))?;
-    reply_rx
-        .recv()
-        .map_err(|_| MachineError::Backend("machine worker dropped reply".to_string()))?
 }
