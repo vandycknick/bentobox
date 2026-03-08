@@ -85,3 +85,7 @@ List instances:
 ```bash
 bentoctl list
 ```
+
+## More Docs
+
+- [Extensions](docs/extensions.md), guest features like `ssh` and `docker`, how to enable them, and how to read their status

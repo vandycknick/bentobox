@@ -2,13 +2,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bento_machine::Machine;
-use bento_runtime::instance::InstanceFile;
+use bento_protocol::instance::v1::{ExtensionStatus, HostSocket, LifecycleState};
+use bento_runtime::extensions::{BuiltinExtension, EXTENSION_DOCKER};
+use bento_runtime::instance::{Instance, InstanceFile};
 use bento_runtime::instance_store::InstanceStore;
+use bento_runtime::services::SERVICE_DOCKER;
 use eyre::Context;
 use tokio::signal::unix::signal;
 use tokio::signal::unix::SignalKind;
 
 use crate::discovery::ServiceRegistry;
+use crate::host_export::listen_host_service;
 use crate::machine::machine_spec_for_instance;
 use crate::pid_guard::PidGuard;
 use crate::serial::SerialConsole;
@@ -42,10 +46,28 @@ impl InstanceDaemon {
         let machine = Machine::create_or_get(machine_spec.clone()).await?;
         let serial_console = SerialConsole::new(machine.clone());
         let store = Arc::new(new_instance_store());
-        let expects_guest_agent = inst.expects_guest_agent();
+        let expects_guest_agent = inst.uses_bootstrap();
 
         let server = InstanceServer::new(machine.clone(), serial_console.clone(), store.clone());
         let server_task = server.listen(&inst.file(InstanceFile::InstancedSocket))?;
+
+        let docker_socket_path = docker_host_socket_path(&inst);
+        remove_stale_socket(&docker_socket_path)?;
+        let docker_export_task = if inst.extensions().is_enabled(BuiltinExtension::Docker) {
+            store.dispatch(Action::set_host_sockets(vec![HostSocket {
+                name: String::from(SERVICE_DOCKER),
+                path: docker_socket_path.display().to_string(),
+            }]));
+
+            Some(listen_host_service(
+                machine.clone(),
+                &docker_socket_path,
+                String::from(SERVICE_DOCKER),
+            )?)
+        } else {
+            store.dispatch(Action::set_host_sockets(Vec::new()));
+            None
+        };
 
         let _pid_guard = PidGuard::create(&inst.file(InstanceFile::InstancedPid)).await?;
 
@@ -70,7 +92,10 @@ impl InstanceDaemon {
 
         if expects_guest_agent {
             store.dispatch(Action::guest_starting());
-            wait_for_guest_ready(&machine, &store).await;
+            spawn_guest_extension_monitor(inst.clone(), machine.clone(), store.clone());
+        } else {
+            store.dispatch(Action::set_extensions(Vec::new()));
+            store.dispatch(Action::guest_running());
         }
 
         tokio::select! {
@@ -99,6 +124,19 @@ impl InstanceDaemon {
                     }
                 }
             }
+            result = async {
+                if let Some(task) = docker_export_task {
+                    task.await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                match result {
+                    Ok(Ok(())) => tracing::warn!(instance = %self.name, "docker host export exited"),
+                    Ok(Err(err)) => return Err(err),
+                    Err(err) => return Err(eyre::eyre!("docker host export task failed: {err}")),
+                }
+            }
         }
 
         tracing::info!(instance = %self.name, "sending stop signal to vm");
@@ -106,9 +144,11 @@ impl InstanceDaemon {
         Machine::release(&machine_spec.id).await?;
 
         store.dispatch(Action::VmTransition {
-            state: bento_protocol::instance::v1::LifecycleState::Stopped,
+            state: LifecycleState::Stopped,
             message: String::from("vm stopped"),
         });
+
+        let _ = std::fs::remove_file(&docker_socket_path);
 
         tracing::info!(instance = %self.name, "instance stopped");
 
@@ -116,30 +156,140 @@ impl InstanceDaemon {
     }
 }
 
-async fn wait_for_guest_ready(
-    machine: &bento_machine::MachineHandle,
-    store: &crate::state::InstanceStore,
+fn spawn_guest_extension_monitor(
+    inst: Instance,
+    machine: bento_machine::MachineHandle,
+    store: Arc<crate::state::InstanceStore>,
 ) {
-    let deadline = tokio::time::Instant::now() + GUEST_DISCOVERY_TIMEOUT;
-    let mut guest_probe_tick = tokio::time::interval(GUEST_DISCOVERY_RETRY);
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + GUEST_DISCOVERY_TIMEOUT;
+        let mut guest_probe_tick = tokio::time::interval(GUEST_DISCOVERY_RETRY);
 
-    loop {
-        guest_probe_tick.tick().await;
+        loop {
+            guest_probe_tick.tick().await;
 
-        match ServiceRegistry::discover(machine).await {
-            Ok(_) => {
-                store.dispatch(Action::guest_running());
-                return;
-            }
-            Err(err) if tokio::time::Instant::now() >= deadline => {
-                tracing::warn!(error = %err, timeout = ?GUEST_DISCOVERY_TIMEOUT, "guest services did not become ready before timeout");
-                return;
-            }
-            Err(err) => {
-                tracing::info!(error = %err, "guest services not ready yet");
+            match ServiceRegistry::discover(&machine).await {
+                Ok(registry) => {
+                    let extensions = project_extension_statuses(&inst, &registry);
+                    let ready = startup_required_extensions_ready(&extensions);
+                    let waiting_summary = startup_required_wait_summary(&extensions);
+                    store.dispatch(Action::set_extensions(extensions));
+
+                    if ready {
+                        store.dispatch(Action::guest_running());
+                    } else {
+                        store.dispatch(Action::guest_starting());
+                        tracing::info!(reason = %waiting_summary, "startup-required extensions not ready yet");
+                    }
+                }
+                Err(err) if tokio::time::Instant::now() >= deadline => {
+                    tracing::warn!(error = %err, timeout = ?GUEST_DISCOVERY_TIMEOUT, "guest extensions did not become ready before timeout");
+                    store.dispatch(Action::guest_error(format!(
+                        "guest discovery failed: {err}"
+                    )));
+                    return;
+                }
+                Err(err) => {
+                    tracing::info!(reason = %classify_guest_discovery_retry(&err), "guest discovery not ready yet");
+                    tracing::debug!(error = %err, "guest discovery retry detail");
+                }
             }
         }
+    });
+}
+
+fn project_extension_statuses(inst: &Instance, registry: &ServiceRegistry) -> Vec<ExtensionStatus> {
+    inst.extensions()
+        .enabled_extensions()
+        .into_iter()
+        .map(|extension| {
+            let reported = registry
+                .extensions()
+                .find(|status| status.name == extension.id());
+            let (configured, running, summary, problems) = match reported {
+                Some(status) => (
+                    status.configured,
+                    status.running,
+                    status.summary.clone(),
+                    status.problems.clone(),
+                ),
+                None => (
+                    false,
+                    false,
+                    format!("{} was not reported by guestd", extension.id()),
+                    vec![format!("guestd did not report {}", extension.id())],
+                ),
+            };
+
+            ExtensionStatus {
+                name: extension.id().to_string(),
+                enabled: true,
+                startup_required: extension.startup_required(),
+                configured,
+                running,
+                summary,
+                problems,
+            }
+        })
+        .collect()
+}
+
+fn startup_required_extensions_ready(extensions: &[ExtensionStatus]) -> bool {
+    extensions
+        .iter()
+        .filter(|extension| extension.startup_required)
+        .all(|extension| extension.configured && extension.running)
+}
+
+fn startup_required_wait_summary(extensions: &[ExtensionStatus]) -> String {
+    let reasons = extensions
+        .iter()
+        .filter(|extension| extension.startup_required)
+        .filter(|extension| !(extension.configured && extension.running))
+        .map(|extension| {
+            let detail = extension
+                .problems
+                .first()
+                .cloned()
+                .filter(|problem| !problem.is_empty())
+                .unwrap_or_else(|| extension.summary.clone());
+            format!("{}: {}", extension.name, detail)
+        })
+        .collect::<Vec<_>>();
+
+    if reasons.is_empty() {
+        String::from("waiting for startup-required extensions")
+    } else {
+        reasons.join("; ")
     }
+}
+
+fn classify_guest_discovery_retry(err: &eyre::Report) -> &'static str {
+    let message = err.to_string().to_ascii_lowercase();
+
+    if message.contains("unimplemented") {
+        return "guestd protocol is older than instanced";
+    }
+
+    if message.contains("connection reset by peer")
+        || message.contains("connection refused")
+        || message.contains("not connected")
+        || message.contains("service unavailable")
+    {
+        return "guestd is not reachable yet";
+    }
+
+    if message.contains("timed out") {
+        return "guest discovery rpc timed out";
+    }
+
+    "waiting for guest discovery rpc"
+}
+
+fn docker_host_socket_path(inst: &Instance) -> std::path::PathBuf {
+    inst.dir()
+        .join("sock")
+        .join(format!("{}.sock", EXTENSION_DOCKER))
 }
 
 fn remove_stale_socket(path: &std::path::Path) -> eyre::Result<()> {

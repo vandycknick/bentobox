@@ -4,6 +4,7 @@ use std::process::Command;
 use eyre::Context;
 use serde::Serialize;
 
+use crate::extensions::ExtensionsConfig;
 use crate::global_config::{ensure_guest_agent_binary, GlobalConfig};
 use crate::host_user::HostUser;
 use crate::instance::{resolve_mount_location, Instance, InstanceFile, NetworkMode};
@@ -11,6 +12,7 @@ use crate::instance::{resolve_mount_location, Instance, InstanceFile, NetworkMod
 const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-guestd";
 const GUEST_AGENT_INSTALL_SCRIPT_ENTRY: &str = "bento-install-guest-agent.sh";
 const GUEST_AGENT_BOOTSTRAP_SCRIPT: &str = "/var/lib/cloud/scripts/per-boot/00-bento.bootstrap.sh";
+const GUESTD_CONFIG_PATH: &str = "/etc/bento/guestd.yaml";
 const GUEST_BOOTSTRAP_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-bootstrap.sh");
 const GUEST_INSTALL_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-install.sh");
 
@@ -179,6 +181,11 @@ struct WriteFile {
 }
 
 #[derive(Serialize)]
+struct GuestdConfigFile<'a> {
+    extensions: &'a ExtensionsConfig,
+}
+
+#[derive(Serialize)]
 struct MetaData {
     #[serde(rename = "instance-id")]
     instance_id: String,
@@ -233,23 +240,65 @@ fn render_user_data(
         ]);
     }
 
-    let write_files = vec![WriteFile {
-        path: GUEST_AGENT_BOOTSTRAP_SCRIPT.to_string(),
-        owner: "root:root".to_string(),
-        permissions: "0755".to_string(),
-        content: GUEST_BOOTSTRAP_SCRIPT_CONTENT.to_string(),
-    }];
+    let guestd_config = serde_yaml_ng::to_string(&GuestdConfigFile {
+        extensions: &inst.config.extensions,
+    })
+    .context("serialize guestd config")?;
+
+    let write_files = vec![
+        WriteFile {
+            path: GUEST_AGENT_BOOTSTRAP_SCRIPT.to_string(),
+            owner: "root:root".to_string(),
+            permissions: "0755".to_string(),
+            content: GUEST_BOOTSTRAP_SCRIPT_CONTENT.to_string(),
+        },
+        WriteFile {
+            path: GUESTD_CONFIG_PATH.to_string(),
+            owner: "root:root".to_string(),
+            permissions: "0644".to_string(),
+            content: guestd_config,
+        },
+    ];
 
     let cloud_config = CloudConfig {
         users: vec![user],
         mounts,
         write_files,
     };
-    let mut yaml = String::from("#cloud-config\n");
-    yaml.push_str(
+    let mut bento_yaml = String::from("#cloud-config\n");
+    bento_yaml.push_str(
         &serde_yaml_ng::to_string(&cloud_config).context("serialize cloud-init user-data")?,
     );
-    Ok(yaml)
+
+    if let Some(userdata_path) = inst.config.userdata_path.as_ref() {
+        let user_data = std::fs::read_to_string(userdata_path)
+            .with_context(|| format!("read userdata {}", userdata_path.display()))?;
+        return Ok(render_multipart_user_data(&bento_yaml, &user_data));
+    }
+
+    Ok(bento_yaml)
+}
+
+fn render_multipart_user_data(bento_user_data: &str, user_data: &str) -> String {
+    let boundary = "===============bento-userdata==";
+    format!(
+        "MIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=\"{boundary}\"\n\n--{boundary}\nContent-Type: text/cloud-config; charset=\"us-ascii\"\n\n{bento_user_data}\n--{boundary}\nContent-Type: {user_content_type}; charset=\"us-ascii\"\n\n{user_data}\n--{boundary}--\n",
+        boundary = boundary,
+        bento_user_data = bento_user_data.trim_end(),
+        user_content_type = detect_userdata_content_type(user_data),
+        user_data = user_data.trim_end(),
+    )
+}
+
+fn detect_userdata_content_type(user_data: &str) -> &'static str {
+    let trimmed = user_data.trim_start();
+    if trimmed.starts_with("#cloud-config") {
+        "text/cloud-config"
+    } else if trimmed.starts_with("#!") {
+        "text/x-shellscript"
+    } else {
+        "text/plain"
+    }
 }
 
 fn render_network_config() -> eyre::Result<String> {

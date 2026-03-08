@@ -8,11 +8,11 @@ use thiserror::Error;
 use crate::{
     cidata,
     directories::Directory,
+    extensions::ExtensionsConfig,
     host_user,
-    images::capabilities::GuestCapabilities,
     instance::{
-        resolve_mount_location, validate_network_mode, DiskConfig, DiskRole, Instance,
-        InstanceConfig, InstanceFile, InstanceStatus, MountConfig, NetworkConfig,
+        resolve_mount_location, validate_network_mode, BootstrapConfig, DiskConfig, DiskRole,
+        Instance, InstanceConfig, InstanceFile, InstanceStatus, MountConfig, NetworkConfig,
     },
     ssh_keys,
     utils::read_pid_file,
@@ -127,7 +127,7 @@ impl InstanceStore {
 
         let inst = self.inspect(name)?;
 
-        let should_inject_cidata = inst.expects_guest_agent();
+        let should_inject_cidata = inst.uses_bootstrap();
 
         if should_inject_cidata {
             let host_user =
@@ -264,7 +264,8 @@ pub struct InstanceCreateOptions {
     pub disks: Vec<PathBuf>,
     pub mounts: Vec<MountConfig>,
     pub network: Option<NetworkConfig>,
-    pub capabilities: GuestCapabilities,
+    pub bootstrap: Option<BootstrapConfig>,
+    pub extensions: ExtensionsConfig,
     pub userdata_path: Option<PathBuf>,
 }
 
@@ -278,7 +279,8 @@ impl Default for InstanceCreateOptions {
             disks: Vec::new(),
             mounts: Vec::new(),
             network: None,
-            capabilities: GuestCapabilities::default(),
+            bootstrap: None,
+            extensions: ExtensionsConfig::default(),
             userdata_path: None,
         }
     }
@@ -320,8 +322,13 @@ impl InstanceCreateOptions {
         self
     }
 
-    pub fn with_capabilities(mut self, capabilities: GuestCapabilities) -> Self {
-        self.capabilities = capabilities;
+    pub fn with_bootstrap(mut self, bootstrap: Option<BootstrapConfig>) -> Self {
+        self.bootstrap = bootstrap;
+        self
+    }
+
+    pub fn with_extensions(mut self, extensions: ExtensionsConfig) -> Self {
+        self.extensions = extensions;
         self
     }
 
@@ -350,7 +357,8 @@ fn apply_create_options(
         .collect();
     config.mounts = normalize_mounts(&options.mounts)?;
     config.network = options.network;
-    config.capabilities = options.capabilities;
+    config.bootstrap = options.bootstrap;
+    config.extensions = options.extensions;
     config.userdata_path = options.userdata_path;
 
     Ok(())

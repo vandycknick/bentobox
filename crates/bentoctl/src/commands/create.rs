@@ -1,7 +1,9 @@
 use bento_instanced::machine::prepare_instance;
-use bento_runtime::images::capabilities::GuestCapabilities;
+use bento_runtime::images::features::ImageFeatures;
 use bento_runtime::images::store::ImageStore;
-use bento_runtime::instance::{InstanceFile, MountConfig, NetworkConfig, NetworkMode};
+use bento_runtime::instance::{
+    BootstrapConfig, InstanceFile, MountConfig, NetworkConfig, NetworkMode,
+};
 use bento_runtime::instance_store::{InstanceCreateOptions, InstanceStore};
 use clap::Args;
 use eyre::Context;
@@ -43,6 +45,8 @@ pub struct Cmd {
     pub mounts: Vec<MountConfig>,
     #[arg(long, value_name = "MODE", value_parser = parse_network_mode)]
     pub network: Option<NetworkMode>,
+    #[arg(long = "enable", value_name = "EXTENSION")]
+    pub enabled_extensions: Vec<String>,
 }
 
 impl Display for Cmd {
@@ -71,10 +75,30 @@ impl Cmd {
             })
             .transpose()?;
 
-        let capabilities = selected_image
+        let image_features = selected_image
             .as_ref()
-            .map(|image| GuestCapabilities::from_annotations(&image.annotations))
+            .map(|image| ImageFeatures::from_annotations(&image.annotations))
             .unwrap_or_default();
+
+        let mut extensions = image_features.extensions.clone();
+        for extension in &self.enabled_extensions {
+            match extension.as_str() {
+                "docker" => extensions.docker = true,
+                "ssh" => extensions.ssh = true,
+                other => {
+                    eyre::bail!("unsupported extension '{other}', expected one of: ssh, docker")
+                }
+            }
+        }
+
+        let bootstrap = (userdata_path.is_some() || extensions.requires_bootstrap())
+            .then(BootstrapConfig::cidata_cloud_init);
+
+        if bootstrap.is_some() && !image_features.supports_bootstrap() {
+            eyre::bail!(
+                "instance requires bootstrap for userdata or enabled extensions, but the selected image does not advertise bootstrap support"
+            );
+        }
 
         let options = InstanceCreateOptions::default()
             .with_cpus(self.cpus)
@@ -84,7 +108,8 @@ impl Cmd {
             .with_disks(disk_paths)
             .with_mounts(self.mounts.clone())
             .with_network(self.network.map(|mode| NetworkConfig { mode }))
-            .with_capabilities(capabilities)
+            .with_bootstrap(bootstrap)
+            .with_extensions(extensions)
             .with_userdata(userdata_path);
 
         let inst = store.create(&self.name, options)?;

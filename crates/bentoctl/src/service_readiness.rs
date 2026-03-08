@@ -5,10 +5,11 @@ use std::time::{Duration, Instant};
 
 use bento_protocol::instance::v1::instance_control_service_client::InstanceControlServiceClient;
 use bento_protocol::instance::v1::{
-    HealthRequest, LifecycleState, StatusSource, WatchStatusRequest,
+    GetStatusRequest, GetStatusResponse, HealthRequest, LifecycleState, StatusSource,
+    WatchStatusRequest,
 };
 use bento_runtime::negotiate::{ClientUpgradeStreamError, Negotiate, RejectCode, Upgrade};
-use bento_runtime::services::{ServiceDescriptor, SERVICE_SERIAL, SERVICE_SSH};
+use bento_runtime::services::{ServiceDescriptor, SERVICE_DOCKER, SERVICE_SERIAL, SERVICE_SSH};
 use eyre::bail;
 use hyper_util::rt::TokioIo;
 use tokio::sync::Mutex;
@@ -31,16 +32,7 @@ pub async fn wait_for_services_with_timeout(
 
     loop {
         match probe_instance_control_once(socket_path).await {
-            Ok(()) => {
-                return Ok(vec![
-                    ServiceDescriptor {
-                        name: SERVICE_SERIAL.to_string(),
-                    },
-                    ServiceDescriptor {
-                        name: SERVICE_SSH.to_string(),
-                    },
-                ])
-            }
+            Ok(services) => return Ok(services),
             Err(ProbeError::Retryable(message)) => {
                 if Instant::now() >= deadline {
                     bail!(
@@ -52,30 +44,13 @@ pub async fn wait_for_services_with_timeout(
 
                 tokio::time::sleep(poll_interval).await;
             }
-            Err(ProbeError::Fatal(message)) => {
-                bail!("{message}");
-            }
+            Err(ProbeError::Fatal(message)) => bail!("{message}"),
         }
     }
 }
 
 pub async fn wait_for_guest_running(socket_path: &Path, timeout: Duration) -> eyre::Result<()> {
-    let stream = tokio::net::UnixStream::connect(socket_path)
-        .await
-        .map_err(|err| eyre::eyre!("connect Negotiate socket failed: {err}"))?;
-
-    let stream =
-        Negotiate::client_upgrade_stream_v1(stream, Upgrade::InstanceControl { api_version: 1 })
-            .await
-            .map_err(|err| match err {
-                ClientUpgradeStreamError::Io(io_err) => {
-                    eyre::eyre!("negotiate instance_control stream failed: {io_err}")
-                }
-                ClientUpgradeStreamError::Reject(reject) => {
-                    eyre::eyre!("{}: {}", reject_code_label(reject.code), reject.message)
-                }
-            })?;
-
+    let stream = connect_instance_control_stream(socket_path).await?;
     let mut client = instance_control_client(stream)
         .await
         .map_err(|err| eyre::eyre!("connect instance control rpc client: {err}"))?;
@@ -125,19 +100,40 @@ pub async fn wait_for_guest_running(socket_path: &Path, timeout: Duration) -> ey
             }
         }
 
-        if source == StatusSource::Guest && state == LifecycleState::Running {
-            if vm_running_seen {
-                return Ok(());
+        if source == StatusSource::Guest {
+            match state {
+                LifecycleState::Running if vm_running_seen => return Ok(()),
+                LifecycleState::Running => {
+                    return Err(eyre::eyre!(
+                        "received guest running event before vm running event"
+                    ));
+                }
+                LifecycleState::Error => {
+                    return Err(eyre::eyre!("guest readiness failed: {}", update.message));
+                }
+                _ => {}
             }
-
-            return Err(eyre::eyre!(
-                "received guest running event before vm running event"
-            ));
         }
     }
 }
 
-async fn probe_instance_control_once(socket_path: &Path) -> Result<(), ProbeError> {
+pub async fn get_instance_status(socket_path: &Path) -> eyre::Result<GetStatusResponse> {
+    let stream = connect_instance_control_stream(socket_path).await?;
+    let mut client = instance_control_client(stream)
+        .await
+        .map_err(|err| eyre::eyre!("connect instance control rpc client: {err}"))?;
+
+    let response = client
+        .get_status(GetStatusRequest {})
+        .await
+        .map_err(|err| eyre::eyre!("instance control get_status rpc failed: {err}"))?;
+
+    Ok(response.into_inner())
+}
+
+async fn probe_instance_control_once(
+    socket_path: &Path,
+) -> Result<Vec<ServiceDescriptor>, ProbeError> {
     let stream = tokio::net::UnixStream::connect(socket_path)
         .await
         .map_err(|err| classify_io_error("connect Negotiate socket", err))?;
@@ -148,7 +144,10 @@ async fn probe_instance_control_once(socket_path: &Path) -> Result<(), ProbeErro
         Ok(stream) => {
             let health = call_instance_control_health(stream).await?;
             if health.ok {
-                Ok(())
+                let status = get_instance_status(socket_path).await.map_err(|err| {
+                    ProbeError::Retryable(format!("get instance status failed: {err}"))
+                })?;
+                Ok(services_from_status(&status))
             } else {
                 let message = if health.message.is_empty() {
                     "instance control health check failed".to_string()
@@ -192,6 +191,25 @@ async fn call_instance_control_health(
     Ok(response.into_inner())
 }
 
+async fn connect_instance_control_stream(
+    socket_path: &Path,
+) -> eyre::Result<tokio::net::UnixStream> {
+    let stream = tokio::net::UnixStream::connect(socket_path)
+        .await
+        .map_err(|err| eyre::eyre!("connect Negotiate socket failed: {err}"))?;
+
+    Negotiate::client_upgrade_stream_v1(stream, Upgrade::InstanceControl { api_version: 1 })
+        .await
+        .map_err(|err| match err {
+            ClientUpgradeStreamError::Io(io_err) => {
+                eyre::eyre!("negotiate instance_control stream failed: {io_err}")
+            }
+            ClientUpgradeStreamError::Reject(reject) => {
+                eyre::eyre!("{}: {}", reject_code_label(reject.code), reject.message)
+            }
+        })
+}
+
 async fn instance_control_client(
     stream: tokio::net::UnixStream,
 ) -> Result<InstanceControlServiceClient<tonic::transport::Channel>, tonic::transport::Error> {
@@ -217,6 +235,30 @@ async fn instance_control_client(
         .await?;
 
     Ok(InstanceControlServiceClient::new(channel))
+}
+
+fn services_from_status(status: &GetStatusResponse) -> Vec<ServiceDescriptor> {
+    let mut services = vec![ServiceDescriptor {
+        name: SERVICE_SERIAL.to_string(),
+    }];
+
+    for extension in &status.extensions {
+        if !extension.enabled {
+            continue;
+        }
+
+        match extension.name.as_str() {
+            SERVICE_SSH => services.push(ServiceDescriptor {
+                name: SERVICE_SSH.to_string(),
+            }),
+            SERVICE_DOCKER => services.push(ServiceDescriptor {
+                name: SERVICE_DOCKER.to_string(),
+            }),
+            _ => {}
+        }
+    }
+
+    services
 }
 
 fn classify_io_error(context: &str, err: io::Error) -> ProbeError {

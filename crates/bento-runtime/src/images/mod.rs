@@ -1,2 +1,2 @@
-pub mod capabilities;
+pub mod features;
 pub mod store;

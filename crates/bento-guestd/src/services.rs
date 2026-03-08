@@ -7,11 +7,14 @@ use bento_protocol::guest::v1::guest_discovery_service_server::{
     GuestDiscoveryService, GuestDiscoveryServiceServer,
 };
 use bento_protocol::guest::v1::{
-    HealthRequest, HealthResponse, ListServicesRequest, ListServicesResponse,
-    ResolveServiceRequest, ResolveServiceResponse, ServiceEndpoint, ServiceHealth, ServiceStatus,
+    ExtensionStatus, HealthRequest, HealthResponse, ListExtensionsRequest, ListExtensionsResponse,
+    ListServicesRequest, ListServicesResponse, ResolveServiceRequest, ResolveServiceResponse,
+    ServiceEndpoint, ServiceHealth, ServiceStatus,
 };
+use bento_runtime::extensions::{BuiltinExtension, ExtensionsConfig};
 use futures::stream;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpStream, UnixStream};
 use tokio_vsock::VsockStream;
 use tonic::transport::server::Connected;
 use tonic::{Request, Response, Status};
@@ -59,12 +62,14 @@ impl AsyncWrite for ConnectedVsock {
 #[derive(Clone)]
 pub struct GuestDiscoveryState {
     services: Arc<Vec<ServiceEndpoint>>,
+    extensions: ExtensionsConfig,
 }
 
 impl GuestDiscoveryState {
-    pub fn new(services: Vec<ServiceEndpoint>) -> Self {
+    pub fn new(services: Vec<ServiceEndpoint>, extensions: ExtensionsConfig) -> Self {
         Self {
             services: Arc::new(services),
+            extensions,
         }
     }
 }
@@ -94,6 +99,15 @@ impl GuestDiscoveryService for GuestDiscoveryState {
         Ok(Response::new(ResolveServiceResponse { service }))
     }
 
+    async fn list_extensions(
+        &self,
+        _request: Request<ListExtensionsRequest>,
+    ) -> Result<Response<ListExtensionsResponse>, Status> {
+        Ok(Response::new(ListExtensionsResponse {
+            extensions: extension_statuses(&self.extensions).await,
+        }))
+    }
+
     async fn health(
         &self,
         _request: Request<HealthRequest>,
@@ -115,6 +129,70 @@ impl GuestDiscoveryService for GuestDiscoveryState {
             services: statuses,
         }))
     }
+}
+
+async fn extension_statuses(extensions: &ExtensionsConfig) -> Vec<ExtensionStatus> {
+    let mut statuses = Vec::new();
+    if extensions.is_enabled(BuiltinExtension::Ssh) {
+        statuses.push(probe_ssh().await);
+    }
+    if extensions.is_enabled(BuiltinExtension::Docker) {
+        statuses.push(probe_docker().await);
+    }
+    statuses
+}
+
+async fn probe_ssh() -> ExtensionStatus {
+    let configured =
+        command_exists("sshd") || std::path::Path::new("/etc/ssh/sshd_config").exists();
+    let running = TcpStream::connect("127.0.0.1:22").await.is_ok();
+    extension_status("ssh", true, configured, running, "OpenSSH")
+}
+
+async fn probe_docker() -> ExtensionStatus {
+    let configured = command_exists("dockerd") || command_exists("docker");
+    let running = UnixStream::connect("/var/run/docker.sock").await.is_ok();
+    extension_status("docker", true, configured, running, "Docker")
+}
+
+fn extension_status(
+    name: &str,
+    enabled: bool,
+    configured: bool,
+    running: bool,
+    label: &str,
+) -> ExtensionStatus {
+    let (summary, problems) = match (configured, running) {
+        (true, true) => (format!("{label} is configured and running"), Vec::new()),
+        (true, false) => (
+            format!("{label} is configured but not running"),
+            vec![format!("{label} service is not reachable")],
+        ),
+        (false, _) => (
+            format!("{label} is not configured"),
+            vec![format!(
+                "{label} is not installed or configured in the guest"
+            )],
+        ),
+    };
+
+    ExtensionStatus {
+        name: name.to_string(),
+        enabled,
+        configured,
+        running,
+        summary,
+        problems,
+    }
+}
+
+fn command_exists(command: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-lc")
+        .arg(format!("command -v {command} >/dev/null 2>&1"))
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 pub async fn serve_discovery_connection(

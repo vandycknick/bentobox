@@ -1,6 +1,9 @@
 use std::sync::Mutex;
 
-use bento_protocol::instance::v1::{HealthResponse, LifecycleState, StatusSource, StatusUpdate};
+use bento_protocol::instance::v1::{
+    ExtensionStatus, GetStatusResponse, HealthResponse, HostSocket, LifecycleState, StatusSource,
+    StatusUpdate,
+};
 use tokio::sync::broadcast;
 
 #[derive(Debug)]
@@ -81,10 +84,13 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct InstanceState {
     vm: LifecycleState,
     guest: LifecycleState,
+    guest_message: String,
+    extensions: Vec<ExtensionStatus>,
+    host_sockets: Vec<HostSocket>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +102,12 @@ pub(crate) enum Action {
     GuestTransition {
         state: LifecycleState,
         message: String,
+    },
+    SetExtensions {
+        extensions: Vec<ExtensionStatus>,
+    },
+    SetHostSockets {
+        host_sockets: Vec<HostSocket>,
     },
 }
 
@@ -117,15 +129,30 @@ impl Action {
     pub(crate) fn guest_starting() -> Self {
         Self::GuestTransition {
             state: LifecycleState::Starting,
-            message: String::from("waiting for guest services"),
+            message: String::from("waiting for guest extensions"),
         }
     }
 
     pub(crate) fn guest_running() -> Self {
         Self::GuestTransition {
             state: LifecycleState::Running,
-            message: String::from("guest services ready"),
+            message: String::from("startup-required guest extensions ready"),
         }
+    }
+
+    pub(crate) fn guest_error(message: impl Into<String>) -> Self {
+        Self::GuestTransition {
+            state: LifecycleState::Error,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn set_extensions(extensions: Vec<ExtensionStatus>) -> Self {
+        Self::SetExtensions { extensions }
+    }
+
+    pub(crate) fn set_host_sockets(host_sockets: Vec<HostSocket>) -> Self {
+        Self::SetHostSockets { host_sockets }
     }
 }
 
@@ -141,17 +168,21 @@ pub(crate) fn new_instance_store() -> InstanceStore {
 }
 
 pub(crate) fn select_current_health(state: &InstanceState) -> HealthResponse {
-    let ok = state.guest == LifecycleState::Running;
+    let ok = state.vm == LifecycleState::Running && state.guest == LifecycleState::Running;
     HealthResponse {
         ok,
-        message: if ok {
-            String::new()
-        } else {
-            format!(
-                "guest not ready (vm_state={:?}, guest_state={:?})",
-                state.vm, state.guest
-            )
-        },
+        message: status_summary(state),
+    }
+}
+
+pub(crate) fn select_current_status(state: &InstanceState) -> GetStatusResponse {
+    GetStatusResponse {
+        vm_state: state.vm as i32,
+        guest_state: state.guest as i32,
+        ready: state.vm == LifecycleState::Running && state.guest == LifecycleState::Running,
+        summary: status_summary(state),
+        extensions: state.extensions.clone(),
+        host_sockets: state.host_sockets.clone(),
     }
 }
 
@@ -166,7 +197,7 @@ pub(crate) fn select_current_events(state: &InstanceState) -> Vec<StatusUpdate> 
         events.push(StatusUpdate::new(
             StatusSource::Guest,
             state.guest,
-            String::new(),
+            state.guest_message.clone(),
         ));
     }
 
@@ -174,14 +205,21 @@ pub(crate) fn select_current_events(state: &InstanceState) -> Vec<StatusUpdate> 
 }
 
 fn reduce_instance_state(current: &InstanceState, action: &Action) -> InstanceState {
-    let mut next = *current;
+    let mut next = current.clone();
 
     match action {
         Action::VmTransition { state, .. } => {
             next.vm = *state;
         }
-        Action::GuestTransition { state, .. } => {
+        Action::GuestTransition { state, message } => {
             next.guest = *state;
+            next.guest_message = message.clone();
+        }
+        Action::SetExtensions { extensions } => {
+            next.extensions = extensions.clone();
+        }
+        Action::SetHostSockets { host_sockets } => {
+            next.host_sockets = host_sockets.clone();
         }
     }
 
@@ -189,14 +227,49 @@ fn reduce_instance_state(current: &InstanceState, action: &Action) -> InstanceSt
 }
 
 fn project_status_update(action: &Action) -> Option<StatusUpdate> {
-    let update = match action {
+    match action {
         Action::VmTransition { state, message } => {
-            StatusUpdate::new(StatusSource::Vm, *state, message.clone())
+            Some(StatusUpdate::new(StatusSource::Vm, *state, message.clone()))
         }
-        Action::GuestTransition { state, message } => {
-            StatusUpdate::new(StatusSource::Guest, *state, message.clone())
-        }
-    };
+        Action::GuestTransition { state, message } => Some(StatusUpdate::new(
+            StatusSource::Guest,
+            *state,
+            message.clone(),
+        )),
+        Action::SetExtensions { .. } | Action::SetHostSockets { .. } => None,
+    }
+}
 
-    Some(update)
+fn status_summary(state: &InstanceState) -> String {
+    if state.vm != LifecycleState::Running {
+        return format!("vm not ready (vm_state={:?})", state.vm);
+    }
+
+    if state.guest == LifecycleState::Running {
+        return String::from("instance ready");
+    }
+
+    let problems = state
+        .extensions
+        .iter()
+        .filter(|extension| extension.enabled && extension.startup_required)
+        .flat_map(|extension| {
+            if extension.configured && extension.running {
+                Vec::new()
+            } else if extension.problems.is_empty() {
+                vec![extension.summary.clone()]
+            } else {
+                extension.problems.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if problems.is_empty() {
+        state.guest_message.clone()
+    } else {
+        format!(
+            "startup-required extensions not ready: {}",
+            problems.join("; ")
+        )
+    }
 }

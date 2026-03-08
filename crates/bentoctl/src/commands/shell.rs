@@ -3,7 +3,7 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-use bento_runtime::images::capabilities::Capability;
+use bento_runtime::extensions::BuiltinExtension;
 use bento_runtime::instance::{InstanceFile, InstanceStatus};
 use bento_runtime::instance_store::{InstanceError, InstanceStore};
 use bento_runtime::{host_user, ssh_keys};
@@ -76,11 +76,11 @@ impl Cmd {
             None => {}
         }
 
-        if !inst.capabilities().supports(Capability::Ssh) {
+        if !inst.extensions().is_enabled(BuiltinExtension::Ssh) {
             if self.user.is_some() {
                 eprintln!("[bentoctl] --user is ignored for serial attach");
             }
-            eprintln!("[bentoctl] image has no ssh capability, using serial attach");
+            eprintln!("[bentoctl] instance has no ssh extension, using serial attach");
             let socket_path = inst.file(InstanceFile::InstancedSocket);
             return terminal::attach_serial(&socket_path.to_string_lossy()).await;
         }

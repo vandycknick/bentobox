@@ -103,7 +103,10 @@ impl BentoCtlCmd {
                 let store = instance_store();
                 cmd.run(&store).await
             }
-            Command::Status(cmd) => cmd.run().await,
+            Command::Status(cmd) => {
+                let store = instance_store();
+                cmd.run(&store).await
+            }
 
             Command::Instanced(cmd) => cmd.run().await,
 

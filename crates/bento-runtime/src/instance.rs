@@ -8,7 +8,7 @@ use std::{
 use thiserror::Error;
 
 use crate::directories::Directory;
-use crate::images::capabilities::{Capability, GuestCapabilities};
+use crate::extensions::{BuiltinExtension, ExtensionsConfig};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -124,15 +124,38 @@ pub struct InstanceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub userdata_path: Option<PathBuf>,
 
-    #[serde(default, skip_serializing_if = "GuestCapabilities::is_empty")]
-    pub capabilities: GuestCapabilities,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap: Option<BootstrapConfig>,
+
+    #[serde(default, skip_serializing_if = "ExtensionsConfig::is_empty")]
+    pub extensions: ExtensionsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootstrapConfig {
+    pub mode: BootstrapMode,
+}
+
+impl BootstrapConfig {
+    pub fn cidata_cloud_init() -> Self {
+        Self {
+            mode: BootstrapMode::CidataCloudInit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapMode {
+    CidataCloudInit,
 }
 
 impl InstanceConfig {
     pub fn new() -> Self {
-        let mut i = Self::default();
-        i.version = String::from("1.0.0");
-        i
+        Self {
+            version: String::from("1.0.0"),
+            ..Self::default()
+        }
     }
 
     pub fn from_str(input: &str) -> eyre::Result<Self> {
@@ -260,13 +283,38 @@ impl Instance {
         validate_network_mode(self.engine(), self.config.network.as_ref())
     }
 
-    pub fn capabilities(&self) -> &GuestCapabilities {
-        &self.config.capabilities
+    pub fn extensions(&self) -> &ExtensionsConfig {
+        &self.config.extensions
     }
 
-    pub fn expects_guest_agent(&self) -> bool {
-        self.config.capabilities.supports(Capability::CloudInit)
-            || self.config.userdata_path.is_some()
+    pub fn bootstrap(&self) -> Option<&BootstrapConfig> {
+        self.config.bootstrap.as_ref()
+    }
+
+    pub fn requires_bootstrap(&self) -> bool {
+        self.config.userdata_path.is_some() || self.config.extensions.requires_bootstrap()
+    }
+
+    pub fn uses_bootstrap(&self) -> bool {
+        self.bootstrap().is_some()
+    }
+
+    pub fn enabled_extension_ids(&self) -> Vec<&'static str> {
+        self.config
+            .extensions
+            .enabled_extensions()
+            .into_iter()
+            .map(|extension| extension.id())
+            .collect()
+    }
+
+    pub fn startup_required_extensions(&self) -> Vec<BuiltinExtension> {
+        self.config
+            .extensions
+            .enabled_extensions()
+            .into_iter()
+            .filter(|extension| extension.startup_required())
+            .collect()
     }
 
     pub fn root_disk(&self) -> Result<Option<InstanceDisk>, InstanceDiskError> {

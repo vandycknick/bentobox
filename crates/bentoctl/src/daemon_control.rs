@@ -57,7 +57,7 @@ pub async fn launch_instance(
     .await
     .context("wait for instanced start")?;
 
-    if inst.expects_guest_agent() {
+    if inst.uses_bootstrap() {
         service_readiness::wait_for_guest_running(
             &inst.file(InstanceFile::InstancedSocket),
             Duration::from_secs(60 * 10),

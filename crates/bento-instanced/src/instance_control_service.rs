@@ -5,14 +5,17 @@ use bento_protocol::instance::v1::instance_control_service_server::{
     InstanceControlService, InstanceControlServiceServer,
 };
 use bento_protocol::instance::v1::{
-    HealthRequest, HealthResponse, StatusUpdate, WatchStatusRequest,
+    GetStatusRequest, GetStatusResponse, HealthRequest, HealthResponse, StatusUpdate,
+    WatchStatusRequest,
 };
 use futures::stream::{self, Stream, StreamExt};
 use tokio::net::UnixStream;
 use tokio::sync::broadcast;
 use tonic::{Request, Response, Status};
 
-use crate::state::{select_current_events, select_current_health, InstanceStore};
+use crate::state::{
+    select_current_events, select_current_health, select_current_status, InstanceStore,
+};
 
 type WatchStatusStream = Pin<Box<dyn Stream<Item = Result<StatusUpdate, Status>> + Send>>;
 
@@ -40,6 +43,14 @@ impl InstanceControlService for InstanceControlSvc {
         );
 
         Ok(Response::new(response))
+    }
+
+    async fn get_status(
+        &self,
+        _request: Request<GetStatusRequest>,
+    ) -> Result<Response<GetStatusResponse>, Status> {
+        let snapshot = self.store.snapshot().unwrap_or_default();
+        Ok(Response::new(select_current_status(&snapshot)))
     }
 
     async fn watch_status(

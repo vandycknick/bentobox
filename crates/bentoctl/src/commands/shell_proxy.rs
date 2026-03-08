@@ -36,7 +36,7 @@ impl Cmd {
         let socket_path = inst.file(InstanceFile::InstancedSocket);
 
         let should_wait_for_guest_readiness =
-            inst.status() == InstanceStatus::Running && inst.expects_guest_agent();
+            inst.status() == InstanceStatus::Running && inst.uses_bootstrap();
         let deadline = Instant::now() + service_readiness::DEFAULT_SERVICE_READINESS_TIMEOUT;
 
         loop {

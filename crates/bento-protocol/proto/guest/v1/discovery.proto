@@ -4,6 +4,7 @@ package guest.v1;
 
 service GuestDiscoveryService {
   rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
+  rpc ListExtensions(ListExtensionsRequest) returns (ListExtensionsResponse);
   rpc ResolveService(ResolveServiceRequest) returns (ResolveServiceResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
 }
@@ -25,6 +26,21 @@ message ResolveServiceRequest {
 
 message ResolveServiceResponse {
   ServiceEndpoint service = 1;
+}
+
+message ExtensionStatus {
+  string name = 1;
+  bool enabled = 2;
+  bool configured = 3;
+  bool running = 4;
+  string summary = 5;
+  repeated string problems = 6;
+}
+
+message ListExtensionsRequest {}
+
+message ListExtensionsResponse {
+  repeated ExtensionStatus extensions = 1;
 }
 
 enum ServiceStatus {

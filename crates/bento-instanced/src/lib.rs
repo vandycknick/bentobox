@@ -1,6 +1,7 @@
 mod async_fd;
 pub mod daemon;
 mod discovery;
+mod host_export;
 mod instance_control_service;
 pub mod machine;
 mod pid_guard;
