@@ -286,7 +286,7 @@ dependencies = [
  "libc",
  "nix 0.31.1",
  "serde",
- "serde_json",
+ "serde_yaml_ng",
  "thiserror 2.0.18",
  "tokio",
  "tonic",

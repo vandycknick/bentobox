@@ -1,4 +1,3 @@
-pub mod cidata;
 pub mod directories;
 pub mod extensions;
 pub mod global_config;

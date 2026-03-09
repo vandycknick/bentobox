@@ -76,7 +76,11 @@ async fn main() -> eyre::Result<()> {
 
     tracing::info!(services = ?service_endpoints, "setting up services for discovery");
 
-    let discovery_service = GuestDiscoveryState::new(service_endpoints, guestd_config.extensions);
+    let discovery_service = GuestDiscoveryState::new(
+        service_endpoints,
+        guestd_config.extensions,
+        guestd_config.mounts,
+    );
 
     let discovery_server = VsockServer::create(move |stream| {
         let service_catalog = discovery_service.clone();

@@ -6,15 +6,12 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    cidata,
     directories::Directory,
     extensions::ExtensionsConfig,
-    host_user,
     instance::{
         resolve_mount_location, validate_network_mode, BootstrapConfig, DiskConfig, DiskRole,
         Instance, InstanceConfig, InstanceFile, InstanceStatus, MountConfig, NetworkConfig,
     },
-    ssh_keys,
     utils::read_pid_file,
 };
 
@@ -125,28 +122,7 @@ impl InstanceStore {
         })?;
         fs::write(&config_path, config_yaml)?;
 
-        let inst = self.inspect(name)?;
-
-        let should_inject_cidata = inst.uses_bootstrap();
-
-        if should_inject_cidata {
-            let host_user =
-                host_user::current_host_user().map_err(|err| InstanceError::GenericError {
-                    reason: format!("resolve current host user failed: {err}"),
-                })?;
-            let user_keys =
-                ssh_keys::ensure_user_ssh_keys().map_err(|err| InstanceError::GenericError {
-                    reason: format!("ensure user SSH keys failed: {err}"),
-                })?;
-
-            cidata::build_cidata_iso(&inst, &host_user, &user_keys.public_key_openssh).map_err(
-                |err| InstanceError::GenericError {
-                    reason: format!("build cidata ISO failed: {err}"),
-                },
-            )?;
-        }
-
-        Ok(inst)
+        self.inspect(name)
     }
 
     pub fn inspect(&self, name: &str) -> Result<Instance, InstanceError> {

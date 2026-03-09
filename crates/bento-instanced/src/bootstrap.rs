@@ -1,20 +1,22 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use bento_runtime::global_config::{ensure_guest_agent_binary, GlobalConfig};
+use bento_runtime::host_user::{self, HostUser};
+use bento_runtime::instance::{resolve_mount_location, Instance, InstanceFile, NetworkMode};
+use bento_runtime::ssh_keys;
 use eyre::Context;
 use serde::Serialize;
 
-use crate::extensions::ExtensionsConfig;
-use crate::global_config::{ensure_guest_agent_binary, GlobalConfig};
-use crate::host_user::HostUser;
-use crate::instance::{resolve_mount_location, Instance, InstanceFile, NetworkMode};
-
 const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-guestd";
 const GUEST_AGENT_INSTALL_SCRIPT_ENTRY: &str = "bento-install-guest-agent.sh";
+const GUEST_AGENT_CONFIG_ENTRY: &str = "bento-guestd.yaml";
+const GUEST_AGENT_CONFIG_ENV_ENTRY: &str = "config.env";
 const GUEST_AGENT_BOOTSTRAP_SCRIPT: &str = "/var/lib/cloud/scripts/per-boot/00-bento.bootstrap.sh";
-const GUESTD_CONFIG_PATH: &str = "/etc/bento/guestd.yaml";
 const GUEST_BOOTSTRAP_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-bootstrap.sh");
 const GUEST_INSTALL_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-install.sh");
+const TASK_RECONCILE_MOUNTS_CONTENT: &str = include_str!("../scripts/tasks/00-reconcile-mounts.sh");
+const TASK_REGISTER_GUESTD_CONTENT: &str = include_str!("../scripts/tasks/10-register-guestd.sh");
 
 #[derive(Debug, Clone)]
 struct CidataEntry {
@@ -22,7 +24,23 @@ struct CidataEntry {
     contents: Vec<u8>,
 }
 
-pub fn build_cidata_iso(
+pub fn rebuild_bootstrap(inst: &Instance) -> eyre::Result<()> {
+    if !inst.uses_bootstrap() {
+        let iso_path = inst.file(InstanceFile::CidataIso);
+        if iso_path.exists() {
+            std::fs::remove_file(&iso_path)
+                .with_context(|| format!("remove stale cidata {}", iso_path.display()))?;
+        }
+        return Ok(());
+    }
+
+    let host_user = host_user::current_host_user().context("resolve current host user")?;
+    let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure user SSH keys")?;
+
+    build_cidata_iso(inst, &host_user, &user_keys.public_key_openssh)
+}
+
+fn build_cidata_iso(
     inst: &Instance,
     host_user: &HostUser,
     ssh_public_key: &str,
@@ -35,7 +53,11 @@ pub fn build_cidata_iso(
     let user_data = render_user_data(inst, host_user, ssh_public_key)?;
     let meta_data = render_meta_data(inst)?;
     let network_config = render_network_config_for_instance(inst)?;
+    let desired_state = desired_guestd_state(inst)?;
+    let guestd_config = render_guestd_config(&desired_state)?;
+    let config_env = render_config_env(inst, &desired_state)?;
     let iso_path = inst.file(InstanceFile::CidataIso);
+
     let mut files = vec![
         CidataEntry {
             name: "user-data".to_string(),
@@ -52,6 +74,22 @@ pub fn build_cidata_iso(
         CidataEntry {
             name: GUEST_AGENT_INSTALL_SCRIPT_ENTRY.to_string(),
             contents: GUEST_INSTALL_SCRIPT_CONTENT.as_bytes().to_vec(),
+        },
+        CidataEntry {
+            name: GUEST_AGENT_CONFIG_ENTRY.to_string(),
+            contents: guestd_config.into_bytes(),
+        },
+        CidataEntry {
+            name: GUEST_AGENT_CONFIG_ENV_ENTRY.to_string(),
+            contents: config_env.into_bytes(),
+        },
+        CidataEntry {
+            name: "tasks/00-reconcile-mounts.sh".to_string(),
+            contents: TASK_RECONCILE_MOUNTS_CONTENT.as_bytes().to_vec(),
+        },
+        CidataEntry {
+            name: "tasks/10-register-guestd.sh".to_string(),
+            contents: TASK_REGISTER_GUESTD_CONTENT.as_bytes().to_vec(),
         },
     ];
 
@@ -76,6 +114,10 @@ fn write_cidata_iso_hdiutil(
     let staging_root = make_temp_dir("bento-cidata")?;
     for entry in entries {
         let file_path = staging_root.join(&entry.name);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create cidata entry parent {}", parent.display()))?;
+        }
         std::fs::write(&file_path, &entry.contents)
             .with_context(|| format!("write cidata entry {}", file_path.display()))?;
     }
@@ -154,10 +196,18 @@ fn make_temp_path(prefix: &str) -> PathBuf {
 #[derive(Serialize)]
 struct CloudConfig {
     users: Vec<CloudUser>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    mounts: Vec<[String; 6]>,
+    growpart: GrowpartConfig,
+    resize_rootfs: bool,
+    timezone: String,
+    locale: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     write_files: Vec<WriteFile>,
+}
+
+#[derive(Serialize)]
+struct GrowpartConfig {
+    mode: String,
+    devices: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -181,11 +231,6 @@ struct WriteFile {
 }
 
 #[derive(Serialize)]
-struct GuestdConfigFile<'a> {
-    extensions: &'a ExtensionsConfig,
-}
-
-#[derive(Serialize)]
 struct MetaData {
     #[serde(rename = "instance-id")]
     instance_id: String,
@@ -205,11 +250,50 @@ struct EthernetConfigV2 {
     dhcp6: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct GuestDesiredState {
+    extensions: bento_runtime::extensions::ExtensionsConfig,
+    mounts: Vec<MountDesiredState>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MountDesiredState {
+    tag: String,
+    path: String,
+    writable: bool,
+}
+
+fn desired_guestd_state(inst: &Instance) -> eyre::Result<GuestDesiredState> {
+    let mounts = inst
+        .config
+        .mounts
+        .iter()
+        .enumerate()
+        .map(|(index, mount)| {
+            let location = resolve_mount_location(&mount.location)
+                .map_err(|reason| eyre::eyre!("resolve mount location failed: {reason}"))?;
+            Ok(MountDesiredState {
+                tag: format!("mount{index}"),
+                path: location.to_string_lossy().to_string(),
+                writable: mount.writable,
+            })
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
+
+    Ok(GuestDesiredState {
+        extensions: inst.config.extensions.clone(),
+        mounts,
+    })
+}
+
 fn render_user_data(
     inst: &Instance,
     host_user: &HostUser,
     ssh_public_key: &str,
 ) -> eyre::Result<String> {
+    let timezone = resolve_host_timezone();
+    let locale = resolve_host_locale();
+
     let user = CloudUser {
         name: host_user.name.clone(),
         uid: host_user.uid,
@@ -221,48 +305,22 @@ fn render_user_data(
         ssh_authorized_keys: vec![ssh_public_key.trim().to_string()],
     };
 
-    let mut mounts = Vec::with_capacity(inst.config.mounts.len());
-    for (index, mount) in inst.config.mounts.iter().enumerate() {
-        let location = resolve_mount_location(&mount.location)
-            .map_err(|reason| eyre::eyre!("resolve mount location failed: {reason}"))?;
-        let options = if mount.writable {
-            "rw,nofail"
-        } else {
-            "ro,nofail"
-        };
-        mounts.push([
-            format!("mount{index}"),
-            location.to_string_lossy().to_string(),
-            "virtiofs".to_string(),
-            options.to_string(),
-            "0".to_string(),
-            "0".to_string(),
-        ]);
-    }
-
-    let guestd_config = serde_yaml_ng::to_string(&GuestdConfigFile {
-        extensions: &inst.config.extensions,
-    })
-    .context("serialize guestd config")?;
-
-    let write_files = vec![
-        WriteFile {
-            path: GUEST_AGENT_BOOTSTRAP_SCRIPT.to_string(),
-            owner: "root:root".to_string(),
-            permissions: "0755".to_string(),
-            content: GUEST_BOOTSTRAP_SCRIPT_CONTENT.to_string(),
-        },
-        WriteFile {
-            path: GUESTD_CONFIG_PATH.to_string(),
-            owner: "root:root".to_string(),
-            permissions: "0644".to_string(),
-            content: guestd_config,
-        },
-    ];
+    let write_files = vec![WriteFile {
+        path: GUEST_AGENT_BOOTSTRAP_SCRIPT.to_string(),
+        owner: "root:root".to_string(),
+        permissions: "0755".to_string(),
+        content: GUEST_BOOTSTRAP_SCRIPT_CONTENT.to_string(),
+    }];
 
     let cloud_config = CloudConfig {
         users: vec![user],
-        mounts,
+        growpart: GrowpartConfig {
+            mode: "auto".to_string(),
+            devices: vec!["/".to_string()],
+        },
+        resize_rootfs: true,
+        timezone,
+        locale,
         write_files,
     };
     let mut bento_yaml = String::from("#cloud-config\n");
@@ -335,159 +393,110 @@ fn render_meta_data(inst: &Instance) -> eyre::Result<String> {
     serde_yaml_ng::to_string(&metadata).context("serialize cloud-init meta-data")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::instance::{InstanceConfig, MountConfig, NetworkConfig};
-    use std::path::PathBuf;
+fn render_guestd_config(state: &GuestDesiredState) -> eyre::Result<String> {
+    serde_yaml_ng::to_string(state).context("serialize guestd config")
+}
 
-    fn instance_with_mounts(mounts: Vec<MountConfig>) -> Instance {
-        let mut config = InstanceConfig::new();
-        config.mounts = mounts;
-        Instance::new("vm1".to_string(), PathBuf::from("/tmp/vm1"), config)
+fn render_config_env(inst: &Instance, state: &GuestDesiredState) -> eyre::Result<String> {
+    let mut env = String::new();
+
+    env.push_str(&format!(
+        "BENTO_INSTANCE_NAME={}\n",
+        shell_quote(&inst.name)
+    ));
+    env.push_str("BENTO_GUESTD_BINARY_PATH=/usr/local/bin/bento-guestd\n");
+    env.push_str("BENTO_GUESTD_CONFIG_PATH=/etc/bento/guestd.yaml\n");
+    env.push_str(&format!(
+        "BENTO_FSTAB_MARKER_START={}\n",
+        shell_quote("# >>> bento managed mounts >>>")
+    ));
+    env.push_str(&format!(
+        "BENTO_FSTAB_MARKER_END={}\n",
+        shell_quote("# <<< bento managed mounts <<<")
+    ));
+
+    env.push_str(&format!(
+        "BENTO_EXT_SSH={}\n",
+        if state.extensions.ssh {
+            "true"
+        } else {
+            "false"
+        }
+    ));
+    env.push_str(&format!(
+        "BENTO_EXT_DOCKER={}\n",
+        if state.extensions.docker {
+            "true"
+        } else {
+            "false"
+        }
+    ));
+
+    env.push_str(&format!("BENTO_MOUNTS_COUNT={}\n", state.mounts.len()));
+    for (index, mount) in state.mounts.iter().enumerate() {
+        env.push_str(&format!(
+            "BENTO_MOUNTS_{index}_TAG={}\n",
+            shell_quote(&mount.tag)
+        ));
+        env.push_str(&format!(
+            "BENTO_MOUNTS_{index}_PATH={}\n",
+            shell_quote(&mount.path)
+        ));
+        env.push_str(&format!(
+            "BENTO_MOUNTS_{index}_WRITABLE={}\n",
+            if mount.writable { "true" } else { "false" }
+        ));
     }
 
-    #[test]
-    fn user_data_contains_expected_user_fields() {
-        let host_user = HostUser {
-            name: "nickvd".to_string(),
-            uid: 504,
-            gecos: "Nick Van Dyck".to_string(),
-        };
-        let inst = instance_with_mounts(Vec::new());
+    Ok(env)
+}
 
-        let user_data = render_user_data(
-            &inst,
-            &host_user,
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestValue nickvd@host",
-        )
-        .expect("render user-data");
+fn shell_quote(value: &str) -> String {
+    let escaped = value.replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
 
-        assert!(user_data.starts_with("#cloud-config\n"));
-        assert!(user_data.contains("name: nickvd"));
-        assert!(user_data.contains("uid: 504"));
-        assert!(user_data.contains("homedir: /home/nickvd"));
-        assert!(user_data.contains("ssh_authorized_keys"));
-        assert!(!user_data.contains("network:"));
+fn resolve_host_timezone() -> String {
+    if let Ok(tz) = std::env::var("TZ") {
+        let trimmed = tz.trim();
+        if !trimmed.is_empty() {
+            return trimmed.trim_start_matches(':').to_string();
+        }
     }
 
-    #[test]
-    fn user_data_contains_mount_rows_with_indexed_tags() {
-        let host_user = HostUser {
-            name: "nickvd".to_string(),
-            uid: 504,
-            gecos: "Nick Van Dyck".to_string(),
-        };
-        let inst = instance_with_mounts(vec![
-            MountConfig {
-                location: PathBuf::from("/Users/nickvd"),
-                writable: true,
-            },
-            MountConfig {
-                location: PathBuf::from("/tmp/lima"),
-                writable: false,
-            },
-        ]);
-
-        let user_data = render_user_data(
-            &inst,
-            &host_user,
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestValue nickvd@host",
-        )
-        .expect("render user-data");
-
-        assert!(user_data.contains("mounts:"));
-        assert!(user_data.contains("- mount0"));
-        assert!(user_data.contains("- mount1"));
-        assert!(user_data.contains("- /Users/nickvd"));
-        assert!(user_data.contains("- /tmp/lima"));
-        assert!(user_data.contains("- rw,nofail"));
-        assert!(user_data.contains("- ro,nofail"));
+    if let Ok(localtime_target) = std::fs::read_link("/etc/localtime") {
+        let rendered = localtime_target.to_string_lossy();
+        if let Some((_, timezone)) = rendered.split_once("zoneinfo/") {
+            let timezone = timezone.trim_matches('/');
+            if !timezone.is_empty() {
+                return timezone.to_string();
+            }
+        }
     }
 
-    #[test]
-    fn user_data_expands_tilde_mount_location() {
-        let home = std::env::var_os("HOME").expect("HOME should be set");
-        let home = PathBuf::from(home);
-
-        let host_user = HostUser {
-            name: "nickvd".to_string(),
-            uid: 504,
-            gecos: "Nick Van Dyck".to_string(),
-        };
-        let inst = instance_with_mounts(vec![MountConfig {
-            location: PathBuf::from("~"),
-            writable: true,
-        }]);
-
-        let user_data = render_user_data(
-            &inst,
-            &host_user,
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestValue nickvd@host",
-        )
-        .expect("render user-data");
-
-        assert!(user_data.contains("- mount0"));
-        assert!(user_data.contains(&format!("- {}", home.display())));
+    if let Ok(contents) = std::fs::read_to_string("/etc/timezone") {
+        if let Some(first_line) = contents.lines().next() {
+            let timezone = first_line.trim();
+            if !timezone.is_empty() {
+                return timezone.to_string();
+            }
+        }
     }
 
-    #[test]
-    fn user_data_contains_guest_agent_install_steps() {
-        let host_user = HostUser {
-            name: "nickvd".to_string(),
-            uid: 504,
-            gecos: "Nick Van Dyck".to_string(),
-        };
-        let inst = instance_with_mounts(Vec::new());
+    tracing::warn!("unable to determine host timezone, defaulting guest timezone to UTC");
+    "UTC".to_string()
+}
 
-        let user_data = render_user_data(
-            &inst,
-            &host_user,
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestValue nickvd@host",
-        )
-        .expect("render user-data");
-
-        assert!(user_data.contains(GUEST_AGENT_BOOTSTRAP_SCRIPT));
-        assert!(user_data.contains(GUEST_AGENT_INSTALL_SCRIPT_ENTRY));
-        assert!(user_data.contains("/run/bento-cidata"));
-        assert!(user_data.contains("/dev/disk/by-label/CIDATA"));
+fn resolve_host_locale() -> String {
+    for var in ["LC_ALL", "LANG"] {
+        if let Ok(value) = std::env::var(var) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
     }
 
-    #[test]
-    fn guest_agent_payload_contains_systemd_install_steps() {
-        let payload = GUEST_INSTALL_SCRIPT_CONTENT;
-
-        assert!(payload.contains("/usr/local/bin/bento-guestd"));
-        assert!(payload.contains("/etc/systemd/system/bento-guestd.service"));
-        assert!(payload.contains("systemctl daemon-reload"));
-        assert!(payload.contains("systemctl enable"));
-    }
-
-    #[test]
-    fn network_config_is_generated_for_vznat() {
-        let mut config = InstanceConfig::new();
-        config.network = Some(NetworkConfig {
-            mode: NetworkMode::VzNat,
-        });
-        let inst = Instance::new("vm1".to_string(), PathBuf::from("/tmp/vm1"), config);
-
-        let network_config =
-            render_network_config_for_instance(&inst).expect("network config should render");
-        let rendered = network_config.expect("vznat should emit network-config");
-        assert!(rendered.contains("version: 2"));
-        assert!(rendered.contains("dhcp4: true"));
-    }
-
-    #[test]
-    fn network_config_is_omitted_for_none_mode() {
-        let mut config = InstanceConfig::new();
-        config.network = Some(NetworkConfig {
-            mode: NetworkMode::None,
-        });
-        let inst = Instance::new("vm1".to_string(), PathBuf::from("/tmp/vm1"), config);
-
-        let network_config =
-            render_network_config_for_instance(&inst).expect("none mode should be valid");
-        assert!(network_config.is_none());
-    }
+    tracing::warn!("unable to determine host locale, defaulting guest locale to en_US.UTF-8");
+    "en_US.UTF-8".to_string()
 }

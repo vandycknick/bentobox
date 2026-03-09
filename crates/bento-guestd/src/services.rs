@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use crate::config::MountConfig;
 use bento_protocol::guest::v1::guest_discovery_service_server::{
     GuestDiscoveryService, GuestDiscoveryServiceServer,
 };
@@ -63,13 +64,19 @@ impl AsyncWrite for ConnectedVsock {
 pub struct GuestDiscoveryState {
     services: Arc<Vec<ServiceEndpoint>>,
     extensions: ExtensionsConfig,
+    _mounts: Arc<Vec<MountConfig>>,
 }
 
 impl GuestDiscoveryState {
-    pub fn new(services: Vec<ServiceEndpoint>, extensions: ExtensionsConfig) -> Self {
+    pub fn new(
+        services: Vec<ServiceEndpoint>,
+        extensions: ExtensionsConfig,
+        mounts: Vec<MountConfig>,
+    ) -> Self {
         Self {
             services: Arc::new(services),
             extensions,
+            _mounts: Arc::new(mounts),
         }
     }
 }

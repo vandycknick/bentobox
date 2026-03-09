@@ -59,11 +59,13 @@ impl ServiceRegistry {
         .await
         .map_err(|_| eyre::eyre!("guest discovery list_extensions request timed out"))?
         .map_err(|err| eyre::eyre!("query guest extension list failed: {err}"))?
-        .into_inner()
-        .extensions
-        .into_iter()
-        .map(|extension| (extension.name.clone(), extension))
-        .collect();
+        .into_inner();
+
+        let extensions = extensions
+            .extensions
+            .into_iter()
+            .map(|extension| (extension.name.clone(), extension))
+            .collect();
 
         Ok(Self {
             by_name,

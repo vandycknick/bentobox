@@ -11,6 +11,7 @@ use eyre::Context;
 use tokio::signal::unix::signal;
 use tokio::signal::unix::SignalKind;
 
+use crate::bootstrap::rebuild_bootstrap;
 use crate::discovery::ServiceRegistry;
 use crate::host_export::listen_host_service;
 use crate::machine::machine_spec_for_instance;
@@ -39,6 +40,8 @@ impl InstanceDaemon {
         let inst = self.store.inspect(&self.name)?;
         let _trace_guard = init_tracing(&inst.file(InstanceFile::InstancedTraceLog))?;
         tracing::info!(instance = %self.name, "instanced starting");
+
+        rebuild_bootstrap(&inst)?;
 
         remove_stale_socket(&inst.file(InstanceFile::InstancedSocket))?;
 
