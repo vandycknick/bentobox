@@ -180,3 +180,84 @@ This file tracks kernel-side config changes identified while debugging package u
 ### Why this is needed
 
 - Removes `Failed to find module 'autofs4'` warnings when using a kernel with `CONFIG_MODULES=n`.
+
+## 11) Rootful Docker guest support
+
+### Required config changes
+
+- Core container isolation and policy:
+  - `CONFIG_NAMESPACES=y`
+  - `CONFIG_UTS_NS=y`
+  - `CONFIG_IPC_NS=y`
+  - `CONFIG_PID_NS=y`
+  - `CONFIG_NET_NS=y`
+  - `CONFIG_USER_NS=y`
+  - `CONFIG_CGROUPS=y`
+  - `CONFIG_MEMCG=y`
+  - `CONFIG_BLK_CGROUP=y`
+  - `CONFIG_CGROUP_PIDS=y`
+  - `CONFIG_CGROUP_DEVICE=y`
+  - `CONFIG_CPUSETS=y`
+  - `CONFIG_CGROUP_CPUACCT=y`
+  - `CONFIG_SECCOMP=y`
+  - `CONFIG_SECCOMP_FILTER=y`
+- Docker bridge networking and packet path:
+  - `CONFIG_BRIDGE=y`
+  - `CONFIG_BRIDGE_NETFILTER=y`
+  - `CONFIG_VETH=y`
+  - `CONFIG_INET=y`
+  - `CONFIG_IPV6=y`
+  - `CONFIG_NETFILTER=y`
+  - `CONFIG_NF_CONNTRACK=y`
+  - `CONFIG_NETFILTER_XTABLES=y`
+  - `CONFIG_NETFILTER_XTABLES_COMPAT=y`
+  - `CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y`
+  - `CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y`
+  - `CONFIG_NETFILTER_XT_NAT=y`
+  - `CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y`
+- Legacy `iptables` and `ip6tables` tables used by current rootful Docker userspace:
+  - `CONFIG_IP_NF_IPTABLES=y`
+  - `CONFIG_IP_NF_FILTER=y`
+  - `CONFIG_IP_NF_MANGLE=y`
+  - `CONFIG_IP_NF_NAT=y`
+  - `CONFIG_IP_NF_RAW=y`
+  - `CONFIG_IP_NF_TARGET_MASQUERADE=y`
+  - `CONFIG_IP6_NF_IPTABLES=y`
+  - `CONFIG_IP6_NF_FILTER=y`
+  - `CONFIG_IP6_NF_MANGLE=y`
+  - `CONFIG_IP6_NF_NAT=y`
+  - `CONFIG_IP6_NF_RAW=y`
+  - `CONFIG_IP6_NF_TARGET_MASQUERADE=y`
+- Storage and runtime basics:
+  - `CONFIG_OVERLAY_FS=y`
+  - `CONFIG_UNIX=y`
+  - `CONFIG_PACKET=y`
+  - `CONFIG_POSIX_MQUEUE=y`
+
+### What this enables
+
+- Namespace isolation, cgroup accounting, and seccomp filtering for ordinary container startup.
+- Legacy IPv4 and IPv6 `iptables` table support used by current rootful Docker startup paths, including the `raw` table.
+- Connection-tracking matches used by Docker bridge firewall rules such as `-m conntrack --ctstate RELATED,ESTABLISHED`.
+- Compatibility support for `iptables-legacy` and `ip6tables-legacy` userspace against the kernel xtables path.
+- Docker bridge networking, including `docker0` and veth peer creation for containers.
+- Overlay filesystem support for the `overlay2` storage driver.
+
+### Why this is needed
+
+- Fixes Docker daemon startup failures such as:
+  - `iptables ... can't initialize iptables table 'nat': Table does not exist`
+  - `iptables ... can't initialize iptables table 'raw': Table does not exist`
+  - `ip6tables ... can't initialize ip6tables table 'nat'` or `filter`
+  - `Extension conntrack revision 0 not supported, missing kernel module?`
+- Lets Docker create the `DOCKER` NAT chain and MASQUERADE rules when using `iptables-legacy`.
+- Lets Docker install direct access filtering rules in `raw/PREROUTING`, which it uses to drop non-bridge traffic headed at container addresses.
+- Lets Docker install IPv6 chains when ip6tables support is enabled in userspace.
+- Provides the baseline guest kernel networking and storage features needed for Bento's current rootful Docker extension model.
+
+### Notes
+
+- This repo's arm guest kernel profile currently disables modules, so these options must be built in, not left as modules.
+- `CONFIG_NF_TABLES=y` alone is not enough for the current Docker setup, because the guest userspace is using `iptables-legacy` rather than an nft-only path.
+- `CONFIG_IP_NF_RAW=y` and `CONFIG_IP6_NF_RAW=y` are easy to miss because Docker often fails later on the first visible `raw` table access rather than during its initial capability checks.
+- `CONFIG_NETFILTER_XTABLES_COMPAT=y` is part of that legacy userspace path, and missing it can surface as conntrack match failures or legacy table initialization failures even when the newer `IP*_NF_*` options are enabled.
