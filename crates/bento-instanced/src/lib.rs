@@ -6,6 +6,7 @@ mod host_export;
 mod instance_control_service;
 pub mod machine;
 mod pid_guard;
+mod port_forward;
 mod serial;
 mod server;
 mod state;

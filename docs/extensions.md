@@ -6,6 +6,7 @@ Today, Bento supports these extensions:
 
 - `ssh`
 - `docker`
+- `port-forward`
 
 Extensions are guest-facing features. They are different from core VM functionality like the serial console or Bento's control API, which are always available.
 
@@ -35,6 +36,8 @@ Bento enables bootstrap when:
 - you enable any extension that requires guest bootstrap
 
 Your `userdata` remains regular cloud-init compatible user-data. Bento merges its own bootstrap content with your user-data automatically.
+
+Current behavior note: Bento rotates cloud-init `instance-id` during bootstrap rebuild. That means cloud-init reruns on each boot for bootstrap-enabled VMs, including merged user `userdata`.
 
 If an image does not support bootstrap, Bento will reject instance creation when bootstrap is required.
 

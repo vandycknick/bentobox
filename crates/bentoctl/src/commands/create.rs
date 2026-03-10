@@ -85,8 +85,11 @@ impl Cmd {
             match extension.as_str() {
                 "docker" => extensions.docker = true,
                 "ssh" => extensions.ssh = true,
+                "port-forward" => extensions.port_forward = true,
                 other => {
-                    eyre::bail!("unsupported extension '{other}', expected one of: ssh, docker")
+                    eyre::bail!(
+                        "unsupported extension '{other}', expected one of: ssh, docker, port-forward"
+                    )
                 }
             }
         }

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use bento_machine::Machine;
 use bento_protocol::instance::v1::{ExtensionStatus, HostSocket, LifecycleState};
-use bento_runtime::extensions::{BuiltinExtension, EXTENSION_DOCKER};
+use bento_runtime::extensions::{BuiltinExtension, EXTENSION_DOCKER, EXTENSION_PORT_FORWARD};
 use bento_runtime::instance::{Instance, InstanceFile};
 use bento_runtime::instance_store::InstanceStore;
 use bento_runtime::services::SERVICE_DOCKER;
@@ -16,6 +16,7 @@ use crate::discovery::ServiceRegistry;
 use crate::host_export::listen_host_service;
 use crate::machine::machine_spec_for_instance;
 use crate::pid_guard::PidGuard;
+use crate::port_forward::spawn_port_forward_manager;
 use crate::serial::SerialConsole;
 use crate::server::InstanceServer;
 use crate::state::{new_instance_store, Action};
@@ -73,6 +74,16 @@ impl InstanceDaemon {
         };
 
         let _pid_guard = PidGuard::create(&inst.file(InstanceFile::InstancedPid)).await?;
+
+        let _port_forward_task = if inst.extensions().is_enabled(BuiltinExtension::PortForward) {
+            Some(spawn_port_forward_manager_when_guest_ready(
+                machine.clone(),
+                store.clone(),
+            ))
+        } else {
+            store.dispatch(Action::set_port_forwards(Vec::new()));
+            None
+        };
 
         store.dispatch(Action::vm_starting());
 
@@ -287,6 +298,67 @@ fn classify_guest_discovery_retry(err: &eyre::Report) -> &'static str {
     }
 
     "waiting for guest discovery rpc"
+}
+
+fn spawn_port_forward_manager_when_guest_ready(
+    machine: bento_machine::MachineHandle,
+    store: Arc<crate::state::InstanceStore>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut guest_probe_tick = tokio::time::interval(GUEST_DISCOVERY_RETRY);
+
+        loop {
+            guest_probe_tick.tick().await;
+            match ServiceRegistry::discover(&machine).await {
+                Ok(_) => {
+                    tracing::info!(
+                        extension = EXTENSION_PORT_FORWARD,
+                        "guest discovery is ready, starting port-forward manager"
+                    );
+                    break;
+                }
+                Err(err) => {
+                    tracing::info!(
+                        extension = EXTENSION_PORT_FORWARD,
+                        reason = %classify_guest_discovery_retry(&err),
+                        "port-forward waiting for guest discovery"
+                    );
+                    tracing::debug!(
+                        extension = EXTENSION_PORT_FORWARD,
+                        error = %err,
+                        "port-forward guest discovery retry detail"
+                    );
+                }
+            }
+        }
+
+        loop {
+            match spawn_port_forward_manager(machine.clone(), store.clone()).await {
+                Ok(Ok(())) => {
+                    tracing::warn!(
+                        extension = EXTENSION_PORT_FORWARD,
+                        "port-forward manager exited unexpectedly, restarting"
+                    );
+                }
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        extension = EXTENSION_PORT_FORWARD,
+                        error = %err,
+                        "port-forward manager failed, restarting"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        extension = EXTENSION_PORT_FORWARD,
+                        error = %err,
+                        "port-forward manager join failed, restarting"
+                    );
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    })
 }
 
 fn docker_host_socket_path(inst: &Instance) -> std::path::PathBuf {

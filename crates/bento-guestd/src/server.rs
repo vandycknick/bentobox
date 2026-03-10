@@ -1,8 +1,10 @@
-use std::future::{Future, IntoFuture};
+use std::future::Future;
 use std::io;
+use std::sync::Arc;
 
-use futures::{future, StreamExt};
+use futures::StreamExt;
 use rand::Rng;
+use tokio::sync::{oneshot, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_vsock::{VsockAddr, VsockListener, VsockStream, VMADDR_CID_ANY};
 use tracing::{Instrument, Span};
@@ -13,15 +15,34 @@ const DEFAULT_BIND_ATTEMPTS: u16 = 128;
 
 pub struct RunningServer {
     pub port: u32,
-    task: JoinHandle<()>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    task: Option<JoinHandle<()>>,
 }
 
-impl IntoFuture for RunningServer {
-    type Output = Result<(), tokio::task::JoinError>;
-    type IntoFuture = JoinHandle<()>;
+impl RunningServer {
+    pub fn shutdown(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
 
-    fn into_future(self) -> Self::IntoFuture {
-        self.task
+    pub async fn shutdown_and_wait(&mut self) {
+        self.shutdown();
+
+        if let Some(task) = self.task.take() {
+            if let Err(err) = task.await {
+                tracing::warn!(error = %err, port = self.port, "vsock server shutdown join failed");
+            }
+        }
+    }
+
+    pub async fn wait(mut self) -> Result<(), tokio::task::JoinError> {
+        let _keepalive = self.shutdown_tx.take();
+        if let Some(task) = self.task.take() {
+            task.await
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -61,36 +82,54 @@ where
         let handler = self.handler;
         let concurrency = self.concurrency;
         let span = self.span;
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
         let task = tokio::spawn(
             async move {
-                listener
-                    .incoming()
-                    .filter_map(|result| {
-                        future::ready(match result {
-                            Ok(stream) => Some(stream),
-                            Err(err) => {
-                                tracing::warn!(error = %err, "accept failed");
-                                None
-                            }
-                        })
-                    })
-                    .for_each_concurrent(concurrency, move |stream| {
-                        let handler = handler.clone();
-                        async move {
-                            if let Err(err) = handler(stream).await {
-                                tracing::error!(error = %err, "connection handler failed");
+                let mut incoming = listener.incoming();
+                let semaphore = Arc::new(Semaphore::new(concurrency));
+
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_rx => {
+                            tracing::info!("vsock server shutdown requested");
+                            break;
+                        }
+                        next = incoming.next() => {
+                            match next {
+                                Some(Ok(stream)) => {
+                                    let permit = match Arc::clone(&semaphore).acquire_owned().await {
+                                        Ok(permit) => permit,
+                                        Err(err) => {
+                                            tracing::warn!(error = %err, "semaphore closed while accepting connection");
+                                            break;
+                                        }
+                                    };
+
+                                    let handler = handler.clone();
+                                    tokio::spawn(async move {
+                                        let _permit = permit;
+                                        if let Err(err) = handler(stream).await {
+                                            tracing::error!(error = %err, "connection handler failed");
+                                        }
+                                    });
+                                }
+                                Some(Err(err)) => {
+                                    tracing::warn!(error = %err, "accept failed");
+                                }
+                                None => break,
                             }
                         }
-                    })
-                    .await;
+                    }
+                }
             }
             .instrument(span),
         );
 
         Ok(RunningServer {
             port: bound_port,
-            task,
+            shutdown_tx: Some(shutdown_tx),
+            task: Some(task),
         })
     }
 }

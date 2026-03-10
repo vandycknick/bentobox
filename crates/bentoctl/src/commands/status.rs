@@ -68,6 +68,19 @@ impl Cmd {
             }
         }
 
+        if !status.port_forwards.is_empty() {
+            println!("port forwards:");
+            for forward in status.port_forwards {
+                println!(
+                    "  - guest:{} host:{} active={}",
+                    forward.guest_port, forward.host_port, forward.active
+                );
+                if !forward.message.is_empty() {
+                    println!("    message: {}", forward.message);
+                }
+            }
+        }
+
         Ok(())
     }
 }

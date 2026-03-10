@@ -1,17 +1,18 @@
 mod config;
 mod port;
+mod port_forward;
 mod server;
 mod services;
 
 use bento_protocol::guest::v1::ServiceEndpoint;
 use bento_runtime::extensions::BuiltinExtension;
 use bento_runtime::services::{SERVICE_DOCKER, SERVICE_SSH};
-use std::future::IntoFuture;
 use std::io;
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpStream, UnixStream};
 
 use crate::config::GuestdConfig;
+use crate::port_forward::PortForwardManager;
 use crate::server::VsockServer;
 use crate::services::{serve_discovery_connection, GuestDiscoveryState};
 
@@ -33,6 +34,17 @@ async fn main() -> eyre::Result<()> {
     let discovery_port = crate::port::from_kernel_cmdline();
     let mut service_endpoints = Vec::new();
     let mut running_servers = Vec::new();
+    let mut background_tasks = Vec::new();
+    let port_forward_manager = if guestd_config
+        .extensions
+        .is_enabled(BuiltinExtension::PortForward)
+    {
+        let (manager, task) = PortForwardManager::spawn();
+        background_tasks.push(task);
+        Some(manager)
+    } else {
+        None
+    };
 
     if guestd_config.extensions.is_enabled(BuiltinExtension::Ssh) {
         let ssh_server = VsockServer::create(|mut stream| async move {
@@ -80,6 +92,7 @@ async fn main() -> eyre::Result<()> {
         service_endpoints,
         guestd_config.extensions,
         guestd_config.mounts,
+        port_forward_manager,
     );
 
     let discovery_server = VsockServer::create(move |stream| {
@@ -98,7 +111,10 @@ async fn main() -> eyre::Result<()> {
 
     let mut join_set = tokio::task::JoinSet::new();
     for server in running_servers {
-        join_set.spawn(server.into_future());
+        join_set.spawn(server.wait());
+    }
+    for task in background_tasks {
+        join_set.spawn(task);
     }
 
     while let Some(result) = join_set.join_next().await {

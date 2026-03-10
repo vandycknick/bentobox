@@ -2,11 +2,13 @@ use serde::{Deserialize, Serialize};
 
 pub const EXTENSION_SSH: &str = "ssh";
 pub const EXTENSION_DOCKER: &str = "docker";
+pub const EXTENSION_PORT_FORWARD: &str = "port-forward";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinExtension {
     Ssh,
     Docker,
+    PortForward,
 }
 
 impl BuiltinExtension {
@@ -14,6 +16,7 @@ impl BuiltinExtension {
         match self {
             Self::Ssh => EXTENSION_SSH,
             Self::Docker => EXTENSION_DOCKER,
+            Self::PortForward => EXTENSION_PORT_FORWARD,
         }
     }
 
@@ -32,17 +35,20 @@ pub struct ExtensionsConfig {
     pub ssh: bool,
     #[serde(default)]
     pub docker: bool,
+    #[serde(default)]
+    pub port_forward: bool,
 }
 
 impl ExtensionsConfig {
     pub fn is_empty(&self) -> bool {
-        !self.ssh && !self.docker
+        !self.ssh && !self.docker && !self.port_forward
     }
 
     pub fn is_enabled(&self, extension: BuiltinExtension) -> bool {
         match extension {
             BuiltinExtension::Ssh => self.ssh,
             BuiltinExtension::Docker => self.docker,
+            BuiltinExtension::PortForward => self.port_forward,
         }
     }
 
@@ -53,6 +59,9 @@ impl ExtensionsConfig {
         }
         if self.docker {
             extensions.push(BuiltinExtension::Docker);
+        }
+        if self.port_forward {
+            extensions.push(BuiltinExtension::PortForward);
         }
         extensions
     }

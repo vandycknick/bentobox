@@ -1,5 +1,8 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bento_runtime::global_config::{ensure_guest_agent_binary, GlobalConfig};
 use bento_runtime::host_user::{self, HostUser};
@@ -15,7 +18,6 @@ const GUEST_AGENT_CONFIG_ENV_ENTRY: &str = "config.env";
 const GUEST_AGENT_BOOTSTRAP_SCRIPT: &str = "/var/lib/cloud/scripts/per-boot/00-bento.bootstrap.sh";
 const GUEST_BOOTSTRAP_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-bootstrap.sh");
 const GUEST_INSTALL_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-install.sh");
-const TASK_RECONCILE_MOUNTS_CONTENT: &str = include_str!("../scripts/tasks/00-reconcile-mounts.sh");
 const TASK_REGISTER_GUESTD_CONTENT: &str = include_str!("../scripts/tasks/10-register-guestd.sh");
 
 #[derive(Debug, Clone)]
@@ -50,10 +52,10 @@ fn build_cidata_iso(
     let guest_agent_binary = std::fs::read(agent_binary_path)
         .with_context(|| format!("read guest agent binary {}", agent_binary_path.display()))?;
 
-    let user_data = render_user_data(inst, host_user, ssh_public_key)?;
+    let desired_state = desired_guestd_state(inst)?;
+    let user_data = render_user_data(inst, host_user, ssh_public_key, &desired_state)?;
     let meta_data = render_meta_data(inst)?;
     let network_config = render_network_config_for_instance(inst)?;
-    let desired_state = desired_guestd_state(inst)?;
     let guestd_config = render_guestd_config(&desired_state)?;
     let config_env = render_config_env(inst, &desired_state)?;
     let iso_path = inst.file(InstanceFile::CidataIso);
@@ -82,10 +84,6 @@ fn build_cidata_iso(
         CidataEntry {
             name: GUEST_AGENT_CONFIG_ENV_ENTRY.to_string(),
             contents: config_env.into_bytes(),
-        },
-        CidataEntry {
-            name: "tasks/00-reconcile-mounts.sh".to_string(),
-            contents: TASK_RECONCILE_MOUNTS_CONTENT.as_bytes().to_vec(),
         },
         CidataEntry {
             name: "tasks/10-register-guestd.sh".to_string(),
@@ -201,6 +199,8 @@ struct CloudConfig {
     timezone: String,
     locale: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    mounts: Vec<[String; 6]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     write_files: Vec<WriteFile>,
 }
 
@@ -290,6 +290,7 @@ fn render_user_data(
     inst: &Instance,
     host_user: &HostUser,
     ssh_public_key: &str,
+    desired_state: &GuestDesiredState,
 ) -> eyre::Result<String> {
     let timezone = resolve_host_timezone();
     let locale = resolve_host_locale();
@@ -321,6 +322,7 @@ fn render_user_data(
         resize_rootfs: true,
         timezone,
         locale,
+        mounts: cloud_mount_entries(desired_state),
         write_files,
     };
     let mut bento_yaml = String::from("#cloud-config\n");
@@ -386,11 +388,42 @@ fn render_network_config_for_instance(inst: &Instance) -> eyre::Result<Option<St
 }
 
 fn render_meta_data(inst: &Instance) -> eyre::Result<String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    let mut hasher = DefaultHasher::new();
+    inst.name.hash(&mut hasher);
+    nonce.hash(&mut hasher);
+    let hash = hasher.finish();
+
     let metadata = MetaData {
-        instance_id: format!("bento-{}", inst.name),
+        instance_id: format!("bento-{:08x}", (hash >> 32) as u32),
         local_hostname: inst.name.clone(),
     };
     serde_yaml_ng::to_string(&metadata).context("serialize cloud-init meta-data")
+}
+
+fn cloud_mount_entries(state: &GuestDesiredState) -> Vec<[String; 6]> {
+    state
+        .mounts
+        .iter()
+        .map(|mount| {
+            [
+                mount.tag.clone(),
+                mount.path.clone(),
+                "virtiofs".to_string(),
+                if mount.writable {
+                    "rw,nofail".to_string()
+                } else {
+                    "ro,nofail".to_string()
+                },
+                "0".to_string(),
+                "0".to_string(),
+            ]
+        })
+        .collect()
 }
 
 fn render_guestd_config(state: &GuestDesiredState) -> eyre::Result<String> {
@@ -406,14 +439,6 @@ fn render_config_env(inst: &Instance, state: &GuestDesiredState) -> eyre::Result
     ));
     env.push_str("BENTO_GUESTD_BINARY_PATH=/usr/local/bin/bento-guestd\n");
     env.push_str("BENTO_GUESTD_CONFIG_PATH=/etc/bento/guestd.yaml\n");
-    env.push_str(&format!(
-        "BENTO_FSTAB_MARKER_START={}\n",
-        shell_quote("# >>> bento managed mounts >>>")
-    ));
-    env.push_str(&format!(
-        "BENTO_FSTAB_MARKER_END={}\n",
-        shell_quote("# <<< bento managed mounts <<<")
-    ));
 
     env.push_str(&format!(
         "BENTO_EXT_SSH={}\n",
@@ -431,22 +456,14 @@ fn render_config_env(inst: &Instance, state: &GuestDesiredState) -> eyre::Result
             "false"
         }
     ));
-
-    env.push_str(&format!("BENTO_MOUNTS_COUNT={}\n", state.mounts.len()));
-    for (index, mount) in state.mounts.iter().enumerate() {
-        env.push_str(&format!(
-            "BENTO_MOUNTS_{index}_TAG={}\n",
-            shell_quote(&mount.tag)
-        ));
-        env.push_str(&format!(
-            "BENTO_MOUNTS_{index}_PATH={}\n",
-            shell_quote(&mount.path)
-        ));
-        env.push_str(&format!(
-            "BENTO_MOUNTS_{index}_WRITABLE={}\n",
-            if mount.writable { "true" } else { "false" }
-        ));
-    }
+    env.push_str(&format!(
+        "BENTO_EXT_PORT_FORWARD={}\n",
+        if state.extensions.port_forward {
+            "true"
+        } else {
+            "false"
+        }
+    ));
 
     Ok(env)
 }

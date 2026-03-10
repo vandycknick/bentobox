@@ -4,18 +4,21 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use crate::config::MountConfig;
+use crate::port_forward::PortForwardManager;
 use bento_protocol::guest::v1::guest_discovery_service_server::{
     GuestDiscoveryService, GuestDiscoveryServiceServer,
 };
 use bento_protocol::guest::v1::{
     ExtensionStatus, HealthRequest, HealthResponse, ListExtensionsRequest, ListExtensionsResponse,
-    ListServicesRequest, ListServicesResponse, ResolveServiceRequest, ResolveServiceResponse,
-    ServiceEndpoint, ServiceHealth, ServiceStatus,
+    ListServicesRequest, ListServicesResponse, PortForwardEvent, ResolveServiceRequest,
+    ResolveServiceResponse, ServiceEndpoint, ServiceHealth, ServiceStatus,
+    WatchPortForwardsRequest,
 };
-use bento_runtime::extensions::{BuiltinExtension, ExtensionsConfig};
-use futures::stream;
+use bento_runtime::extensions::{BuiltinExtension, ExtensionsConfig, EXTENSION_PORT_FORWARD};
+use futures::stream::{self, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
+use tokio::sync::broadcast;
 use tokio_vsock::VsockStream;
 use tonic::transport::server::Connected;
 use tonic::{Request, Response, Status};
@@ -65,6 +68,7 @@ pub struct GuestDiscoveryState {
     services: Arc<Vec<ServiceEndpoint>>,
     extensions: ExtensionsConfig,
     _mounts: Arc<Vec<MountConfig>>,
+    port_forward: Option<PortForwardManager>,
 }
 
 impl GuestDiscoveryState {
@@ -72,17 +76,23 @@ impl GuestDiscoveryState {
         services: Vec<ServiceEndpoint>,
         extensions: ExtensionsConfig,
         mounts: Vec<MountConfig>,
+        port_forward: Option<PortForwardManager>,
     ) -> Self {
         Self {
             services: Arc::new(services),
             extensions,
             _mounts: Arc::new(mounts),
+            port_forward,
         }
     }
 }
 
+type WatchPortForwardsStream = Pin<Box<dyn Stream<Item = Result<PortForwardEvent, Status>> + Send>>;
+
 #[tonic::async_trait]
 impl GuestDiscoveryService for GuestDiscoveryState {
+    type WatchPortForwardsStream = WatchPortForwardsStream;
+
     async fn list_services(
         &self,
         _request: Request<ListServicesRequest>,
@@ -111,8 +121,39 @@ impl GuestDiscoveryService for GuestDiscoveryState {
         _request: Request<ListExtensionsRequest>,
     ) -> Result<Response<ListExtensionsResponse>, Status> {
         Ok(Response::new(ListExtensionsResponse {
-            extensions: extension_statuses(&self.extensions).await,
+            extensions: extension_statuses(&self.extensions, self.port_forward.is_some()).await,
         }))
+    }
+
+    async fn watch_port_forwards(
+        &self,
+        _request: Request<WatchPortForwardsRequest>,
+    ) -> Result<Response<Self::WatchPortForwardsStream>, Status> {
+        let Some(manager) = &self.port_forward else {
+            return Ok(Response::new(Box::pin(stream::empty())));
+        };
+
+        let snapshot = manager.snapshot_events().await;
+        let rx = manager.subscribe();
+        let pending = std::collections::VecDeque::from(snapshot);
+        let updates = stream::unfold((pending, rx), |(mut pending, mut rx)| async move {
+            if let Some(event) = pending.pop_front() {
+                return Some((Ok(event), (pending, rx)));
+            }
+
+            match rx.recv().await {
+                Ok(update) => Some((Ok(update), (pending, rx))),
+                Err(broadcast::error::RecvError::Lagged(skipped)) => Some((
+                    Err(Status::resource_exhausted(format!(
+                        "port-forward stream lagged, skipped {skipped} updates"
+                    ))),
+                    (pending, rx),
+                )),
+                Err(broadcast::error::RecvError::Closed) => None,
+            }
+        });
+
+        Ok(Response::new(Box::pin(updates)))
     }
 
     async fn health(
@@ -138,13 +179,25 @@ impl GuestDiscoveryService for GuestDiscoveryState {
     }
 }
 
-async fn extension_statuses(extensions: &ExtensionsConfig) -> Vec<ExtensionStatus> {
+async fn extension_statuses(
+    extensions: &ExtensionsConfig,
+    port_forward_running: bool,
+) -> Vec<ExtensionStatus> {
     let mut statuses = Vec::new();
     if extensions.is_enabled(BuiltinExtension::Ssh) {
         statuses.push(probe_ssh().await);
     }
     if extensions.is_enabled(BuiltinExtension::Docker) {
         statuses.push(probe_docker().await);
+    }
+    if extensions.is_enabled(BuiltinExtension::PortForward) {
+        statuses.push(extension_status(
+            EXTENSION_PORT_FORWARD,
+            true,
+            true,
+            port_forward_running,
+            "Port-forward",
+        ));
     }
     statuses
 }

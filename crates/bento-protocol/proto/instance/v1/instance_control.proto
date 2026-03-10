@@ -32,6 +32,13 @@ message HostSocket {
   string path = 2;
 }
 
+message PortForwardStatus {
+  uint32 guest_port = 1;
+  uint32 host_port = 2;
+  bool active = 3;
+  string message = 4;
+}
+
 message GetStatusResponse {
   LifecycleState vm_state = 1;
   LifecycleState guest_state = 2;
@@ -39,6 +46,7 @@ message GetStatusResponse {
   string summary = 4;
   repeated ExtensionStatus extensions = 5;
   repeated HostSocket host_sockets = 6;
+  repeated PortForwardStatus port_forwards = 7;
 }
 
 message WatchStatusRequest {}

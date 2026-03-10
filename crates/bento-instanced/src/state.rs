@@ -1,8 +1,8 @@
 use std::sync::Mutex;
 
 use bento_protocol::instance::v1::{
-    ExtensionStatus, GetStatusResponse, HealthResponse, HostSocket, LifecycleState, StatusSource,
-    StatusUpdate,
+    ExtensionStatus, GetStatusResponse, HealthResponse, HostSocket, LifecycleState,
+    PortForwardStatus, StatusSource, StatusUpdate,
 };
 use tokio::sync::broadcast;
 
@@ -91,6 +91,7 @@ pub(crate) struct InstanceState {
     guest_message: String,
     extensions: Vec<ExtensionStatus>,
     host_sockets: Vec<HostSocket>,
+    port_forwards: Vec<PortForwardStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +109,9 @@ pub(crate) enum Action {
     },
     SetHostSockets {
         host_sockets: Vec<HostSocket>,
+    },
+    SetPortForwards {
+        port_forwards: Vec<PortForwardStatus>,
     },
 }
 
@@ -154,6 +158,10 @@ impl Action {
     pub(crate) fn set_host_sockets(host_sockets: Vec<HostSocket>) -> Self {
         Self::SetHostSockets { host_sockets }
     }
+
+    pub(crate) fn set_port_forwards(port_forwards: Vec<PortForwardStatus>) -> Self {
+        Self::SetPortForwards { port_forwards }
+    }
 }
 
 pub(crate) type InstanceStore = Store<InstanceState, Action, StatusUpdate>;
@@ -183,6 +191,7 @@ pub(crate) fn select_current_status(state: &InstanceState) -> GetStatusResponse 
         summary: status_summary(state),
         extensions: state.extensions.clone(),
         host_sockets: state.host_sockets.clone(),
+        port_forwards: state.port_forwards.clone(),
     }
 }
 
@@ -221,6 +230,9 @@ fn reduce_instance_state(current: &InstanceState, action: &Action) -> InstanceSt
         Action::SetHostSockets { host_sockets } => {
             next.host_sockets = host_sockets.clone();
         }
+        Action::SetPortForwards { port_forwards } => {
+            next.port_forwards = port_forwards.clone();
+        }
     }
 
     next
@@ -236,7 +248,9 @@ fn project_status_update(action: &Action) -> Option<StatusUpdate> {
             *state,
             message.clone(),
         )),
-        Action::SetExtensions { .. } | Action::SetHostSockets { .. } => None,
+        Action::SetExtensions { .. }
+        | Action::SetHostSockets { .. }
+        | Action::SetPortForwards { .. } => None,
     }
 }
 

@@ -5,6 +5,7 @@ package guest.v1;
 service GuestDiscoveryService {
   rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
   rpc ListExtensions(ListExtensionsRequest) returns (ListExtensionsResponse);
+  rpc WatchPortForwards(WatchPortForwardsRequest) returns (stream PortForwardEvent);
   rpc ResolveService(ResolveServiceRequest) returns (ResolveServiceResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
 }
@@ -41,6 +42,24 @@ message ListExtensionsRequest {}
 
 message ListExtensionsResponse {
   repeated ExtensionStatus extensions = 1;
+}
+
+message WatchPortForwardsRequest {}
+
+message PortForward {
+  uint32 guest_port = 1;
+  uint32 vsock_port = 2;
+}
+
+enum PortForwardEventType {
+  PORT_FORWARD_EVENT_TYPE_UNSPECIFIED = 0;
+  PORT_FORWARD_EVENT_TYPE_ADDED = 1;
+  PORT_FORWARD_EVENT_TYPE_REMOVED = 2;
+}
+
+message PortForwardEvent {
+  PortForwardEventType event_type = 1;
+  PortForward forward = 2;
 }
 
 enum ServiceStatus {
