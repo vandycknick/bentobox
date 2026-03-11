@@ -19,8 +19,17 @@ pub fn spawn_tunnel(stream: UnixStream, vsock_fd: OwnedFd) {
 
 async fn proxy_streams(mut client_stream: UnixStream, vsock_fd: OwnedFd) -> std::io::Result<()> {
     let mut vsock_stream = AsyncFdStream::new(std::fs::File::from(vsock_fd))?;
-    let _ = tokio::io::copy_bidirectional(&mut client_stream, &mut vsock_stream).await?;
-    client_stream.shutdown().await
+    match tokio::io::copy_bidirectional(&mut client_stream, &mut vsock_stream).await {
+        Ok(_) => {}
+        Err(err) if is_expected_disconnect(&err) => return Ok(()),
+        Err(err) => return Err(err),
+    }
+
+    match client_stream.shutdown().await {
+        Ok(()) => Ok(()),
+        Err(err) if is_expected_disconnect(&err) => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 fn is_expected_disconnect(err: &io::Error) -> bool {
@@ -33,4 +42,39 @@ fn is_expected_disconnect(err: &io::Error) -> bool {
             | io::ErrorKind::UnexpectedEof
             | io::ErrorKind::Interrupted
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::{FromRawFd, IntoRawFd};
+    use std::os::unix::net::UnixStream as StdUnixStream;
+    use std::time::Duration;
+
+    use tokio::net::UnixStream;
+
+    use crate::tunnel::proxy_streams;
+
+    #[tokio::test]
+    async fn proxy_streams_exits_after_client_disconnect() {
+        let (client_stream, peer_stream) =
+            UnixStream::pair().expect("unix stream pair should be created");
+        let (vsock_stream, guest_stream) =
+            StdUnixStream::pair().expect("guest stream pair should be created");
+        guest_stream
+            .set_nonblocking(true)
+            .expect("guest stream should be nonblocking");
+
+        let vsock_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(vsock_stream.into_raw_fd()) };
+        let tunnel = tokio::spawn(async move { proxy_streams(client_stream, vsock_fd).await });
+
+        drop(peer_stream);
+        drop(guest_stream);
+
+        let result = tokio::time::timeout(Duration::from_secs(1), tunnel)
+            .await
+            .expect("proxy task should exit promptly")
+            .expect("proxy task should join successfully");
+
+        result.expect("proxy should treat disconnect as clean shutdown");
+    }
 }
