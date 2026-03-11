@@ -1,9 +1,10 @@
 use crate::backend::MachineBackend;
 use crate::types::{
-    MachineError, MachineKind, MachineState, OpenDeviceRequest, OpenDeviceResponse,
-    ResolvedMachineSpec,
+    MachineError, MachineExitEvent, MachineExitReceiver, MachineKind, MachineState,
+    OpenDeviceRequest, OpenDeviceResponse, ResolvedMachineSpec,
 };
 use std::sync::Mutex;
+use tokio::sync::oneshot;
 
 #[derive(Debug)]
 pub(crate) struct FirecrackerMachineBackend {
@@ -42,13 +43,19 @@ impl MachineBackend for FirecrackerMachineBackend {
             .map_err(|_| MachineError::RegistryPoisoned)
     }
 
-    fn start(&mut self) -> Result<(), MachineError> {
+    fn start(&mut self) -> Result<MachineExitReceiver, MachineError> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| MachineError::RegistryPoisoned)?;
+        if *state == MachineState::Running {
+            return Err(MachineError::AlreadyRunning {
+                id: self._spec.id.clone(),
+            });
+        }
         *state = MachineState::Running;
-        Ok(())
+        let (_tx, rx) = oneshot::channel::<MachineExitEvent>();
+        Ok(rx)
     }
 
     fn stop(&mut self) -> Result<(), MachineError> {

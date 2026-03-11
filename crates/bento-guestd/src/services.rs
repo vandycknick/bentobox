@@ -1,5 +1,6 @@
 use std::io;
 use std::pin::Pin;
+use std::process::Command;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -11,8 +12,8 @@ use bento_protocol::guest::v1::guest_discovery_service_server::{
 use bento_protocol::guest::v1::{
     ExtensionStatus, HealthRequest, HealthResponse, ListExtensionsRequest, ListExtensionsResponse,
     ListServicesRequest, ListServicesResponse, PortForwardEvent, ResolveServiceRequest,
-    ResolveServiceResponse, ServiceEndpoint, ServiceHealth, ServiceStatus,
-    WatchPortForwardsRequest,
+    ResolveServiceResponse, ServiceEndpoint, ServiceHealth, ServiceStatus, ShutdownRequest,
+    ShutdownResponse, WatchPortForwardsRequest,
 };
 use bento_runtime::extensions::{BuiltinExtension, ExtensionsConfig, EXTENSION_PORT_FORWARD};
 use futures::stream::{self, Stream};
@@ -176,6 +177,32 @@ impl GuestDiscoveryService for GuestDiscoveryState {
                 .all(|status| status.status == ServiceStatus::Running as i32),
             services: statuses,
         }))
+    }
+
+    async fn shutdown(
+        &self,
+        request: Request<ShutdownRequest>,
+    ) -> Result<Response<ShutdownResponse>, Status> {
+        let reboot = request.into_inner().reboot;
+        let mut command = Command::new("systemctl");
+        if reboot {
+            command.arg("reboot");
+        } else {
+            command.arg("poweroff");
+        }
+        command.arg("--no-block");
+
+        let status = command.status().map_err(|err| {
+            Status::internal(format!("failed to execute systemctl for shutdown: {err}"))
+        })?;
+
+        if !status.success() {
+            return Err(Status::internal(format!(
+                "systemctl shutdown request failed with status {status}"
+            )));
+        }
+
+        Ok(Response::new(ShutdownResponse {}))
     }
 }
 

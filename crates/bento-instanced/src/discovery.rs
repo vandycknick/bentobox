@@ -7,6 +7,7 @@ use bento_machine::{MachineHandle, OpenDeviceRequest, OpenDeviceResponse};
 use bento_protocol::guest::v1::guest_discovery_service_client::GuestDiscoveryServiceClient;
 use bento_protocol::guest::v1::{
     ExtensionStatus, HealthRequest, ListExtensionsRequest, ListServicesRequest, ServiceStatus,
+    ShutdownRequest,
 };
 use bento_protocol::DEFAULT_DISCOVERY_PORT;
 use bento_runtime::services::SERVICE_SERIAL;
@@ -80,6 +81,21 @@ impl ServiceRegistry {
     pub(crate) fn extensions(&self) -> impl Iterator<Item = &ExtensionStatus> {
         self.extensions.values()
     }
+}
+
+pub(crate) async fn request_guest_shutdown(
+    machine: &MachineHandle,
+    reboot: bool,
+) -> eyre::Result<()> {
+    let mut client = connect_guest_client(machine).await?;
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        client.shutdown(ShutdownRequest { reboot }),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("guest discovery shutdown request timed out"))?
+    .map_err(|err| eyre::eyre!("guest discovery shutdown request failed: {err}"))?;
+    Ok(())
 }
 
 async fn connect_guest_client(

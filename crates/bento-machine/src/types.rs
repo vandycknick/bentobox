@@ -2,6 +2,7 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
 use thiserror::Error;
+use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MachineId(String);
@@ -124,6 +125,14 @@ pub enum MachineState {
     Released,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineExitEvent {
+    pub state: MachineState,
+    pub message: String,
+}
+
+pub type MachineExitReceiver = oneshot::Receiver<MachineExitEvent>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenDeviceRequest {
     Vsock { port: u32 },
@@ -152,6 +161,9 @@ pub enum MachineError {
 
     #[error("machine {id:?} has been released")]
     MachineReleased { id: MachineId },
+
+    #[error("machine {id:?} is already running")]
+    AlreadyRunning { id: MachineId },
 
     #[error("machine backend {kind:?} is unsupported on this host: {reason}")]
     UnsupportedBackend { kind: MachineKind, reason: String },

@@ -3,7 +3,8 @@ use std::sync::Arc;
 use crate::backend;
 use crate::registry::{self, MachineWorker};
 use crate::types::{
-    MachineError, MachineId, MachineSpec, MachineState, OpenDeviceRequest, OpenDeviceResponse,
+    MachineError, MachineExitReceiver, MachineId, MachineSpec, MachineState, OpenDeviceRequest,
+    OpenDeviceResponse,
 };
 
 pub struct Machine;
@@ -64,7 +65,7 @@ impl MachineHandle {
         self.inner.state().await
     }
 
-    pub async fn start(&self) -> Result<(), MachineError> {
+    pub async fn start(&self) -> Result<MachineExitReceiver, MachineError> {
         self.ensure_active()?;
         self.inner.start().await
     }

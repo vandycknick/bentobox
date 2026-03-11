@@ -83,7 +83,7 @@ async fn wait_for_instanced_start(
     pid_path: &std::path::Path,
     trace_path: &std::path::Path,
 ) -> io::Result<()> {
-    let deadline_duration = Duration::from_secs(5);
+    let deadline_duration = Duration::from_secs(30);
     let deadline = Instant::now() + deadline_duration;
     let poll_interval = Duration::from_millis(50);
 

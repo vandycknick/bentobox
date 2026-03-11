@@ -1,4 +1,6 @@
 use std::os::fd::{IntoRawFd, OwnedFd};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use bento_protocol::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
@@ -19,9 +21,10 @@ use objc2_virtualization::{
 
 use crate::backend::MachineBackend;
 use crate::types::{
-    MachineConfig, MachineError, MachineId, MachineKind, MachineState, NetworkMode,
-    OpenDeviceRequest, OpenDeviceResponse, ResolvedMachineSpec,
+    MachineConfig, MachineError, MachineExitEvent, MachineExitReceiver, MachineId, MachineKind,
+    MachineState, NetworkMode, OpenDeviceRequest, OpenDeviceResponse, ResolvedMachineSpec,
 };
+use tokio::sync::oneshot;
 
 mod dispatch;
 mod objc_ext;
@@ -45,6 +48,7 @@ pub(crate) struct VzMachineBackend {
     spec: ResolvedMachineSpec,
     vm: Option<VirtualMachine>,
     state: MachineState,
+    exit_sender: Option<Arc<Mutex<Option<oneshot::Sender<MachineExitEvent>>>>>,
 }
 
 impl VzMachineBackend {
@@ -54,6 +58,7 @@ impl VzMachineBackend {
             spec,
             vm: None,
             state: MachineState::Created,
+            exit_sender: None,
         })
     }
 }
@@ -66,20 +71,27 @@ impl MachineBackend for VzMachineBackend {
         })
     }
 
-    fn start(&mut self) -> Result<(), MachineError> {
+    fn start(&mut self) -> Result<MachineExitReceiver, MachineError> {
         validate_support()?;
         if self.vm.is_some() {
-            return Ok(());
+            return Err(MachineError::AlreadyRunning {
+                id: self.spec.id.clone(),
+            });
         }
+
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let shared_exit = Arc::new(Mutex::new(Some(exit_tx)));
 
         unsafe {
             let config = create_vm_config(&self.spec)?;
             let vm = start_vm(config)?;
+            spawn_state_exit_watcher(vm.subscribe_state(), shared_exit.clone());
             self.vm = Some(vm);
         }
 
         self.state = MachineState::Running;
-        Ok(())
+        self.exit_sender = Some(shared_exit);
+        Ok(exit_rx)
     }
 
     fn stop(&mut self) -> Result<(), MachineError> {
@@ -87,6 +99,14 @@ impl MachineBackend for VzMachineBackend {
             unsafe {
                 stop_vm(vm)?;
             }
+        }
+
+        if let Some(exit_sender) = self.exit_sender.take() {
+            send_exit_once(
+                &exit_sender,
+                MachineState::Stopped,
+                "machine stopped by host request",
+            );
         }
 
         self.vm = None;
@@ -115,6 +135,53 @@ impl MachineBackend for VzMachineBackend {
                 })
                 .map_err(MachineError::from),
         }
+    }
+}
+
+fn spawn_state_exit_watcher(
+    events: crossbeam::channel::Receiver<VirtualMachineState>,
+    exit_sender: Arc<Mutex<Option<oneshot::Sender<MachineExitEvent>>>>,
+) {
+    thread::Builder::new()
+        .name("vz-machine-state-watcher".to_string())
+        .spawn(move || {
+            while let Ok(state) = events.recv() {
+                match state {
+                    VirtualMachineState::Stopped => {
+                        send_exit_once(&exit_sender, MachineState::Stopped, "machine stopped");
+                        return;
+                    }
+                    VirtualMachineState::Error => {
+                        send_exit_once(
+                            &exit_sender,
+                            MachineState::Stopped,
+                            "machine entered error state",
+                        );
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            send_exit_once(
+                &exit_sender,
+                MachineState::Stopped,
+                "machine state watcher disconnected",
+            );
+        })
+        .ok();
+}
+
+fn send_exit_once(
+    exit_sender: &Arc<Mutex<Option<oneshot::Sender<MachineExitEvent>>>>,
+    state: MachineState,
+    message: &str,
+) {
+    let sender = exit_sender.lock().ok().and_then(|mut guard| guard.take());
+    if let Some(sender) = sender {
+        let _ = sender.send(MachineExitEvent {
+            state,
+            message: message.to_string(),
+        });
     }
 }
 

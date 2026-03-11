@@ -8,8 +8,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::backend::create_backend;
 use crate::types::{
-    MachineError, MachineId, MachineState, OpenDeviceRequest, OpenDeviceResponse,
-    ResolvedMachineSpec,
+    MachineError, MachineExitReceiver, MachineId, MachineState, OpenDeviceRequest,
+    OpenDeviceResponse, ResolvedMachineSpec,
 };
 
 pub(crate) struct MachineWorker {
@@ -66,7 +66,7 @@ impl MachineWorker {
             .map_err(|_| MachineError::Backend("machine worker dropped reply".to_string()))?
     }
 
-    pub(crate) async fn start(&self) -> Result<(), MachineError> {
+    pub(crate) async fn start(&self) -> Result<MachineExitReceiver, MachineError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(MachineCommand::Start { reply: reply_tx })
@@ -108,7 +108,7 @@ enum MachineCommand {
         reply: oneshot::Sender<Result<MachineState, MachineError>>,
     },
     Start {
-        reply: oneshot::Sender<Result<(), MachineError>>,
+        reply: oneshot::Sender<Result<MachineExitReceiver, MachineError>>,
     },
     Stop {
         reply: oneshot::Sender<Result<(), MachineError>>,

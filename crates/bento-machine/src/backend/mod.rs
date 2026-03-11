@@ -4,13 +4,13 @@ mod firecracker;
 mod vz;
 
 use crate::types::{
-    MachineError, MachineKind, MachineState, OpenDeviceRequest, OpenDeviceResponse,
-    ResolvedMachineSpec,
+    MachineError, MachineExitReceiver, MachineKind, MachineState, OpenDeviceRequest,
+    OpenDeviceResponse, ResolvedMachineSpec,
 };
 
 pub(crate) trait MachineBackend {
     fn state(&self) -> Result<MachineState, MachineError>;
-    fn start(&mut self) -> Result<(), MachineError>;
+    fn start(&mut self) -> Result<MachineExitReceiver, MachineError>;
     fn stop(&mut self) -> Result<(), MachineError>;
     fn open_device(&self, request: OpenDeviceRequest) -> Result<OpenDeviceResponse, MachineError>;
 }
