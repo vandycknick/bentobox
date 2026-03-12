@@ -149,7 +149,46 @@ This file tracks kernel-side config changes identified while debugging package u
 
 - Keeps hardening hooks available while avoiding breakage in development VM workflows.
 
-## 9) RTC framework for direct-kernel, non-EFI boots
+## 9) Nested virtualization support for arm64 guest kernels
+
+### Required config changes
+
+- `CONFIG_KVM=y`
+- `CONFIG_VHOST_MENU=y`
+- `CONFIG_VHOST_VSOCK=y`
+- `CONFIG_TUN=y`
+- `CONFIG_VHOST_NET=y`
+
+### What this enables
+
+- In-guest KVM host support on arm64 so the guest can act as an L1 hypervisor.
+- Vhost-backed vsock and virtio-net acceleration paths used by nested virtualization stacks.
+- TUN support for common nested guest networking setups.
+
+### Why this is needed
+
+- Nested virtualization needs the guest kernel to expose `/dev/kvm` and the supporting virtualization datapath, not just guest virtio drivers.
+- `VHOST_VSOCK` matches Bento's current vsock-heavy transport model.
+- `TUN` and `VHOST_NET` make nested guest networking usable instead of deeply annoying.
+
+## 10) Kernel config introspection (observability)
+
+### Required config changes
+
+- `CONFIG_IKCONFIG=y`
+- `CONFIG_IKCONFIG_PROC=y`
+
+### What this enables
+
+- Embedding the kernel config into the built kernel.
+- Reading the running kernel config from `/proc/config.gz`.
+
+### Why this is needed
+
+- Not required for virtualization itself.
+- Makes it easy to verify a booted kernel really contains the expected KVM and vhost flags without playing guess-the-image.
+
+## 11) RTC framework for direct-kernel, non-EFI boots
 
 ### Required config changes
 
@@ -167,7 +206,7 @@ This file tracks kernel-side config changes identified while debugging package u
 - Current kernel has RTC core disabled, causing `RTC time: n/a`.
 - This does not guarantee RTC in direct kernel boot mode if the hypervisor path does not expose a compatible RTC device.
 
-## 10) AUTOFS support for no-modules kernels (optional cleanup)
+## 12) AUTOFS support for no-modules kernels (optional cleanup)
 
 ### Required config changes
 
@@ -181,7 +220,7 @@ This file tracks kernel-side config changes identified while debugging package u
 
 - Removes `Failed to find module 'autofs4'` warnings when using a kernel with `CONFIG_MODULES=n`.
 
-## 11) Rootful Docker guest support
+## 13) Rootful Docker guest support
 
 ### Required config changes
 

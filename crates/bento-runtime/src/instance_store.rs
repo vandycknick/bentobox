@@ -237,6 +237,7 @@ pub struct InstanceCreateOptions {
     pub memory: u32,
     pub kernel: Option<PathBuf>,
     pub initramfs: Option<PathBuf>,
+    pub nested_virtualization: bool,
     pub disks: Vec<PathBuf>,
     pub mounts: Vec<MountConfig>,
     pub network: Option<NetworkConfig>,
@@ -252,6 +253,7 @@ impl Default for InstanceCreateOptions {
             memory: 512,
             kernel: None,
             initramfs: None,
+            nested_virtualization: false,
             disks: Vec::new(),
             mounts: Vec::new(),
             network: None,
@@ -275,6 +277,11 @@ impl InstanceCreateOptions {
 
     pub fn with_initramfs(mut self, path: Option<PathBuf>) -> Self {
         self.initramfs = path;
+        self
+    }
+
+    pub fn with_nested_virtualization(mut self, enabled: bool) -> Self {
+        self.nested_virtualization = enabled;
         self
     }
 
@@ -322,6 +329,7 @@ fn apply_create_options(
     config.memory = Some(options.memory as i32);
     config.kernel_path = options.kernel;
     config.initramfs_path = options.initramfs;
+    config.nested_virtualization = Some(options.nested_virtualization);
     config.disks = options
         .disks
         .iter()
@@ -425,6 +433,24 @@ fn is_tilde_mount_path(path: &Path) -> Result<bool, InstanceError> {
     }
 
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_create_options_persists_nested_virtualization() {
+        let mut config = InstanceConfig::new();
+
+        apply_create_options(
+            &mut config,
+            InstanceCreateOptions::default().with_nested_virtualization(true),
+        )
+        .expect("apply create options should succeed");
+
+        assert_eq!(config.nested_virtualization, Some(true));
+    }
 }
 
 pub fn validate_name(name: &str) -> Result<(), InstanceError> {

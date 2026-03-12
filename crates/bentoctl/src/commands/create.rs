@@ -33,6 +33,8 @@ pub struct Cmd {
     pub initramfs: Option<PathBuf>,
     #[arg(long, help = "Base image name or OCI reference")]
     pub image: Option<String>,
+    #[arg(long, help = "Enable nested virtualization for supported VZ guests")]
+    pub nested_virtualization: bool,
     #[arg(long, value_name = "PATH", help = "Path to userdata file")]
     pub userdata: Option<PathBuf>,
     #[arg(
@@ -108,6 +110,7 @@ impl Cmd {
             .with_memory(self.memory)
             .with_kernel(kernel_path)
             .with_initramfs(initramfs_path)
+            .with_nested_virtualization(self.nested_virtualization)
             .with_disks(disk_paths)
             .with_mounts(self.mounts.clone())
             .with_network(self.network.map(|mode| NetworkConfig { mode }))
@@ -195,6 +198,8 @@ fn parse_network_mode(input: &str) -> Result<NetworkMode, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::{BentoCtlCmd, Command};
+    use clap::Parser;
     use tempfile::TempDir;
 
     #[test]
@@ -238,6 +243,20 @@ mod tests {
     #[test]
     fn parse_network_mode_rejects_invalid_value() {
         assert!(parse_network_mode("default").is_err());
+    }
+
+    #[test]
+    fn create_command_parses_nested_virtualization_flag() {
+        let cmd =
+            BentoCtlCmd::try_parse_from(["bentoctl", "new", "dev", "--nested-virtualization"])
+                .expect("create command should parse");
+
+        let create = match cmd.cmd {
+            Command::New(cmd) => cmd,
+            other => panic!("expected create command, got {other:?}"),
+        };
+
+        assert!(create.nested_virtualization);
     }
 
     #[test]

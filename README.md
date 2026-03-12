@@ -62,6 +62,14 @@ Create a VM from an image:
 bentoctl create dev --image <name-or-oci-ref>
 ```
 
+Enable nested virtualization for supported macOS VZ hosts:
+
+```bash
+bentoctl create dev --image <name-or-oci-ref> --nested-virtualization
+```
+
+This is currently VZ-only and still depends on host macOS and hardware support.
+
 Start it:
 
 ```bash
