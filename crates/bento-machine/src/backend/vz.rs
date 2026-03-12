@@ -20,9 +20,10 @@ use objc2_virtualization::{
 };
 
 use crate::backend::MachineBackend;
+use crate::stream::{RawSerialConnection, RawVsockConnection};
 use crate::types::{
     MachineConfig, MachineError, MachineExitEvent, MachineExitReceiver, MachineId, MachineKind,
-    MachineState, NetworkMode, OpenDeviceRequest, OpenDeviceResponse, ResolvedMachineSpec,
+    MachineState, NetworkMode, ResolvedMachineSpec,
 };
 use tokio::sync::oneshot;
 
@@ -114,27 +115,30 @@ impl MachineBackend for VzMachineBackend {
         Ok(())
     }
 
-    fn open_device(&self, request: OpenDeviceRequest) -> Result<OpenDeviceResponse, MachineError> {
+    fn open_vsock(&self, port: u32) -> Result<RawVsockConnection, MachineError> {
         let vm = self.vm.as_ref().ok_or_else(|| {
             MachineError::Backend(format!(
-                "cannot open device because machine {:?} is not running",
+                "cannot open vsock stream because machine {:?} is not running",
                 self.spec.id.as_str()
             ))
         })?;
 
-        match request {
-            OpenDeviceRequest::Vsock { port } => vm
-                .open_vsock_stream(port)
-                .map(|stream| OpenDeviceResponse::Vsock { stream })
-                .map_err(MachineError::from),
-            OpenDeviceRequest::Serial => vm
-                .open_serial_fds()
-                .map(|(guest_input, guest_output)| OpenDeviceResponse::Serial {
-                    guest_input,
-                    guest_output,
-                })
-                .map_err(MachineError::from),
-        }
+        vm.open_vsock_stream(port)
+            .map(RawVsockConnection::File)
+            .map_err(MachineError::from)
+    }
+
+    fn open_serial(&self) -> Result<RawSerialConnection, MachineError> {
+        let vm = self.vm.as_ref().ok_or_else(|| {
+            MachineError::Backend(format!(
+                "cannot open serial stream because machine {:?} is not running",
+                self.spec.id.as_str()
+            ))
+        })?;
+
+        vm.open_serial_files()
+            .map_err(MachineError::from)
+            .map(|(read, write)| RawSerialConnection { read, write })
     }
 }
 

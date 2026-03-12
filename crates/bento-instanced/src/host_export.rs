@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use bento_machine::{MachineHandle, OpenDeviceRequest, OpenDeviceResponse};
+use bento_machine::MachineHandle;
 use eyre::Context;
 use tokio::net::UnixListener;
 
@@ -37,12 +37,9 @@ pub(crate) fn listen_host_service(
                 match ServiceRegistry::discover(&machine).await {
                     Ok(registry) => match registry.resolve(&service) {
                         Some(ServiceTarget::VsockPort(port)) => {
-                            match machine.open_device(OpenDeviceRequest::Vsock { port }).await {
-                                Ok(OpenDeviceResponse::Vsock { stream: vsock_fd }) => {
-                                    spawn_tunnel(stream, vsock_fd);
-                                }
-                                Ok(_) => {
-                                    tracing::warn!(service = %service, "unexpected device type for host export");
+                            match machine.open_vsock(port).await {
+                                Ok(vsock_stream) => {
+                                    spawn_tunnel(stream, vsock_stream);
                                 }
                                 Err(err) => {
                                     tracing::warn!(error = %err, service = %service, "open vsock for host export failed");

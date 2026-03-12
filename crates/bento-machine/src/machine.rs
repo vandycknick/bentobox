@@ -2,10 +2,8 @@ use std::sync::Arc;
 
 use crate::backend;
 use crate::registry::{self, MachineWorker};
-use crate::types::{
-    MachineError, MachineExitReceiver, MachineId, MachineSpec, MachineState, OpenDeviceRequest,
-    OpenDeviceResponse,
-};
+use crate::stream::{SerialStream, VsockStream};
+use crate::types::{MachineError, MachineExitReceiver, MachineId, MachineSpec, MachineState};
 
 pub struct Machine;
 
@@ -75,12 +73,16 @@ impl MachineHandle {
         self.inner.stop().await
     }
 
-    pub async fn open_device(
-        &self,
-        request: OpenDeviceRequest,
-    ) -> Result<OpenDeviceResponse, MachineError> {
+    pub async fn open_vsock(&self, port: u32) -> Result<VsockStream, MachineError> {
         self.ensure_active()?;
-        self.inner.open_device(request).await
+        let raw = self.inner.open_vsock(port).await?;
+        VsockStream::from_raw(raw).map_err(MachineError::from)
+    }
+
+    pub async fn open_serial(&self) -> Result<SerialStream, MachineError> {
+        self.ensure_active()?;
+        let raw = self.inner.open_serial().await?;
+        SerialStream::from_raw(raw).map_err(MachineError::from)
     }
 
     fn ensure_active(&self) -> Result<(), MachineError> {

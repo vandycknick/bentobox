@@ -1,13 +1,11 @@
+use bento_machine::VsockStream;
 use std::io;
-use std::os::fd::OwnedFd;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
-use crate::async_fd::AsyncFdStream;
-
-pub fn spawn_tunnel(stream: UnixStream, vsock_fd: OwnedFd) {
+pub fn spawn_tunnel(stream: UnixStream, vsock_stream: VsockStream) {
     tokio::spawn(async move {
-        if let Err(err) = proxy_streams(stream, vsock_fd).await {
+        if let Err(err) = proxy_streams(stream, vsock_stream).await {
             if is_expected_disconnect(&err) {
                 tracing::debug!(error = %err, "vsock relay closed");
             } else {
@@ -17,8 +15,10 @@ pub fn spawn_tunnel(stream: UnixStream, vsock_fd: OwnedFd) {
     });
 }
 
-async fn proxy_streams(mut client_stream: UnixStream, vsock_fd: OwnedFd) -> std::io::Result<()> {
-    let mut vsock_stream = AsyncFdStream::new(std::fs::File::from(vsock_fd))?;
+async fn proxy_streams(
+    mut client_stream: UnixStream,
+    mut vsock_stream: VsockStream,
+) -> std::io::Result<()> {
     match tokio::io::copy_bidirectional(&mut client_stream, &mut vsock_stream).await {
         Ok(_) => {}
         Err(err) if is_expected_disconnect(&err) => return Ok(()),
@@ -50,6 +50,7 @@ mod tests {
     use std::os::unix::net::UnixStream as StdUnixStream;
     use std::time::Duration;
 
+    use bento_machine::VsockStream;
     use tokio::net::UnixStream;
 
     use crate::tunnel::proxy_streams;
@@ -64,8 +65,10 @@ mod tests {
             .set_nonblocking(true)
             .expect("guest stream should be nonblocking");
 
-        let vsock_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(vsock_stream.into_raw_fd()) };
-        let tunnel = tokio::spawn(async move { proxy_streams(client_stream, vsock_fd).await });
+        let vsock_file = unsafe { std::fs::File::from_raw_fd(vsock_stream.into_raw_fd()) };
+        let vsock_stream =
+            VsockStream::from_file(vsock_file).expect("vsock stream should wrap std unix stream");
+        let tunnel = tokio::spawn(async move { proxy_streams(client_stream, vsock_stream).await });
 
         drop(peer_stream);
         drop(guest_stream);

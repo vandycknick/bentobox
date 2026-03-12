@@ -226,7 +226,7 @@ impl VirtualMachine {
             .map_err(|_| VirtualMachineError::completion_channel_closed("stop"))?
     }
 
-    pub fn open_vsock_stream(&self, port: u32) -> Result<OwnedFd, VirtualMachineError> {
+    pub fn open_vsock_stream(&self, port: u32) -> Result<std::fs::File, VirtualMachineError> {
         let machine = self.machine.clone();
         let (sender, receiver) = sync_channel(0);
 
@@ -266,7 +266,7 @@ impl VirtualMachine {
 
                         let file_descriptor = connection.fileDescriptor();
                         let borrowed = BorrowedFd::borrow_raw(file_descriptor);
-                        let result = dup(borrowed).map_err(|err| {
+                        let result = dup(borrowed).map(std::fs::File::from).map_err(|err| {
                             virtual_machine_error(&format!(
                                 "duplicate vsock file descriptor: {err}"
                             ))
@@ -283,14 +283,18 @@ impl VirtualMachine {
             .map_err(|_| VirtualMachineError::completion_channel_closed("open_vsock_stream"))?
     }
 
-    pub fn open_serial_fds(&self) -> Result<(OwnedFd, OwnedFd), VirtualMachineError> {
-        let input = dup(&*self.serial_guest_input).map_err(|err| {
-            virtual_machine_error(&format!("duplicate serial guest input fd: {err}"))
-        })?;
-        let output = dup(&*self.serial_guest_output).map_err(|err| {
-            virtual_machine_error(&format!("duplicate serial guest output fd: {err}"))
-        })?;
-        Ok((input, output))
+    pub fn open_serial_files(&self) -> Result<(std::fs::File, std::fs::File), VirtualMachineError> {
+        let input = dup(&*self.serial_guest_input)
+            .map(std::fs::File::from)
+            .map_err(|err| {
+                virtual_machine_error(&format!("duplicate serial guest input fd: {err}"))
+            })?;
+        let output = dup(&*self.serial_guest_output)
+            .map(std::fs::File::from)
+            .map_err(|err| {
+                virtual_machine_error(&format!("duplicate serial guest output fd: {err}"))
+            })?;
+        Ok((output, input))
     }
 
     pub fn state(&self) -> VirtualMachineState {

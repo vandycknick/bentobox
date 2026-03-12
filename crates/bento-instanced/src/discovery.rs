@@ -3,7 +3,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_machine::{MachineHandle, OpenDeviceRequest, OpenDeviceResponse};
+use bento_machine::MachineHandle;
 use bento_protocol::guest::v1::guest_discovery_service_client::GuestDiscoveryServiceClient;
 use bento_protocol::guest::v1::{
     ExtensionStatus, HealthRequest, ListExtensionsRequest, ListServicesRequest, ServiceStatus,
@@ -16,8 +16,6 @@ use hyper_util::rt::TokioIo;
 use tokio::sync::Mutex;
 use tonic::transport::Endpoint;
 use tower::service_fn;
-
-use crate::async_fd::AsyncFdStream;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ServiceTarget {
@@ -101,20 +99,7 @@ pub(crate) async fn request_guest_shutdown(
 async fn connect_guest_client(
     machine: &MachineHandle,
 ) -> eyre::Result<GuestDiscoveryServiceClient<tonic::transport::Channel>> {
-    let vsock_fd = match machine
-        .open_device(OpenDeviceRequest::Vsock {
-            port: DEFAULT_DISCOVERY_PORT,
-        })
-        .await?
-    {
-        OpenDeviceResponse::Vsock { stream } => stream,
-        OpenDeviceResponse::Serial { .. } => {
-            eyre::bail!("driver returned serial device when opening guest discovery port")
-        }
-    };
-
-    let stream = AsyncFdStream::new(std::fs::File::from(vsock_fd))
-        .context("wrap discovery stream in async fd")?;
+    let stream = machine.open_vsock(DEFAULT_DISCOVERY_PORT).await?;
     let stream_slot = Arc::new(Mutex::new(Some(stream)));
     let connector = service_fn(move |_| {
         let stream_slot = Arc::clone(&stream_slot);

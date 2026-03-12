@@ -1,7 +1,8 @@
 use crate::backend::MachineBackend;
+use crate::stream::{RawSerialConnection, RawVsockConnection};
 use crate::types::{
     MachineError, MachineExitEvent, MachineExitReceiver, MachineKind, MachineState,
-    OpenDeviceRequest, OpenDeviceResponse, ResolvedMachineSpec,
+    ResolvedMachineSpec,
 };
 use std::sync::Mutex;
 use tokio::sync::oneshot;
@@ -67,10 +68,17 @@ impl MachineBackend for FirecrackerMachineBackend {
         Ok(())
     }
 
-    fn open_device(&self, _request: OpenDeviceRequest) -> Result<OpenDeviceResponse, MachineError> {
+    fn open_vsock(&self, _port: u32) -> Result<RawVsockConnection, MachineError> {
         Err(MachineError::Unimplemented {
             kind: MachineKind::Firecracker,
-            operation: "open_device",
+            operation: "open_vsock",
+        })
+    }
+
+    fn open_serial(&self) -> Result<RawSerialConnection, MachineError> {
+        Err(MachineError::Unimplemented {
+            kind: MachineKind::Firecracker,
+            operation: "open_serial",
         })
     }
 }

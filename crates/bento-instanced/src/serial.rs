@@ -1,15 +1,12 @@
 use std::io;
-use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::sync::Arc;
 
-use bento_machine::{MachineHandle, OpenDeviceRequest, OpenDeviceResponse};
+use bento_machine::{MachineHandle, SerialStream as MachineSerialStream};
 use eyre::Context;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
-
-use crate::async_fd::AsyncFdStream;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SerialAccess {
@@ -59,7 +56,7 @@ impl SerialHub {
 
 #[derive(Debug)]
 struct SerialAttachment {
-    guest_input: AsyncFdStream,
+    guest_input: WriteHalf<MachineSerialStream>,
     reader_task: tokio::task::JoinHandle<()>,
 }
 
@@ -137,7 +134,8 @@ impl SerialConsole {
             return Ok(());
         }
 
-        let (guest_input, guest_output) = self.open_serial_device().await?;
+        let stream = self.open_serial_device().await?;
+        let (guest_output, guest_input) = tokio::io::split(stream);
         let output_tx = self.output_tx.clone();
         let file_sinks = self.file_sinks.clone();
         let reader_task = tokio::spawn(async move {
@@ -145,8 +143,7 @@ impl SerialConsole {
         });
 
         let attachment = SerialAttachment {
-            guest_input: AsyncFdStream::new(std::fs::File::from(guest_input))
-                .context("wrap serial input fd")?,
+            guest_input,
             reader_task,
         };
 
@@ -154,28 +151,11 @@ impl SerialConsole {
         Ok(())
     }
 
-    async fn open_serial_device(&self) -> eyre::Result<(OwnedFd, AsyncFdStream)> {
-        let device = self
-            .machine
-            .open_device(OpenDeviceRequest::Serial)
+    async fn open_serial_device(&self) -> eyre::Result<MachineSerialStream> {
+        self.machine
+            .open_serial()
             .await
-            .context("open serial device")?;
-
-        let (guest_input, guest_output) = match device {
-            OpenDeviceResponse::Serial {
-                guest_input,
-                guest_output,
-            } => (guest_input, guest_output),
-            OpenDeviceResponse::Vsock { .. } => {
-                eyre::bail!("machine returned unexpected device type when opening serial")
-            }
-        };
-
-        Ok((
-            guest_input,
-            AsyncFdStream::new(std::fs::File::from(guest_output))
-                .context("wrap serial output fd")?,
-        ))
+            .context("open serial device")
     }
 
     async fn write_input(&self, client_id: u64, chunk: &[u8]) -> io::Result<()> {
@@ -229,7 +209,7 @@ impl Drop for SerialConsole {
 }
 
 async fn run_serial_reader(
-    mut guest_output: AsyncFdStream,
+    mut guest_output: ReadHalf<MachineSerialStream>,
     file_sinks: Arc<Mutex<Vec<tokio::fs::File>>>,
     output_tx: broadcast::Sender<Vec<u8>>,
 ) {

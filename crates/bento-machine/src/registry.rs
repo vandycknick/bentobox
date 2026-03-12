@@ -7,9 +7,9 @@ use crossbeam::channel;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::backend::create_backend;
+use crate::stream::{RawSerialConnection, RawVsockConnection};
 use crate::types::{
-    MachineError, MachineExitReceiver, MachineId, MachineState, OpenDeviceRequest,
-    OpenDeviceResponse, ResolvedMachineSpec,
+    MachineError, MachineExitReceiver, MachineId, MachineState, ResolvedMachineSpec,
 };
 
 pub(crate) struct MachineWorker {
@@ -86,16 +86,23 @@ impl MachineWorker {
             .map_err(|_| MachineError::Backend("machine worker dropped reply".to_string()))?
     }
 
-    pub(crate) async fn open_device(
-        &self,
-        request: OpenDeviceRequest,
-    ) -> Result<OpenDeviceResponse, MachineError> {
+    pub(crate) async fn open_vsock(&self, port: u32) -> Result<RawVsockConnection, MachineError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(MachineCommand::OpenDevice {
-                request,
+            .send(MachineCommand::OpenVsock {
+                port,
                 reply: reply_tx,
             })
+            .map_err(|_| MachineError::Backend("machine worker has stopped".to_string()))?;
+        reply_rx
+            .await
+            .map_err(|_| MachineError::Backend("machine worker dropped reply".to_string()))?
+    }
+
+    pub(crate) async fn open_serial(&self) -> Result<RawSerialConnection, MachineError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(MachineCommand::OpenSerial { reply: reply_tx })
             .map_err(|_| MachineError::Backend("machine worker has stopped".to_string()))?;
         reply_rx
             .await
@@ -113,9 +120,12 @@ enum MachineCommand {
     Stop {
         reply: oneshot::Sender<Result<(), MachineError>>,
     },
-    OpenDevice {
-        request: OpenDeviceRequest,
-        reply: oneshot::Sender<Result<OpenDeviceResponse, MachineError>>,
+    OpenVsock {
+        port: u32,
+        reply: oneshot::Sender<Result<RawVsockConnection, MachineError>>,
+    },
+    OpenSerial {
+        reply: oneshot::Sender<Result<RawSerialConnection, MachineError>>,
     },
 }
 
@@ -190,8 +200,11 @@ fn spawn_machine_worker(
                                 let _ = reply.send(result);
                                 break;
                             }
-                            MachineCommand::OpenDevice { request, reply } => {
-                                let _ = reply.send(backend.open_device(request));
+                            MachineCommand::OpenVsock { port, reply } => {
+                                let _ = reply.send(backend.open_vsock(port));
+                            }
+                            MachineCommand::OpenSerial { reply } => {
+                                let _ = reply.send(backend.open_serial());
                             }
                         }
                     }

@@ -1,4 +1,3 @@
-use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -132,23 +131,6 @@ pub struct MachineExitEvent {
 }
 
 pub type MachineExitReceiver = oneshot::Receiver<MachineExitEvent>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenDeviceRequest {
-    Vsock { port: u32 },
-    Serial,
-}
-
-#[derive(Debug)]
-pub enum OpenDeviceResponse {
-    Vsock {
-        stream: OwnedFd,
-    },
-    Serial {
-        guest_input: OwnedFd,
-        guest_output: OwnedFd,
-    },
-}
 
 #[derive(Debug, Error)]
 pub enum MachineError {

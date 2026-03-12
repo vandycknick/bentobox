@@ -3,7 +3,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_machine::{MachineHandle, OpenDeviceRequest, OpenDeviceResponse};
+use bento_machine::MachineHandle;
 use bento_protocol::guest::v1::guest_discovery_service_client::GuestDiscoveryServiceClient;
 use bento_protocol::guest::v1::{PortForwardEvent, PortForwardEventType, WatchPortForwardsRequest};
 use bento_protocol::instance::v1::PortForwardStatus;
@@ -16,7 +16,6 @@ use tokio::sync::{oneshot, Mutex};
 use tonic::transport::Endpoint;
 use tower::service_fn;
 
-use crate::async_fd::AsyncFdStream;
 use crate::state::{Action, InstanceStore};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -266,20 +265,7 @@ fn publish_status_snapshot(statuses: &BTreeMap<u32, PortForwardStatus>, store: &
 async fn connect_guest_client(
     machine: &MachineHandle,
 ) -> eyre::Result<GuestDiscoveryServiceClient<tonic::transport::Channel>> {
-    let vsock_fd = match machine
-        .open_device(OpenDeviceRequest::Vsock {
-            port: DEFAULT_DISCOVERY_PORT,
-        })
-        .await?
-    {
-        OpenDeviceResponse::Vsock { stream } => stream,
-        OpenDeviceResponse::Serial { .. } => {
-            eyre::bail!("driver returned serial device when opening guest discovery port")
-        }
-    };
-
-    let stream = AsyncFdStream::new(std::fs::File::from(vsock_fd))
-        .context("wrap discovery stream in async fd")?;
+    let stream = machine.open_vsock(DEFAULT_DISCOVERY_PORT).await?;
     let stream_slot = Arc::new(Mutex::new(Some(stream)));
     let connector = service_fn(move |_| {
         let stream_slot = Arc::clone(&stream_slot);
@@ -310,20 +296,10 @@ async fn handle_host_connection(
     mut host_stream: TcpStream,
     vsock_port: u32,
 ) -> io::Result<()> {
-    let vsock_fd = match machine
-        .open_device(OpenDeviceRequest::Vsock { port: vsock_port })
+    let mut vsock_stream = machine
+        .open_vsock(vsock_port)
         .await
-        .map_err(|err| io::Error::other(err.to_string()))?
-    {
-        OpenDeviceResponse::Vsock { stream } => stream,
-        OpenDeviceResponse::Serial { .. } => {
-            return Err(io::Error::other(
-                "driver returned serial device for port-forward vsock",
-            ));
-        }
-    };
-
-    let mut vsock_stream = AsyncFdStream::new(std::fs::File::from(vsock_fd))?;
+        .map_err(|err| io::Error::other(err.to_string()))?;
     let _ = copy_bidirectional(&mut host_stream, &mut vsock_stream).await?;
     Ok(())
 }

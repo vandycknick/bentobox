@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_machine::{MachineHandle, OpenDeviceRequest, OpenDeviceResponse};
+use bento_machine::MachineHandle;
 use bento_runtime::negotiate::{
     Accept, Negotiate, ProxyMode, Reject, RejectCode, Response, Upgrade, NEGOTIATE_PROTOCOL_VERSION,
 };
@@ -11,8 +11,8 @@ use eyre::Context;
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::discovery::{ServiceRegistry, ServiceTarget};
-use crate::instance_control_service;
 use crate::serial::{spawn_serial_tunnel, SerialAccess, SerialConsole};
+use crate::services;
 use crate::state::InstanceStore;
 use crate::tunnel::spawn_tunnel;
 
@@ -123,40 +123,24 @@ impl InstanceServer {
                 };
 
                 match target {
-                    ServiceTarget::VsockPort(port) => {
-                        match self
-                            .machine
-                            .open_device(OpenDeviceRequest::Vsock { port })
-                            .await
-                        {
-                            Ok(OpenDeviceResponse::Vsock { stream: vsock_fd }) => {
-                                accept(&mut stream, request.request_id, None).await?;
-                                spawn_tunnel(stream, vsock_fd);
-                                Ok(())
-                            }
-                            Ok(_) => {
-                                reject(
-                                    &mut stream,
-                                    request.request_id,
-                                    RejectCode::Internal,
-                                    "driver returned unexpected device type for proxy service",
-                                    None,
-                                )
-                                .await
-                            }
-                            Err(err) => {
-                                tracing::info!(error = %err, service = %service, "proxy service still starting");
-                                reject(
-                                    &mut stream,
-                                    request.request_id,
-                                    RejectCode::ServiceStarting,
-                                    "service is starting",
-                                    Some(RETRY_AFTER_STARTING_MS),
-                                )
-                                .await
-                            }
+                    ServiceTarget::VsockPort(port) => match self.machine.open_vsock(port).await {
+                        Ok(vsock_stream) => {
+                            accept(&mut stream, request.request_id, None).await?;
+                            spawn_tunnel(stream, vsock_stream);
+                            Ok(())
                         }
-                    }
+                        Err(err) => {
+                            tracing::info!(error = %err, service = %service, "proxy service still starting");
+                            reject(
+                                &mut stream,
+                                request.request_id,
+                                RejectCode::ServiceStarting,
+                                "service is starting",
+                                Some(RETRY_AFTER_STARTING_MS),
+                            )
+                            .await
+                        }
+                    },
                     ServiceTarget::Serial => {
                         let access = match mode {
                             ProxyMode::ReadOnly => SerialAccess::Watch,
@@ -172,7 +156,7 @@ impl InstanceServer {
             }
             Upgrade::InstanceControl { .. } => {
                 accept(&mut stream, request.request_id, None).await?;
-                instance_control_service::serve(stream, self.store.clone()).await
+                services::serve(stream, self.store.clone()).await
             }
         }
     }
