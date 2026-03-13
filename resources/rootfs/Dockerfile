@@ -45,6 +45,6 @@ RUN useradd --create-home --shell /bin/bash --groups sudo --comment "Default Ubu
 
 WORKDIR /builder
 
-COPY ./boxos/rootfs /tools
+COPY ./resources/rootfs /tools
 
 ENTRYPOINT [ "/tools/build.sh" ]

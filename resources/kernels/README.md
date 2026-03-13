@@ -1,3 +1,25 @@
+# Kernel Resources
+
+This directory owns the guest kernel build inputs for Bento.
+
+## Supported tracks
+
+- `stable`: `6.19.7`
+- `longterm`: `6.18.17`
+- `longterm5`: `5.15.202`
+
+Build with:
+
+```bash
+make kernel TRACK=stable ARCH=arm64
+make kernel TRACK=longterm ARCH=arm64
+make kernel TRACK=longterm5 ARCH=arm64
+```
+
+Artifacts land under `target/resources/kernels/` in versioned source, build, and output directories.
+
+The canonical arm64 config baseline lives at `resources/kernels/configs/arm64-base.config`. The `manifest.toml` file records the current manually pinned track versions.
+
 # Kernel config changes from the VM bring-up session
 
 This file tracks kernel-side config changes identified while debugging package updates, DNS/TLS time issues, and VM boot behavior.

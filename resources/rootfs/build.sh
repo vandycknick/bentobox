@@ -1,6 +1,6 @@
 #! /usr/bin/env bash
 
-BUILDER_OBJ=/boxos
+BUILDER_OBJ=/resources
 ROOTFS_STAGE=/tmp/rootfs-stage
 IMG="$BUILDER_OBJ/$DISTRO.img"
 
@@ -22,7 +22,7 @@ EOF
 truncate -s 800M "$IMG"
 mkfs.ext4 -F -d "$ROOTFS_STAGE" "$IMG"
 
-# BUILDER_OBJ=/boxos
+# BUILDER_OBJ=/resources
 # ROOTFS_MNT=/rootfs
 #
 # [[ -e "$BUILDER_OBJ/$DISTRO.img" ]] && rm "$BUILDER_OBJ/$DISTRO.img"

@@ -16,7 +16,7 @@ RUN dnf install -y epel-release && \
         dwarves \
         perl-Pod-Html
 
-WORKDIR /boxos
-COPY ./boxos .
+WORKDIR /resources
+COPY ./resources .
 
 ENTRYPOINT ["make"]
