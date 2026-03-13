@@ -8,6 +8,7 @@ use crate::daemon_control::InstancedLauncher;
 
 pub mod create;
 pub mod delete;
+pub mod exec;
 pub mod images;
 pub mod instanced;
 pub mod list;
@@ -39,6 +40,7 @@ pub enum Command {
     Start(start::Cmd),
     Stop(stop::Cmd),
     Shell(shell::Cmd),
+    Exec(exec::Cmd),
     Delete(delete::Cmd),
     List(list::Cmd),
     Status(status::Cmd),
@@ -57,6 +59,7 @@ impl Display for Command {
             Command::Start(cmd) => write!(f, "start {}", cmd),
             Command::Stop(cmd) => write!(f, "stop {}", cmd),
             Command::Shell(cmd) => write!(f, "shell {}", cmd),
+            Command::Exec(cmd) => write!(f, "exec {}", cmd),
             Command::Delete(cmd) => write!(f, "delete {}", cmd),
             Command::List(_) => write!(f, "list"),
             Command::Status(cmd) => write!(f, "status {}", cmd),
@@ -92,6 +95,10 @@ impl BentoCtlCmd {
                 cmd.run(&store).await
             }
             Command::Shell(cmd) => {
+                let store = instance_store();
+                cmd.run(&store).await
+            }
+            Command::Exec(cmd) => {
                 let store = instance_store();
                 cmd.run(&store).await
             }

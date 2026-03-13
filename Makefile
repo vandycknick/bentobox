@@ -3,16 +3,6 @@ GUEST_BIN := $(CURDIR)/target/$(GUEST_TARGET)/release/bento-guestd
 BENTO_CONFIG := $(HOME)/.config/bento/config.yaml
 ARCH ?= arm64
 
-ifeq ($(origin KERNEL_VERSION), undefined)
-ifeq ($(TRACK),stable)
-KERNEL_VERSION := 6.19.7
-else ifeq ($(TRACK),longterm)
-KERNEL_VERSION := 6.18.17
-else ifeq ($(TRACK),longterm5)
-KERNEL_VERSION := 5.15.202
-endif
-endif
-
 .PHONY: build-guest-agent
 build-guest-agent:
 	cargo zigbuild -p bento-guestd --target $(GUEST_TARGET) --release
@@ -22,19 +12,9 @@ build-guest-agent:
 
 
 .PHONY: kernel
-kernel: .tmp/resources-builder
+kernel:
 	@test -n "$(TRACK)" || (echo "TRACK is required, use TRACK=stable|longterm|longterm5" && exit 1)
-	@test -n "$(KERNEL_VERSION)" || (echo "unsupported TRACK '$(TRACK)'" && exit 1)
-	@mkdir -p ./target/resources
-	@docker run -it \
-		-e KERNEL_VERSION=$(KERNEL_VERSION) \
-		-e KERNEL_ROOT=/target/resources/kernels/src/linux-$(KERNEL_VERSION) \
-		-e TRACK=$(TRACK) \
-		-e ARCH=$(ARCH) \
-		-v $(shell pwd)/resources:/resources \
-		-v $(shell pwd)/target:/target \
-		resources-builder \
-		-C /resources/kernels kernel
+	@$(MAKE) -C resources/kernels kernel TRACK=$(TRACK) ARCH=$(ARCH)
 
 .PHONY: initramfs
 initramfs: .tmp/resources-builder .tmp/busybox
@@ -44,7 +24,7 @@ initramfs: .tmp/resources-builder .tmp/busybox
 		-v $(shell pwd)/target:/target \
 		-v $(shell pwd)/.tmp:/bins \
 		resources-builder \
-		-C /resources/kernels initramfs
+		-C /resources/kernels initramfs TARGET_ROOT=/target/resources RESOURCE_ROOT=/resources
 
 .PHONY: rootfs
 rootfs:

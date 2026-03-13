@@ -82,6 +82,12 @@ Open a shell:
 bentoctl shell dev
 ```
 
+Run a single command over SSH, while best-effort `cd`-ing into your current host working directory first:
+
+```bash
+bentoctl exec dev -- pwd
+```
+
 Stop it:
 
 ```bash

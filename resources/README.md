@@ -7,4 +7,4 @@ This directory holds guest OS build inputs and related assets.
 - `resources/rootfs/` contains full root filesystem build inputs
 - `resources/busybox/` contains the busybox build used by the initramfs flow
 
-Generated outputs are written to `target/resources/`.
+Most generated outputs are written to `target/resources/`, while VM-built kernel artifacts are exported to `target/kernels/`.

@@ -1,15 +1,10 @@
-use std::fmt::{Display, Formatter};
-use std::io;
-use std::os::unix::process::CommandExt;
-use std::process::Command;
-
 use bento_runtime::extensions::BuiltinExtension;
 use bento_runtime::instance::{InstanceFile, InstanceStatus};
 use bento_runtime::instance_store::{InstanceError, InstanceStore};
-use bento_runtime::{host_user, ssh_keys};
 use clap::{Args, ValueEnum};
-use eyre::{bail, Context};
+use std::fmt::{Display, Formatter};
 
+use crate::ssh;
 use crate::terminal;
 
 #[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
@@ -71,7 +66,7 @@ impl Cmd {
                 return terminal::attach_serial(&socket_path.to_string_lossy()).await;
             }
             Some(AttachMode::Ssh) => {
-                return exec_ssh_command(&self.name, self.user.as_deref());
+                return ssh::exec_remote_shell(&self.name, self.user.as_deref());
             }
             None => {}
         }
@@ -85,74 +80,6 @@ impl Cmd {
             return terminal::attach_serial(&socket_path.to_string_lossy()).await;
         }
 
-        exec_ssh_command(&self.name, self.user.as_deref())
+        ssh::exec_remote_shell(&self.name, self.user.as_deref())
     }
-}
-
-fn exec_ssh_command(name: &str, user: Option<&str>) -> eyre::Result<()> {
-    let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
-
-    let proxy_command = format!(
-        "{} shell-proxy --name {} --service ssh",
-        shell_quote(&exe.to_string_lossy()),
-        shell_quote(name)
-    );
-    let host_user = host_user::current_host_user().context("resolve current host user")?;
-    let ssh_user = user.unwrap_or(host_user.name.as_str());
-    let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure bento SSH keys")?;
-
-    let mut command = Command::new("ssh");
-    // Do not read ~/.ssh/config or custom host stanzas. Keeps behaviour deterministic.
-    let err = command
-        .arg("-F")
-        .arg("/dev/null")
-        // Auth + identity
-        .arg("-o")
-        .arg(format!(
-            "IdentityFile={}",
-            user_keys.private_key_path.to_string_lossy()
-        ))
-        .arg("-o")
-        .arg("PreferredAuthentications=publickey") // Try key auth first/only preferred method.
-        .arg("-o")
-        .arg("BatchMode=yes") // Noninteractive mode, do not prompt for passwords/passphrases.
-        .arg("-o")
-        .arg("IdentitiesOnly=yes") // Only use the specified identity file, do not spray all agent keys.
-        .arg("-o")
-        .arg("GSSAPIAuthentication=no") //Disable Kerberos/GSSAPI attempts, avoids slow or noisy fallback paths.
-        // ProxyCommand
-        .arg("-o")
-        .arg(format!("ProxyCommand={proxy_command}"))
-        .arg("-o")
-        .arg(format!("HostKeyAlias=bento/{}", name))
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        // Transport tuning
-        .arg("-o")
-        .arg("Compression=no") // Disable SSH compression (often faster locally)
-        .arg("-o")
-        .arg("Ciphers=\"^aes128-gcm@openssh.com,aes256-gcm@openssh.com\"") //Prefer AES-GCM ciphers first (the ^ means prepend preference order).
-        .arg("-o")
-        .arg("LogLevel=ERROR") // Suppress normal SSH chatter, only show real errors.
-        // TTY + env
-        .arg("-t")
-        .arg("-o")
-        .arg("SendEnv=COLORTERM")
-        // Remote endpoint and identity
-        .arg("-o")
-        .arg(format!("User={ssh_user}"))
-        .arg(name)
-        .exec();
-
-    if err.kind() == io::ErrorKind::NotFound {
-        bail!("`ssh` command not found. install OpenSSH client and retry")
-    }
-
-    bail!("failed to execute ssh: {err}")
-}
-
-fn shell_quote(input: &str) -> String {
-    format!("'{}'", input.replace('\'', "'\"'\"'"))
 }

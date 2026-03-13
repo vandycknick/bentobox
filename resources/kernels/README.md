@@ -11,14 +11,16 @@ This directory owns the guest kernel build inputs for Bento.
 Build with:
 
 ```bash
-make kernel TRACK=stable ARCH=arm64
-make kernel TRACK=longterm ARCH=arm64
-make kernel TRACK=longterm5 ARCH=arm64
+bentoctl exec arch -- make kernel TRACK=stable ARCH=arm64
+bentoctl exec arch -- make kernel TRACK=longterm ARCH=arm64
+bentoctl exec arch -- make kernel TRACK=longterm5 ARCH=arm64
 ```
 
-Artifacts land under `target/resources/kernels/` in versioned source, build, and output directories.
+Kernel source, build, and cache state live inside the guest under `$HOME/.cache/bento/kernels/`.
 
-The canonical arm64 config baseline lives at `resources/kernels/configs/arm64-base.config`. The `manifest.toml` file records the current manually pinned track versions.
+Final exported artifacts land in the mounted repo under `target/kernels/<track>-<arch>-<version>/`.
+
+The canonical arm64 config baseline lives at `resources/kernels/configs/arm64-base.config`. Track-specific config drift lives in `resources/kernels/configs/overlays/<track>.config`, which gets appended before `olddefconfig` runs. The `manifest.toml` file records the current manually pinned track versions.
 
 # Kernel config changes from the VM bring-up session
 
@@ -271,6 +273,7 @@ This file tracks kernel-side config changes identified while debugging package u
   - `CONFIG_NETFILTER=y`
   - `CONFIG_NF_CONNTRACK=y`
   - `CONFIG_NETFILTER_XTABLES=y`
+  - `CONFIG_NETFILTER_XTABLES_LEGACY=y`
   - `CONFIG_NETFILTER_XTABLES_COMPAT=y`
   - `CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y`
   - `CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y`
@@ -299,6 +302,7 @@ This file tracks kernel-side config changes identified while debugging package u
 
 - Namespace isolation, cgroup accounting, and seccomp filtering for ordinary container startup.
 - Legacy IPv4 and IPv6 `iptables` table support used by current rootful Docker startup paths, including the `raw` table.
+- The legacy xtables kernel path required by current `iptables-legacy` and `ip6tables-legacy` userspace on newer kernels.
 - Connection-tracking matches used by Docker bridge firewall rules such as `-m conntrack --ctstate RELATED,ESTABLISHED`.
 - Compatibility support for `iptables-legacy` and `ip6tables-legacy` userspace against the kernel xtables path.
 - Docker bridge networking, including `docker0` and veth peer creation for containers.
@@ -311,6 +315,7 @@ This file tracks kernel-side config changes identified while debugging package u
   - `iptables ... can't initialize iptables table 'raw': Table does not exist`
   - `ip6tables ... can't initialize ip6tables table 'nat'` or `filter`
   - `Extension conntrack revision 0 not supported, missing kernel module?`
+- Prevents `olddefconfig` on newer kernels from silently dropping legacy `IP*_NF_*` and `IP6*_NF_*` table support when `CONFIG_NETFILTER_XTABLES_LEGACY=y` is missing.
 - Lets Docker create the `DOCKER` NAT chain and MASQUERADE rules when using `iptables-legacy`.
 - Lets Docker install direct access filtering rules in `raw/PREROUTING`, which it uses to drop non-bridge traffic headed at container addresses.
 - Lets Docker install IPv6 chains when ip6tables support is enabled in userspace.
@@ -320,5 +325,7 @@ This file tracks kernel-side config changes identified while debugging package u
 
 - This repo's arm guest kernel profile currently disables modules, so these options must be built in, not left as modules.
 - `CONFIG_NF_TABLES=y` alone is not enough for the current Docker setup, because the guest userspace is using `iptables-legacy` rather than an nft-only path.
+- On newer kernels, `CONFIG_NETFILTER_XTABLES_LEGACY=y` is required alongside the legacy `IP*_NF_*` and `IP6*_NF_*` symbols or Docker can still fail with missing `nat`/`raw` tables.
 - `CONFIG_IP_NF_RAW=y` and `CONFIG_IP6_NF_RAW=y` are easy to miss because Docker often fails later on the first visible `raw` table access rather than during its initial capability checks.
 - `CONFIG_NETFILTER_XTABLES_COMPAT=y` is part of that legacy userspace path, and missing it can surface as conntrack match failures or legacy table initialization failures even when the newer `IP*_NF_*` options are enabled.
+- `CONFIG_NETFILTER_XTABLES_LEGACY` depends on `!PREEMPT_RT` on newer kernels, so a PREEMPT_RT kernel and the current Docker `iptables-legacy` path are not friends.
