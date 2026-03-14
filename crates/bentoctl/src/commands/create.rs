@@ -35,6 +35,11 @@ pub struct Cmd {
     pub image: Option<String>,
     #[arg(long, help = "Enable nested virtualization for supported VZ guests")]
     pub nested_virtualization: bool,
+    #[arg(
+        long,
+        help = "Enable Rosetta for x86_64 Linux binaries in supported VZ guests"
+    )]
+    pub rosetta: bool,
     #[arg(long, value_name = "PATH", help = "Path to userdata file")]
     pub userdata: Option<PathBuf>,
     #[arg(
@@ -96,8 +101,9 @@ impl Cmd {
             }
         }
 
-        let bootstrap = (userdata_path.is_some() || extensions.requires_bootstrap())
-            .then(BootstrapConfig::cidata_cloud_init);
+        let bootstrap =
+            (userdata_path.is_some() || extensions.requires_bootstrap() || self.rosetta)
+                .then(BootstrapConfig::cidata_cloud_init);
 
         if bootstrap.is_some() && !image_features.supports_bootstrap() {
             eyre::bail!(
@@ -111,6 +117,7 @@ impl Cmd {
             .with_kernel(kernel_path)
             .with_initramfs(initramfs_path)
             .with_nested_virtualization(self.nested_virtualization)
+            .with_rosetta(self.rosetta)
             .with_disks(disk_paths)
             .with_mounts(self.mounts.clone())
             .with_network(self.network.map(|mode| NetworkConfig { mode }))
@@ -257,6 +264,19 @@ mod tests {
         };
 
         assert!(create.nested_virtualization);
+    }
+
+    #[test]
+    fn create_command_parses_rosetta_flag() {
+        let cmd = BentoCtlCmd::try_parse_from(["bentoctl", "new", "dev", "--rosetta"])
+            .expect("create command should parse");
+
+        let create = match cmd.cmd {
+            Command::New(cmd) => cmd,
+            other => panic!("expected create command, got {other:?}"),
+        };
+
+        assert!(create.rosetta);
     }
 
     #[test]

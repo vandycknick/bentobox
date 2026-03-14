@@ -81,6 +81,7 @@ fn machine_config_for_instance(inst: &Instance) -> Result<MachineConfig, Machine
         initramfs_path: Some(boot_assets.initramfs),
         machine_identifier_path: Some(inst.file(InstanceFile::AppleMachineIdentifier)),
         nested_virtualization: inst.config.nested_virtualization.unwrap_or(false),
+        rosetta: inst.config.rosetta.unwrap_or(false),
         network: map_network_mode(inst.resolved_network_mode()),
         root_disk,
         data_disks,

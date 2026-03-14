@@ -11,8 +11,8 @@ use objc2_foundation::{NSArray, NSFileHandle, NSString, NSURL};
 use objc2_virtualization::{
     VZDirectorySharingDeviceConfiguration, VZDiskImageStorageDeviceAttachment,
     VZFileHandleSerialPortAttachment, VZGenericPlatformConfiguration, VZLinuxBootLoader,
-    VZNATNetworkDeviceAttachment, VZNetworkDeviceConfiguration, VZSharedDirectory,
-    VZSingleDirectoryShare, VZVirtioBlockDeviceConfiguration,
+    VZLinuxRosettaDirectoryShare, VZNATNetworkDeviceAttachment, VZNetworkDeviceConfiguration,
+    VZSharedDirectory, VZSingleDirectoryShare, VZVirtioBlockDeviceConfiguration,
     VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
     VZVirtioFileSystemDeviceConfiguration, VZVirtioNetworkDeviceConfiguration,
     VZVirtioSocketDeviceConfiguration, VZVirtioTraditionalMemoryBalloonDeviceConfiguration,
@@ -33,6 +33,10 @@ mod utils;
 mod vm;
 
 use vm::{get_machine_identifier, VirtualMachine, VirtualMachineState};
+
+const BENTO_ROSETTA_TAG: &str = "bento-rosetta";
+const ROSETTA_INSTALL_HINT: &str =
+    "Rosetta for Linux VMs is not installed on this host. Install it with: softwareupdate --install-rosetta";
 
 struct SerialHostPipes {
     guest_input: OwnedFd,
@@ -374,6 +378,8 @@ unsafe fn create_vm_config(spec: &ResolvedMachineSpec) -> Result<VmBootstrap, Ma
         platform_config.setNestedVirtualizationEnabled(true);
     }
 
+    validate_rosetta_config(&spec.id, config)?;
+
     machine_config.setPlatform(&platform_config);
 
     let (guest_serial_read, host_serial_write) =
@@ -455,11 +461,11 @@ unsafe fn attach_directory_shares(
     id: &MachineId,
     machine: &MachineConfig,
 ) -> Result<(), MachineError> {
-    if machine.mounts.is_empty() {
+    if machine.mounts.is_empty() && !machine.rosetta {
         return Ok(());
     }
 
-    let mut share_configs = Vec::with_capacity(machine.mounts.len());
+    let mut share_configs = Vec::with_capacity(machine.mounts.len() + usize::from(machine.rosetta));
     for mount in &machine.mounts {
         let metadata =
             std::fs::metadata(&mount.host_path).map_err(|err| MachineError::InvalidConfig {
@@ -496,6 +502,23 @@ unsafe fn attach_directory_shares(
             VZVirtioFileSystemDeviceConfiguration::alloc(),
             &tag,
         );
+        fs.setShare(Some(&share));
+        share_configs.push(fs);
+    }
+
+    if machine.rosetta {
+        let tag = NSString::from_str(BENTO_ROSETTA_TAG);
+        let fs = VZVirtioFileSystemDeviceConfiguration::initWithTag(
+            VZVirtioFileSystemDeviceConfiguration::alloc(),
+            &tag,
+        );
+        let share =
+            VZLinuxRosettaDirectoryShare::initWithError(VZLinuxRosettaDirectoryShare::alloc())
+                .map_err(|err| {
+                    MachineError::Backend(format!(
+                        "failed to initialize Rosetta directory share: {err}"
+                    ))
+                })?;
         fs.setShare(Some(&share));
         share_configs.push(fs);
     }
@@ -600,6 +623,38 @@ fn machine_identifier_path<'a>(
     })
 }
 
+fn validate_rosetta_config(id: &MachineId, config: &MachineConfig) -> Result<(), MachineError> {
+    if !config.rosetta {
+        return Ok(());
+    }
+
+    if !utils::is_apple_silicon() {
+        return Err(MachineError::InvalidConfig {
+            id: id.clone(),
+            reason: "Rosetta for Linux VMs requires an Apple silicon host".to_string(),
+        });
+    }
+
+    if !utils::is_os_version_at_least(13, 0, 0) {
+        return Err(MachineError::InvalidConfig {
+            id: id.clone(),
+            reason: "Rosetta for Linux VMs requires macOS 13 or newer".to_string(),
+        });
+    }
+
+    match utils::vz_rosetta_availability() {
+        utils::RosettaAvailability::Installed => Ok(()),
+        utils::RosettaAvailability::NotInstalled => Err(MachineError::InvalidConfig {
+            id: id.clone(),
+            reason: ROSETTA_INSTALL_HINT.to_string(),
+        }),
+        utils::RosettaAvailability::NotSupported => Err(MachineError::InvalidConfig {
+            id: id.clone(),
+            reason: "Rosetta for Linux VMs is not supported on this host".to_string(),
+        }),
+    }
+}
+
 fn validate_machine_config(spec: &ResolvedMachineSpec) -> Result<(), MachineError> {
     let config = &spec.config;
 
@@ -665,6 +720,8 @@ fn validate_machine_config(spec: &ResolvedMachineSpec) -> Result<(), MachineErro
         }
     }
 
+    validate_rosetta_config(&spec.id, config)?;
+
     match config.network {
         NetworkMode::VzNat | NetworkMode::None => {}
         NetworkMode::Bridged => {
@@ -718,4 +775,82 @@ fn validate_machine_config(spec: &ResolvedMachineSpec) -> Result<(), MachineErro
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ROSETTA_INSTALL_HINT;
+    use crate::backend::vz::utils::RosettaAvailability;
+
+    fn validate_rosetta_request_for_test(
+        rosetta: bool,
+        apple_silicon: bool,
+        macos_13: bool,
+        availability: RosettaAvailability,
+    ) -> Result<(), String> {
+        if !rosetta {
+            return Ok(());
+        }
+
+        if !apple_silicon {
+            return Err("Rosetta for Linux VMs requires an Apple silicon host".to_string());
+        }
+
+        if !macos_13 {
+            return Err("Rosetta for Linux VMs requires macOS 13 or newer".to_string());
+        }
+
+        match availability {
+            RosettaAvailability::Installed => Ok(()),
+            RosettaAvailability::NotInstalled => Err(ROSETTA_INSTALL_HINT.to_string()),
+            RosettaAvailability::NotSupported => {
+                Err("Rosetta for Linux VMs is not supported on this host".to_string())
+            }
+        }
+    }
+
+    #[test]
+    fn rosetta_validation_requires_apple_silicon() {
+        let result =
+            validate_rosetta_request_for_test(true, false, true, RosettaAvailability::Installed);
+
+        assert_eq!(
+            result.expect_err("validation should fail"),
+            "Rosetta for Linux VMs requires an Apple silicon host"
+        );
+    }
+
+    #[test]
+    fn rosetta_validation_requires_macos_13() {
+        let result =
+            validate_rosetta_request_for_test(true, true, false, RosettaAvailability::Installed);
+
+        assert_eq!(
+            result.expect_err("validation should fail"),
+            "Rosetta for Linux VMs requires macOS 13 or newer"
+        );
+    }
+
+    #[test]
+    fn rosetta_validation_prompts_for_install() {
+        let result =
+            validate_rosetta_request_for_test(true, true, true, RosettaAvailability::NotInstalled);
+
+        assert_eq!(
+            result.expect_err("validation should fail"),
+            ROSETTA_INSTALL_HINT
+        );
+    }
+
+    #[test]
+    fn rosetta_validation_accepts_installed_rosetta() {
+        validate_rosetta_request_for_test(true, true, true, RosettaAvailability::Installed)
+            .expect("validation should pass");
+    }
+
+    #[test]
+    fn rosetta_disabled_skips_validation() {
+        validate_rosetta_request_for_test(false, false, false, RosettaAvailability::NotSupported)
+            .expect("validation should pass");
+    }
 }

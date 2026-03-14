@@ -70,6 +70,14 @@ bentoctl create dev --image <name-or-oci-ref> --nested-virtualization
 
 This is currently VZ-only and still depends on host macOS and hardware support.
 
+Enable Rosetta for x86_64 Linux binaries in supported macOS VZ guests:
+
+```bash
+bentoctl create dev --image <name-or-oci-ref> --rosetta
+```
+
+This currently requires Apple silicon, macOS 13 or newer, and Rosetta to already be installed with `softwareupdate --install-rosetta`.
+
 Start it:
 
 ```bash

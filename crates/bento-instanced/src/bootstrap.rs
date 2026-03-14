@@ -19,6 +19,7 @@ const GUEST_AGENT_BOOTSTRAP_SCRIPT: &str = "/var/lib/cloud/scripts/per-boot/00-b
 const GUEST_BOOTSTRAP_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-bootstrap.sh");
 const GUEST_INSTALL_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-install.sh");
 const TASK_REGISTER_GUESTD_CONTENT: &str = include_str!("../scripts/tasks/10-register-guestd.sh");
+const TASK_SETUP_ROSETTA_CONTENT: &str = include_str!("../scripts/tasks/20-setup-rosetta.sh");
 
 #[derive(Debug, Clone)]
 struct CidataEntry {
@@ -90,6 +91,13 @@ fn build_cidata_iso(
             contents: TASK_REGISTER_GUESTD_CONTENT.as_bytes().to_vec(),
         },
     ];
+
+    if inst.config.rosetta.unwrap_or(false) {
+        files.push(CidataEntry {
+            name: "tasks/20-setup-rosetta.sh".to_string(),
+            contents: TASK_SETUP_ROSETTA_CONTENT.as_bytes().to_vec(),
+        });
+    }
 
     if let Some(network_config) = network_config {
         files.push(CidataEntry {
@@ -459,6 +467,14 @@ fn render_config_env(inst: &Instance, state: &GuestDesiredState) -> eyre::Result
     env.push_str(&format!(
         "BENTO_EXT_PORT_FORWARD={}\n",
         if state.extensions.port_forward {
+            "true"
+        } else {
+            "false"
+        }
+    ));
+    env.push_str(&format!(
+        "BENTO_ROSETTA={}\n",
+        if inst.config.rosetta.unwrap_or(false) {
             "true"
         } else {
             "false"

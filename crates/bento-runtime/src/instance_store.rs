@@ -238,6 +238,7 @@ pub struct InstanceCreateOptions {
     pub kernel: Option<PathBuf>,
     pub initramfs: Option<PathBuf>,
     pub nested_virtualization: bool,
+    pub rosetta: bool,
     pub disks: Vec<PathBuf>,
     pub mounts: Vec<MountConfig>,
     pub network: Option<NetworkConfig>,
@@ -254,6 +255,7 @@ impl Default for InstanceCreateOptions {
             kernel: None,
             initramfs: None,
             nested_virtualization: false,
+            rosetta: false,
             disks: Vec::new(),
             mounts: Vec::new(),
             network: None,
@@ -282,6 +284,11 @@ impl InstanceCreateOptions {
 
     pub fn with_nested_virtualization(mut self, enabled: bool) -> Self {
         self.nested_virtualization = enabled;
+        self
+    }
+
+    pub fn with_rosetta(mut self, enabled: bool) -> Self {
+        self.rosetta = enabled;
         self
     }
 
@@ -330,6 +337,7 @@ fn apply_create_options(
     config.kernel_path = options.kernel;
     config.initramfs_path = options.initramfs;
     config.nested_virtualization = Some(options.nested_virtualization);
+    config.rosetta = Some(options.rosetta);
     config.disks = options
         .disks
         .iter()
@@ -435,24 +443,6 @@ fn is_tilde_mount_path(path: &Path) -> Result<bool, InstanceError> {
     Ok(false)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn apply_create_options_persists_nested_virtualization() {
-        let mut config = InstanceConfig::new();
-
-        apply_create_options(
-            &mut config,
-            InstanceCreateOptions::default().with_nested_virtualization(true),
-        )
-        .expect("apply create options should succeed");
-
-        assert_eq!(config.nested_virtualization, Some(true));
-    }
-}
-
 pub fn validate_name(name: &str) -> Result<(), InstanceError> {
     if name.is_empty() {
         return Err(InstanceError::InvalidName {
@@ -472,4 +462,35 @@ pub fn validate_name(name: &str) -> Result<(), InstanceError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_create_options_persists_nested_virtualization() {
+        let mut config = InstanceConfig::new();
+
+        apply_create_options(
+            &mut config,
+            InstanceCreateOptions::default().with_nested_virtualization(true),
+        )
+        .expect("apply create options should succeed");
+
+        assert_eq!(config.nested_virtualization, Some(true));
+    }
+
+    #[test]
+    fn apply_create_options_persists_rosetta() {
+        let mut config = InstanceConfig::new();
+
+        apply_create_options(
+            &mut config,
+            InstanceCreateOptions::default().with_rosetta(true),
+        )
+        .expect("apply create options should succeed");
+
+        assert_eq!(config.rosetta, Some(true));
+    }
 }

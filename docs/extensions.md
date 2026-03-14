@@ -77,6 +77,7 @@ Current scope:
 - rootful Docker only
 - Docker must already be installed and configured in the guest image
 - Bento does not install Docker for you yet
+- for `linux/amd64` containers in an `arm64` guest on Apple silicon, create the VM with `--rosetta`
 
 ## Enabling Extensions
 

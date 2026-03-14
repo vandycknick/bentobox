@@ -112,6 +112,9 @@ pub struct InstanceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nested_virtualization: Option<bool>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rosetta: Option<bool>,
+
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disks: Vec<DiskConfig>,
 
@@ -158,7 +161,7 @@ impl InstanceConfig {
         }
     }
 
-    pub fn from_str(input: &str) -> eyre::Result<Self> {
+    pub fn parse(input: &str) -> eyre::Result<Self> {
         serde_yaml_ng::from_str(input).context("parse instance config yaml")
     }
 
@@ -166,7 +169,7 @@ impl InstanceConfig {
         let path = path.as_ref();
         let input = fs::read_to_string(path)
             .wrap_err_with(|| format!("read instance config at {}", path.display()))?;
-        Self::from_str(&input)
+        Self::parse(&input)
     }
 }
 
@@ -292,7 +295,9 @@ impl Instance {
     }
 
     pub fn requires_bootstrap(&self) -> bool {
-        self.config.userdata_path.is_some() || self.config.extensions.requires_bootstrap()
+        self.config.userdata_path.is_some()
+            || self.config.extensions.requires_bootstrap()
+            || self.config.rosetta.unwrap_or(false)
     }
 
     pub fn uses_bootstrap(&self) -> bool {
