@@ -36,22 +36,27 @@ for i in $(cat /proc/cmdline); do
 done
 
 # Mount target root
+if [ ! -b "${root}" ]; then
+    echo "root device missing: ${root}, dropping to shell"
+    exec cttyhack sh
+fi
+
 mkdir -p /mnt/root
 if ! mount -o subvol=@ "${root}" /mnt/root; then
     echo "mount ${root} -> /mnt/root failed"
-    exec sh
+    exec setsid cttyhack sh
 fi
 
 # Must be a mountpoint for switch_root
 if ! mountpoint -q /mnt/root; then
     echo "/mnt/root is not a mountpoint"
-    exec sh
+    exec setsid cttyhack sh
 fi
 
 # NEW_INIT must exist in new root
 if [ ! -x "/mnt/root${init}" ]; then
     echo "init not executable: /mnt/root${init}"
-    exec sh
+    exec setsid cttyhack sh
 fi
 
 # Unmount all other mounts so that the ram used by

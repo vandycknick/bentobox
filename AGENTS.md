@@ -65,6 +65,7 @@
 - Prefer `nix` crate APIs over direct `libc` calls for Unix/syscall interactions.
 - Use direct `libc` only when the required call is not available in `nix` (for example, macOS `clonefile`).
 - If you must use direct `libc`, add a short code comment explaining why `nix` is insufficient for that call.
+- Prefer fully qualified tracing macros like `tracing::info!`, `tracing::debug!`, and `tracing::warn!` instead of importing tracing macros into scope.
 
 #### Rust Workflow Checklist
 

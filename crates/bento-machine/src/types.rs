@@ -38,6 +38,7 @@ pub enum MachineKind {
 pub struct MachineConfig {
     pub cpus: Option<usize>,
     pub memory_mib: Option<u64>,
+    pub machine_directory: PathBuf,
     pub kernel_path: Option<PathBuf>,
     pub initramfs_path: Option<PathBuf>,
     pub machine_identifier_path: Option<PathBuf>,
@@ -54,6 +55,7 @@ impl MachineConfig {
         Self {
             cpus: None,
             memory_mib: None,
+            machine_directory: PathBuf::new(),
             kernel_path: None,
             initramfs_path: None,
             machine_identifier_path: None,

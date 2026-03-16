@@ -108,7 +108,9 @@ impl InstanceStore {
         let mut config = InstanceConfig::new();
         apply_create_options(&mut config, options)?;
         validate_network_mode(
-            config.engine.unwrap_or(crate::instance::EngineType::VZ),
+            config
+                .engine
+                .unwrap_or_else(crate::instance::default_engine_type),
             config.network.as_ref(),
         )
         .map_err(|reason| InstanceError::GenericError { reason })?;

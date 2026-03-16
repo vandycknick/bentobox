@@ -329,3 +329,37 @@ This file tracks kernel-side config changes identified while debugging package u
 - `CONFIG_IP_NF_RAW=y` and `CONFIG_IP6_NF_RAW=y` are easy to miss because Docker often fails later on the first visible `raw` table access rather than during its initial capability checks.
 - `CONFIG_NETFILTER_XTABLES_COMPAT=y` is part of that legacy userspace path, and missing it can surface as conntrack match failures or legacy table initialization failures even when the newer `IP*_NF_*` options are enabled.
 - `CONFIG_NETFILTER_XTABLES_LEGACY` depends on `!PREEMPT_RT` on newer kernels, so a PREEMPT_RT kernel and the current Docker `iptables-legacy` path are not friends.
+
+## 14) Firecracker arm64 serial console support
+
+### Required config changes
+
+- `CONFIG_PRINTK=y`
+- `CONFIG_SERIAL_8250=y`
+- `CONFIG_SERIAL_8250_CONSOLE=y`
+- `CONFIG_SERIAL_CORE=y`
+- `CONFIG_SERIAL_CORE_CONSOLE=y`
+- `CONFIG_SERIAL_OF_PLATFORM=y`
+- `CONFIG_DEVTMPFS=y`
+- `CONFIG_DEVTMPFS_MOUNT=y`
+
+### What this enables
+
+- Kernel log output on the Firecracker serial console.
+- Proper registration of the guest serial device on arm64 when it is described via Device Tree.
+- Userspace access to the same serial-backed console used during early boot.
+- Automatic population of `/dev`, including console device nodes needed by minimal initramfs environments.
+
+### Why this is needed
+
+- On arm64 Firecracker guests, the serial device is discovered through the Device Tree path rather than legacy PC-style probing.
+- `CONFIG_SERIAL_OF_PLATFORM=y` is required so the kernel can bind the 8250-compatible UART exposed by Firecracker and make `ttyS0` behave correctly beyond the earliest boot messages.
+- Without this option, the kernel may still emit some early console output, but `/init`, shell fallback paths, and other userspace console interaction can fail or behave inconsistently.
+- `CONFIG_SERIAL_8250_CONSOLE` and `CONFIG_SERIAL_CORE_CONSOLE` provide the actual serial console plumbing, while `CONFIG_PRINTK` keeps kernel logs visible during bring-up.
+- `CONFIG_DEVTMPFS` and `CONFIG_DEVTMPFS_MOUNT` ensure `/dev/console` and related device nodes exist in minimal initramfs boots without requiring a full userspace device manager.
+
+### Notes
+
+- For Bento's current Firecracker arm64 flow, `CONFIG_SERIAL_OF_PLATFORM=y` was the key missing option that made the initramfs shell and userspace console behavior start working correctly.
+- The matching kernel boot args should still include `console=ttyS0`, and on arm64 Firecracker it is worth considering `keep_bootcon` during early bring-up.
+- These options are not Firecracker-exclusive in a strict kernel sense, but they are part of the practical minimum for reliable Firecracker serial-console behavior on arm64.

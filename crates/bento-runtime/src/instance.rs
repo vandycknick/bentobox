@@ -21,6 +21,7 @@ pub enum GuestOs {
 #[serde(rename_all = "lowercase")]
 pub enum EngineType {
     VZ,
+    Firecracker,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -202,9 +203,27 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+pub fn default_engine_type() -> EngineType {
+    #[cfg(target_os = "macos")]
+    {
+        EngineType::VZ
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        EngineType::Firecracker
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        EngineType::VZ
+    }
+}
+
 pub fn default_network_mode_for_engine(engine: EngineType) -> NetworkMode {
     match engine {
         EngineType::VZ => NetworkMode::VzNat,
+        EngineType::Firecracker => NetworkMode::None,
     }
 }
 
@@ -266,7 +285,7 @@ impl Instance {
     pub fn engine(&self) -> EngineType {
         match self.config.engine {
             Some(e) => e,
-            None => EngineType::VZ, // TODO: Always default to VZ for now.
+            None => default_engine_type(),
         }
     }
 
@@ -664,6 +683,37 @@ mod tests {
     fn resolve_network_mode_defaults_to_vznat_for_vz_engine() {
         let mode = resolve_network_mode(EngineType::VZ, None);
         assert_eq!(mode, NetworkMode::VzNat);
+    }
+
+    #[test]
+    fn resolve_network_mode_defaults_to_none_for_firecracker_engine() {
+        let mode = resolve_network_mode(EngineType::Firecracker, None);
+        assert_eq!(mode, NetworkMode::None);
+    }
+
+    #[test]
+    fn validate_network_mode_rejects_vznat_for_firecracker_engine() {
+        let err = validate_network_mode(
+            EngineType::Firecracker,
+            Some(&NetworkConfig {
+                mode: NetworkMode::VzNat,
+            }),
+        )
+        .expect_err("vznat should be rejected for firecracker");
+
+        assert!(err.contains("only supported with the VZ driver"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn default_engine_matches_host_platform() {
+        assert_eq!(default_engine_type(), EngineType::VZ);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn default_engine_matches_host_platform() {
+        assert_eq!(default_engine_type(), EngineType::Firecracker);
     }
 
     #[test]

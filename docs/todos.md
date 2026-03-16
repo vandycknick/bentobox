@@ -8,6 +8,8 @@
 - [ ] Revisit extension architecture
 - [ ] Implement metrics / logging endpoint
 
+- [ ] If create fails due to intiramfs or kernel not existing at the particular destination it still creats all the folders that make ls think or subsequent creates think that the vm exists already. This should happen in some kind of transaction. Either the vm can be createa nd the folder exists or it fails and no files or written to disk!
+
 ## Packages needed to build the kernel in arch
 
 - base-devel

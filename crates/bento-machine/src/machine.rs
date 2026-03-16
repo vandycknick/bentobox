@@ -116,6 +116,7 @@ mod tests {
             config: MachineConfig {
                 cpus,
                 memory_mib: Some(1024),
+                machine_directory: dir.clone(),
                 kernel_path: Some(dir.join("kernel")),
                 initramfs_path: Some(dir.join("initramfs")),
                 machine_identifier_path: Some(dir.join("machine-id")),

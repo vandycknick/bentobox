@@ -41,10 +41,12 @@ pub(crate) fn machine_spec_for_instance(inst: &Instance) -> Result<MachineSpec, 
 fn machine_kind(engine: EngineType) -> Result<MachineKind, MachineError> {
     match engine {
         EngineType::VZ => Ok(MachineKind::Vz),
+        EngineType::Firecracker => Ok(MachineKind::Firecracker),
     }
 }
 
 fn machine_config_for_instance(inst: &Instance) -> Result<MachineConfig, MachineSpecError> {
+    let engine = inst.engine();
     let boot_assets = inst.boot_assets()?;
     let root_disk = inst.root_disk()?.map(|disk| DiskImage {
         path: disk.path,
@@ -77,9 +79,13 @@ fn machine_config_for_instance(inst: &Instance) -> Result<MachineConfig, Machine
     Ok(MachineConfig {
         cpus: inst.config.cpus.map(|cpus| cpus as usize),
         memory_mib: inst.config.memory.map(|memory| memory as u64),
+        machine_directory: inst.dir().to_path_buf(),
         kernel_path: Some(boot_assets.kernel),
         initramfs_path: Some(boot_assets.initramfs),
-        machine_identifier_path: Some(inst.file(InstanceFile::AppleMachineIdentifier)),
+        machine_identifier_path: match engine {
+            EngineType::VZ => Some(inst.file(InstanceFile::AppleMachineIdentifier)),
+            EngineType::Firecracker => None,
+        },
         nested_virtualization: inst.config.nested_virtualization.unwrap_or(false),
         rosetta: inst.config.rosetta.unwrap_or(false),
         network: map_network_mode(inst.resolved_network_mode()),
