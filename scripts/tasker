@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+
+VALID_STATUS = {"open", "closed"}
+DEFAULT_PRIORITY = 3
+TASK_FILENAME = "task.md"
+TITLE_RE = re.compile(r"^#\s+(?P<value>.+)$", re.MULTILINE)
+STATUS_RE = re.compile(r"^- Status:[ \t]*(?P<value>.+)$", re.MULTILINE)
+PRIORITY_RE = re.compile(r"^- Priority:[ \t]*(?P<value>.+)$", re.MULTILINE)
+TAGS_RE = re.compile(r"^- Tags:[ \t]*(?P<value>.*)$", re.MULTILINE)
+DESCRIPTION_HEADER_RE = re.compile(r"^## Description\s*$", re.MULTILINE)
+
+
+@dataclass
+class Task:
+    task_id: str
+    directory: Path
+    file_path: Path
+    title: str
+    status: str
+    priority: int
+    tags: list[str]
+    body: str
+
+
+@dataclass
+class TaskIssue:
+    task_id: str
+    path: str
+    message: str
+
+
+class TaskerError(Exception):
+    pass
+
+
+def resolve_root(value: str | None) -> Path:
+    root_value = value or os.environ.get("TASKER_ROOT") or "tasks"
+    return Path(root_value).expanduser().resolve()
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "task"
+
+
+def generate_task_id(title: str) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{timestamp}-{slugify(title)}"
+
+
+def task_file(root: Path, task_id: str) -> Path:
+    return root / task_id / TASK_FILENAME
+
+
+def split_tags(raw: str) -> list[str]:
+    if not raw.strip():
+        return []
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def render_task(title: str, status: str, priority: int, tags: list[str], body: str) -> str:
+    normalized_body = body.rstrip()
+    tags_value = ",".join(tags)
+    lines = [
+        f"# {title}",
+        "",
+        f"- Status: {status}",
+        f"- Priority: {priority}",
+        f"- Tags: {tags_value}",
+        "",
+        "## Description",
+        "",
+    ]
+    if normalized_body:
+        lines.append(normalized_body)
+    return "\n".join(lines) + "\n"
+
+
+def parse_task(file_path: Path) -> Task:
+    text = file_path.read_text()
+    title_match = TITLE_RE.search(text)
+    status_match = STATUS_RE.search(text)
+    priority_match = PRIORITY_RE.search(text)
+    tags_match = TAGS_RE.search(text)
+    description_match = DESCRIPTION_HEADER_RE.search(text)
+
+    missing = []
+    if not title_match:
+        missing.append("title")
+    if not status_match:
+        missing.append("status")
+    if not priority_match:
+        missing.append("priority")
+    if not tags_match:
+        missing.append("tags")
+    if missing:
+        raise TaskerError(f"missing metadata: {', '.join(missing)}")
+
+    status = status_match.group("value").strip()
+    if status not in VALID_STATUS:
+        raise TaskerError(f"invalid status: {status}")
+
+    priority_raw = priority_match.group("value").strip()
+    if not priority_raw.isdigit():
+        raise TaskerError(f"invalid priority: {priority_raw}")
+
+    body = ""
+    if description_match:
+        body = text[description_match.end() :].lstrip("\n")
+
+    return Task(
+        task_id=file_path.parent.name,
+        directory=file_path.parent,
+        file_path=file_path,
+        title=title_match.group("value").strip(),
+        status=status,
+        priority=int(priority_raw),
+        tags=split_tags(tags_match.group("value")),
+        body=body.rstrip("\n"),
+    )
+
+
+def read_task(root: Path, task_id: str) -> Task:
+    file_path = task_file(root, task_id)
+    if not file_path.exists():
+        raise TaskerError(f"task not found: {task_id}")
+    return parse_task(file_path)
+
+
+def write_task(root: Path, task_id: str, title: str, status: str, priority: int, tags: list[str], body: str) -> Path:
+    directory = root / task_id
+    directory.mkdir(parents=True, exist_ok=False)
+    file_path = directory / TASK_FILENAME
+    file_path.write_text(render_task(title=title, status=status, priority=priority, tags=tags, body=body))
+    return file_path
+
+
+def overwrite_task(task: Task) -> None:
+    task.file_path.write_text(
+        render_task(
+            title=task.title,
+            status=task.status,
+            priority=task.priority,
+            tags=task.tags,
+            body=task.body,
+        )
+    )
+
+
+def iter_task_dirs(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    return sorted(path for path in root.iterdir() if path.is_dir())
+
+
+def iter_tasks(root: Path) -> list[Task]:
+    tasks: list[Task] = []
+    for directory in iter_task_dirs(root):
+        file_path = directory / TASK_FILENAME
+        if not file_path.exists():
+            continue
+        tasks.append(parse_task(file_path))
+    return tasks
+
+
+def format_task_row(task: Task) -> str:
+    tags = ",".join(task.tags)
+    return f"{task.task_id} | {task.status} | p{task.priority} | {tags} | {task.title}"
+
+
+def task_to_dict(task: Task) -> dict[str, object]:
+    return {
+        "id": task.task_id,
+        "title": task.title,
+        "status": task.status,
+        "priority": task.priority,
+        "tags": task.tags,
+        "path": str(task.file_path),
+    }
+
+
+def print_output(data: object, output_format: str) -> None:
+    if output_format == "json":
+        json.dump(data, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+
+    if output_format == "text":
+        if isinstance(data, list):
+            for item in data:
+                print(item)
+            return
+        print(data)
+        return
+
+    raise TaskerError(f"unsupported format: {output_format}")
+
+
+def cmd_new(args: argparse.Namespace) -> int:
+    args.root.mkdir(parents=True, exist_ok=True)
+    task_id = generate_task_id(args.title)
+    write_task(
+        root=args.root,
+        task_id=task_id,
+        title=args.title,
+        status="open",
+        priority=args.priority,
+        tags=split_tags(args.tags),
+        body=args.body or "",
+    )
+    if args.format == "json":
+        print_output({"id": task_id, "path": str(task_file(args.root, task_id))}, args.format)
+    else:
+        print(task_id)
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    tasks = iter_tasks(args.root)
+    if args.status:
+        tasks = [task for task in tasks if task.status == args.status]
+    if args.tag:
+        tasks = [task for task in tasks if args.tag in task.tags]
+    if args.priority is not None:
+        tasks = [task for task in tasks if task.priority == args.priority]
+
+    if args.format == "json":
+        print_output([task_to_dict(task) for task in tasks], args.format)
+    else:
+        print_output([format_task_row(task) for task in tasks], args.format)
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    task = read_task(args.root, args.task_id)
+    if args.format == "json":
+        payload = task_to_dict(task)
+        payload["body"] = task.body
+        print_output(payload, args.format)
+    else:
+        sys.stdout.write(task.file_path.read_text())
+    return 0
+
+
+def cmd_set_status(args: argparse.Namespace, status: str) -> int:
+    task = read_task(args.root, args.task_id)
+    task.status = status
+    overwrite_task(task)
+    print(task.task_id)
+    return 0
+
+
+def cmd_edit(args: argparse.Namespace) -> int:
+    task = read_task(args.root, args.task_id)
+    editor = os.environ.get("EDITOR", "vi")
+    completed = subprocess.run([editor, str(task.file_path)], check=False)
+    return completed.returncode
+
+
+def cmd_set_tags(args: argparse.Namespace) -> int:
+    task = read_task(args.root, args.task_id)
+    task.tags = split_tags(args.tags)
+    overwrite_task(task)
+    print(task.task_id)
+    return 0
+
+
+def cmd_set_priority(args: argparse.Namespace) -> int:
+    task = read_task(args.root, args.task_id)
+    task.priority = args.priority
+    overwrite_task(task)
+    print(task.task_id)
+    return 0
+
+
+def collect_doctor_issues(root: Path) -> list[TaskIssue]:
+    issues: list[TaskIssue] = []
+    seen_ids: set[str] = set()
+
+    for directory in iter_task_dirs(root):
+        task_id = directory.name
+        file_path = directory / TASK_FILENAME
+
+        if task_id in seen_ids:
+            issues.append(TaskIssue(task_id=task_id, path=str(directory), message="duplicate task id"))
+        seen_ids.add(task_id)
+
+        if not file_path.exists():
+            issues.append(TaskIssue(task_id=task_id, path=str(directory), message=f"missing {TASK_FILENAME}"))
+            continue
+
+        text = file_path.read_text()
+        title_match = TITLE_RE.search(text)
+        status_match = STATUS_RE.search(text)
+        priority_match = PRIORITY_RE.search(text)
+        tags_match = TAGS_RE.search(text)
+
+        if not title_match:
+            issues.append(TaskIssue(task_id=task_id, path=str(file_path), message="missing H1 title"))
+        if not status_match:
+            issues.append(TaskIssue(task_id=task_id, path=str(file_path), message="missing Status metadata"))
+        elif status_match.group("value").strip() not in VALID_STATUS:
+            issues.append(TaskIssue(task_id=task_id, path=str(file_path), message="invalid Status value"))
+
+        if not priority_match:
+            issues.append(TaskIssue(task_id=task_id, path=str(file_path), message="missing Priority metadata"))
+        elif not priority_match.group("value").strip().isdigit():
+            issues.append(TaskIssue(task_id=task_id, path=str(file_path), message="Priority must be numeric"))
+
+        if not tags_match:
+            issues.append(TaskIssue(task_id=task_id, path=str(file_path), message="missing Tags metadata"))
+        elif ", " in tags_match.group("value"):
+            issues.append(TaskIssue(task_id=task_id, path=str(file_path), message="Tags should be comma-separated without spaces"))
+
+    return issues
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    issues = collect_doctor_issues(args.root)
+    if args.format == "json":
+        print_output(
+            {
+                "ok": not issues,
+                "issues": [issue.__dict__ for issue in issues],
+            },
+            args.format,
+        )
+    else:
+        if issues:
+            print_output([f"{issue.task_id} | {issue.message} | {issue.path}" for issue in issues], args.format)
+        else:
+            print_output("ok", args.format)
+    return 0 if not issues else 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="tasker")
+    parser.add_argument("--root", type=resolve_root, default=None, help="Task root directory")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    new_parser = subparsers.add_parser("new", help="Create a new task")
+    new_parser.add_argument("title")
+    new_parser.add_argument("--priority", type=int, default=DEFAULT_PRIORITY)
+    new_parser.add_argument("--tags", default="")
+    new_parser.add_argument("--body", default="")
+    new_parser.add_argument("--format", choices=["text", "json"], default="text")
+    new_parser.set_defaults(func=cmd_new)
+
+    list_parser = subparsers.add_parser("list", help="List tasks")
+    list_parser.add_argument("--status", choices=sorted(VALID_STATUS))
+    list_parser.add_argument("--tag")
+    list_parser.add_argument("--priority", type=int)
+    list_parser.add_argument("--format", choices=["text", "json"], default="text")
+    list_parser.set_defaults(func=cmd_list)
+
+    show_parser = subparsers.add_parser("show", help="Show a task")
+    show_parser.add_argument("task_id")
+    show_parser.add_argument("--format", choices=["text", "json"], default="text")
+    show_parser.set_defaults(func=cmd_show)
+
+    open_parser = subparsers.add_parser("open", help="Mark a task open")
+    open_parser.add_argument("task_id")
+    open_parser.set_defaults(func=lambda args: cmd_set_status(args, "open"))
+
+    close_parser = subparsers.add_parser("close", help="Mark a task closed")
+    close_parser.add_argument("task_id")
+    close_parser.set_defaults(func=lambda args: cmd_set_status(args, "closed"))
+
+    edit_parser = subparsers.add_parser("edit", help="Edit a task in $EDITOR")
+    edit_parser.add_argument("task_id")
+    edit_parser.set_defaults(func=cmd_edit)
+
+    tags_parser = subparsers.add_parser("set-tags", help="Replace task tags")
+    tags_parser.add_argument("task_id")
+    tags_parser.add_argument("tags")
+    tags_parser.set_defaults(func=cmd_set_tags)
+
+    priority_parser = subparsers.add_parser("set-priority", help="Set task priority")
+    priority_parser.add_argument("task_id")
+    priority_parser.add_argument("priority", type=int)
+    priority_parser.set_defaults(func=cmd_set_priority)
+
+    doctor_parser = subparsers.add_parser("doctor", help="Validate task structure")
+    doctor_parser.add_argument("--format", choices=["text", "json"], default="text")
+    doctor_parser.set_defaults(func=cmd_doctor)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.root is None:
+        args.root = resolve_root(None)
+
+    try:
+        return args.func(args)
+    except TaskerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -5,6 +5,8 @@
 - [ ] Codesign doesn't work when running cargo build --release
 - [ ] Error propagation doesn't work correctly. For example a non signed binary can't start VZ, but that error isn't correctly getting propaged to the cli. CLI just keeps waiting even though instanced has shutdown already. Also I would expect an erro log in the trace log and that doesn't exist either.
 - [ ] Wrong guest-agent config crashes intsanced, but the start command will still wait until it timesout with no clear error message.
+- [ ] Revisit extension architecture
+- [ ] Implement metrics / logging endpoint
 
 ## Packages needed to build the kernel in arch
 

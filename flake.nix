@@ -82,11 +82,11 @@
               pkgs.zig
               pkgs.cargo-zigbuild
               pkgs.docker
-              pkgs.vfkit
             ];
 
             shellHook = ''
-              echo "Entering bentobox dev shell (Rust + docker + vfkit)."
+              export PATH="$PWD/scripts:$PATH"
+              echo "Entering bentobox dev shell."
             '';
           };
         }
