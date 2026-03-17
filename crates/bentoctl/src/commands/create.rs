@@ -125,12 +125,16 @@ impl Cmd {
             .with_extensions(extensions)
             .with_userdata(userdata_path);
 
-        let inst = store.create(&self.name, options)?;
-        prepare_instance(&inst)?;
+        let pending = store.create_pending(&self.name, options)?;
+        let inst = pending.instance();
+
+        prepare_instance(inst)?;
 
         if let Some(image) = selected_image {
             image_store.clone_base_image(&image, &inst.file(InstanceFile::RootDisk))?;
         }
+
+        pending.commit()?;
 
         println!("created {}", self.name);
         Ok(())
@@ -206,8 +210,16 @@ fn parse_network_mode(input: &str) -> Result<NetworkMode, String> {
 mod tests {
     use super::*;
     use crate::commands::{BentoCtlCmd, Command};
+    use bento_runtime::instance_store::InstanceStore;
     use clap::Parser;
+    use std::sync::OnceLock;
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn parse_mount_arg_accepts_ro_and_rw() {
@@ -311,5 +323,45 @@ mod tests {
             .expect_err("missing disk should fail");
 
         assert!(err.to_string().contains("disk path does not exist"));
+    }
+
+    #[tokio::test]
+    async fn create_rolls_back_when_default_boot_assets_are_missing() {
+        let _guard = env_lock().lock().await;
+        let tmp = TempDir::new().expect("temp dir should be creatable");
+        let original = std::env::var_os("XDG_DATA_HOME");
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", tmp.path());
+        }
+
+        let cmd = Cmd {
+            name: "test".to_string(),
+            cpus: 2,
+            memory: 1024,
+            kernel: None,
+            initramfs: None,
+            image: None,
+            nested_virtualization: false,
+            rosetta: false,
+            userdata: None,
+            disks: Vec::new(),
+            mounts: Vec::new(),
+            network: None,
+            enabled_extensions: Vec::new(),
+        };
+
+        let store = InstanceStore::new();
+        let err = cmd
+            .run(&store)
+            .await
+            .expect_err("missing default boot assets should fail create");
+
+        match original {
+            Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+
+        assert!(err.to_string().contains("kernel path is not a file"));
+        assert!(!tmp.path().join("bento/test").exists());
     }
 }

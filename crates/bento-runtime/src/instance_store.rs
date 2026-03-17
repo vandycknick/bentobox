@@ -1,6 +1,7 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use thiserror::Error;
@@ -62,6 +63,13 @@ pub enum InstanceError {
 
 pub struct InstanceStore;
 
+#[derive(Debug)]
+pub struct PendingInstance {
+    instance: Instance,
+    final_dir: PathBuf,
+    committed: bool,
+}
+
 impl Default for InstanceStore {
     fn default() -> Self {
         Self
@@ -78,30 +86,23 @@ impl InstanceStore {
         name: &str,
         options: impl Into<InstanceCreateOptions>,
     ) -> Result<Instance, InstanceError> {
+        self.create_pending(name, options)?.commit()
+    }
+
+    pub fn create_pending(
+        &self,
+        name: &str,
+        options: impl Into<InstanceCreateOptions>,
+    ) -> Result<PendingInstance, InstanceError> {
         validate_name(name)?;
 
-        match self.inspect(name) {
-            Ok(_) => {
-                return Err(InstanceError::InstanceAlreadyCreated {
-                    name: name.to_owned(),
-                });
-            }
-            Err(InstanceError::InstanceNotFound { .. }) => {
-                // NOTE: Expected on create path, continue.
-            }
-            Err(err) => return Err(err),
-        }
-
-        let dirs = Directory::with_prefix(name);
-
-        let app_home = dirs
-            .get_data_home()
-            .ok_or_else(|| InstanceError::GenericError {
+        let data_root = Directory::with_prefix("").get_data_home().ok_or_else(|| {
+            InstanceError::GenericError {
                 reason:
                     "users data home from $XDG_DATA_HOME or $HOME/.local/share can't be located"
                         .to_string(),
-            })?;
-        fs::create_dir_all(&app_home)?;
+            }
+        })?;
 
         // TODO: Find a better way to build an InstanceConfig from options.
         let options = options.into();
@@ -115,16 +116,30 @@ impl InstanceStore {
         )
         .map_err(|reason| InstanceError::GenericError { reason })?;
 
-        let config_path = app_home.join(InstanceFile::Config.as_str());
         let config_yaml = serde_yaml_ng::to_string(&config).map_err(|source| {
             InstanceError::ConfigSerializeFailed {
                 name: name.to_owned(),
                 source,
             }
         })?;
-        fs::write(&config_path, config_yaml)?;
 
-        self.inspect(name)
+        let final_dir = data_root.join(name);
+        ensure_instance_path_available(name, &final_dir)?;
+
+        fs::create_dir_all(&data_root)?;
+        let staged_dir = create_staging_dir(&data_root, name)?;
+
+        let config_path = staged_dir.join(InstanceFile::Config.as_str());
+        if let Err(err) = fs::write(&config_path, config_yaml) {
+            let _ = fs::remove_dir_all(&staged_dir);
+            return Err(err.into());
+        }
+
+        Ok(PendingInstance {
+            instance: Instance::new(name.to_owned(), staged_dir, config),
+            final_dir,
+            committed: false,
+        })
     }
 
     pub fn inspect(&self, name: &str) -> Result<Instance, InstanceError> {
@@ -230,6 +245,39 @@ impl InstanceStore {
         }
 
         Ok(())
+    }
+}
+
+impl PendingInstance {
+    pub fn instance(&self) -> &Instance {
+        &self.instance
+    }
+
+    pub fn commit(mut self) -> Result<Instance, InstanceError> {
+        ensure_instance_path_available(&self.instance.name, &self.final_dir)?;
+        fs::rename(self.instance.dir(), &self.final_dir)?;
+
+        self.committed = true;
+
+        Ok(Instance::new(
+            self.instance.name.clone(),
+            self.final_dir.clone(),
+            self.instance.config.clone(),
+        ))
+    }
+}
+
+impl Drop for PendingInstance {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+
+        match fs::remove_dir_all(self.instance.dir()) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => {}
+        }
     }
 }
 
@@ -427,6 +475,44 @@ fn normalize_mounts(mounts: &[MountConfig]) -> Result<Vec<MountConfig>, Instance
     Ok(normalized)
 }
 
+fn ensure_instance_path_available(name: &str, path: &Path) -> Result<(), InstanceError> {
+    match fs::metadata(path) {
+        Ok(_) => Err(InstanceError::InstanceAlreadyCreated {
+            name: name.to_owned(),
+        }),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn create_staging_dir(data_root: &Path, name: &str) -> Result<PathBuf, InstanceError> {
+    let staging_root = data_root.join(".staging");
+    fs::create_dir_all(&staging_root)?;
+
+    for attempt in 0..256u32 {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|err| InstanceError::GenericError {
+                reason: format!("system clock error while creating staging dir: {err}"),
+            })?
+            .as_nanos();
+        let candidate = staging_root.join(format!(
+            "{name}-{}-{timestamp}-{attempt}",
+            std::process::id()
+        ));
+
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    Err(InstanceError::GenericError {
+        reason: format!("failed to allocate staging directory for instance {name:?}"),
+    })
+}
+
 fn is_tilde_mount_path(path: &Path) -> Result<bool, InstanceError> {
     let path = path.to_string_lossy();
     if path == "~" || path.starts_with("~/") {
@@ -469,6 +555,44 @@ pub fn validate_name(name: &str) -> Result<(), InstanceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "bento-instance-store-{prefix}-{}-{timestamp}",
+            std::process::id()
+        ))
+    }
+
+    fn with_test_data_home<T>(prefix: &str, test: impl FnOnce(&Path) -> T) -> T {
+        let _guard = env_lock().lock().expect("env lock should not be poisoned");
+        let root = unique_test_dir(prefix);
+        fs::create_dir_all(&root).expect("test data root should be creatable");
+
+        let original = std::env::var_os("XDG_DATA_HOME");
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", &root);
+        }
+
+        let result = test(&root);
+
+        match original {
+            Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
+
+        fs::remove_dir_all(&root).expect("test data root should be removable");
+        result
+    }
 
     #[test]
     fn apply_create_options_persists_nested_virtualization() {
@@ -494,5 +618,48 @@ mod tests {
         .expect("apply create options should succeed");
 
         assert_eq!(config.rosetta, Some(true));
+    }
+
+    #[test]
+    fn pending_instance_drop_removes_staged_directory() {
+        with_test_data_home("pending-drop", |_| {
+            let store = InstanceStore::new();
+            let pending = store
+                .create_pending("vm-drop", InstanceCreateOptions::default())
+                .expect("pending instance should be created");
+
+            let staged_dir = pending.instance().dir().to_path_buf();
+            assert!(staged_dir.exists());
+
+            drop(pending);
+
+            assert!(!staged_dir.exists());
+            assert!(!Directory::with_prefix("vm-drop")
+                .get_data_home()
+                .expect("final dir should resolve")
+                .exists());
+        });
+    }
+
+    #[test]
+    fn pending_instance_commit_promotes_staged_directory() {
+        with_test_data_home("pending-commit", |_| {
+            let store = InstanceStore::new();
+            let pending = store
+                .create_pending("vm-commit", InstanceCreateOptions::default())
+                .expect("pending instance should be created");
+
+            let staged_dir = pending.instance().dir().to_path_buf();
+            let committed = pending.commit().expect("commit should succeed");
+
+            assert!(!staged_dir.exists());
+            assert_eq!(
+                committed.dir(),
+                Directory::with_prefix("vm-commit")
+                    .get_data_home()
+                    .expect("final dir should resolve")
+            );
+            assert!(committed.file(InstanceFile::Config).is_file());
+        });
     }
 }
