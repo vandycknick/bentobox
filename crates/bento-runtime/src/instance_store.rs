@@ -382,14 +382,28 @@ fn apply_create_options(
     config: &mut InstanceConfig,
     options: InstanceCreateOptions,
 ) -> Result<(), InstanceError> {
-    config.cpus = Some(options.cpus as i32);
-    config.memory = Some(options.memory as i32);
-    config.kernel_path = options.kernel;
-    config.initramfs_path = options.initramfs;
-    config.nested_virtualization = Some(options.nested_virtualization);
-    config.rosetta = Some(options.rosetta);
-    config.disks = options
-        .disks
+    let InstanceCreateOptions {
+        cpus,
+        memory,
+        kernel,
+        initramfs,
+        nested_virtualization,
+        rosetta,
+        disks,
+        mounts,
+        network,
+        bootstrap,
+        extensions,
+        userdata_path,
+    } = options;
+
+    config.cpus = Some(cpus as i32);
+    config.memory = Some(memory as i32);
+    config.kernel_path = kernel;
+    config.initramfs_path = initramfs;
+    config.nested_virtualization = Some(nested_virtualization);
+    config.rosetta = Some(rosetta);
+    config.disks = disks
         .iter()
         .map(|path| DiskConfig {
             path: path.clone(),
@@ -397,11 +411,11 @@ fn apply_create_options(
             read_only: Some(false),
         })
         .collect();
-    config.mounts = normalize_mounts(&options.mounts)?;
-    config.network = options.network;
-    config.bootstrap = options.bootstrap;
-    config.extensions = options.extensions;
-    config.userdata_path = options.userdata_path;
+    config.mounts = normalize_mounts(&mounts)?;
+    config.network = network;
+    config.bootstrap = bootstrap;
+    config.extensions = extensions;
+    config.userdata_path = userdata_path;
 
     Ok(())
 }

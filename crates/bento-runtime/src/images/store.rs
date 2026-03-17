@@ -107,6 +107,12 @@ pub struct ImageStore {
     registry: RegistryIndex,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloneBaseImageMethod {
+    Clonefile,
+    Copy,
+}
+
 #[derive(Debug, Error)]
 pub enum ImageStoreError {
     #[error("unable to resolve image store path from XDG_DATA_HOME or $HOME")]
@@ -200,6 +206,15 @@ pub enum ImageStoreError {
         path: PathBuf,
         #[source]
         source: io::Error,
+    },
+
+    #[error(
+        "refusing to shrink raw disk {path} from {current_size} bytes to {requested_size} bytes"
+    )]
+    RawDiskShrinkUnsupported {
+        path: PathBuf,
+        current_size: u64,
+        requested_size: u64,
     },
 
     #[error("registry at {path} is malformed")]
@@ -701,7 +716,7 @@ impl ImageStore {
         &self,
         image: &ImageRecord,
         instance_rootfs: &Path,
-    ) -> Result<(), ImageStoreError> {
+    ) -> Result<CloneBaseImageMethod, ImageStoreError> {
         if let Some(parent) = instance_rootfs.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -710,11 +725,26 @@ impl ImageStore {
         #[cfg(target_os = "macos")]
         {
             if try_clonefile(&src, instance_rootfs).is_ok() {
-                return Ok(());
+                return Ok(CloneBaseImageMethod::Clonefile);
             }
         }
 
         fs::copy(src, instance_rootfs)?;
+        Ok(CloneBaseImageMethod::Copy)
+    }
+
+    pub fn resize_raw_disk(path: &Path, size_bytes: u64) -> Result<(), ImageStoreError> {
+        let file = File::options().write(true).open(path)?;
+        let current_size = file.metadata()?.len();
+        if size_bytes < current_size {
+            return Err(ImageStoreError::RawDiskShrinkUnsupported {
+                path: path.to_path_buf(),
+                current_size,
+                requested_size: size_bytes,
+            });
+        }
+
+        file.set_len(size_bytes)?;
         Ok(())
     }
 
@@ -1285,6 +1315,73 @@ mod tests {
         assert!(!image_dir.exists());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clone_base_image_reports_clone_method() {
+        let root = temp_path("clone-base-image");
+        let image_id = "clone1234567890".to_string();
+        let image_dir = root.join(&image_id);
+        fs::create_dir_all(&image_dir).expect("image dir should be created");
+
+        let image = ImageRecord {
+            id: image_id.clone(),
+            source_ref: "example/ref:clone".to_string(),
+            manifest_digest: "sha256:clone".to_string(),
+            artifact_type: ARTIFACT_TYPE.to_string(),
+            compression: ImageCompression::Zstd,
+            os: Some("linux".to_string()),
+            arch: Some("arm64".to_string()),
+            rootfs_relpath: PathBuf::from(format!("{image_id}/rootfs.img")),
+            created_at: now_rfc3339(),
+            updated_at: now_rfc3339(),
+            annotations: BTreeMap::new(),
+        };
+        fs::write(root.join(&image.rootfs_relpath), b"disk").expect("rootfs should exist");
+
+        let store = new_store(root.clone());
+        let output = root.join("instance/rootfs.img");
+        let method = store
+            .clone_base_image(&image, &output)
+            .expect("clone should succeed");
+
+        #[cfg(target_os = "macos")]
+        assert!(matches!(
+            method,
+            CloneBaseImageMethod::Clonefile | CloneBaseImageMethod::Copy
+        ));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(method, CloneBaseImageMethod::Copy);
+        assert_eq!(fs::read(output).expect("cloned disk should exist"), b"disk");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resize_raw_disk_grows_sparse_file() {
+        let path = temp_path("resize-raw-disk");
+        let file = File::create(&path).expect("raw disk should be creatable");
+        file.set_len(512).expect("initial size should be set");
+
+        ImageStore::resize_raw_disk(&path, 4096).expect("disk should grow");
+
+        assert_eq!(
+            fs::metadata(&path).expect("metadata should exist").len(),
+            4096
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn resize_raw_disk_rejects_shrink() {
+        let path = temp_path("resize-raw-disk-shrink");
+        let file = File::create(&path).expect("raw disk should be creatable");
+        file.set_len(4096).expect("initial size should be set");
+
+        let err = ImageStore::resize_raw_disk(&path, 512).expect_err("shrink should fail");
+        assert!(err.to_string().contains("refusing to shrink raw disk"));
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]

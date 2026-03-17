@@ -126,6 +126,30 @@ Notes:
 - `clonefile` generally preserves CoW and sparse semantics.
 - fallback copy may materialize holes and increase physical size, accepted in V1.
 
+### Backend disk semantics
+
+For Apple `Virtualization.framework` guests backed by disk image files, we should not rely on the
+framework defaults for Linux guests. Tart hit Linux guest filesystem corruption on Apple
+Virtualization and now defaults Linux VMs to `.cached` caching with `.full` synchronization in
+`Sources/tart/VM.swift`, citing `cirruslabs/tart#675`.
+
+Current Bentobox policy:
+
+- VZ Linux guests use `Cached + Full` internally.
+- These knobs stay private to the VZ backend.
+- When VZ macOS guests are added, revisit the default and choose the best macOS-specific setting
+  instead of assuming the Linux workaround is ideal there too.
+
+Comparison of the backend features we care about today:
+
+| Concern | VZ | Firecracker |
+| --- | --- | --- |
+| Host disk cache knob | Yes, `Automatic/Cached/Uncached` | No direct equivalent |
+| Disk sync durability knob | Yes, `Full/Fsync/None` | No direct equivalent in the same API shape |
+| Guest flush behavior control | Indirect via VZ sync mode | Yes, `cache_type = Unsafe/Writeback` |
+| Good persistent default today | Linux: `Cached + Full` | Later: likely `Writeback` for persistent disks |
+| Should this leak into shared machine types | No | No |
+
 ### CLI UX
 
 #### `bentoctl images list` (alias: `bentoctl image list`)

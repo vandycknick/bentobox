@@ -9,7 +9,8 @@ use objc2::AllocAnyThread;
 use objc2::{rc::Retained, ClassType};
 use objc2_foundation::{NSArray, NSFileHandle, NSString, NSURL};
 use objc2_virtualization::{
-    VZDirectorySharingDeviceConfiguration, VZDiskImageStorageDeviceAttachment,
+    VZDirectorySharingDeviceConfiguration, VZDiskImageCachingMode,
+    VZDiskImageStorageDeviceAttachment, VZDiskImageSynchronizationMode,
     VZFileHandleSerialPortAttachment, VZGenericPlatformConfiguration, VZLinuxBootLoader,
     VZLinuxRosettaDirectoryShare, VZNATNetworkDeviceAttachment, VZNetworkDeviceConfiguration,
     VZSharedDirectory, VZSingleDirectoryShare, VZVirtioBlockDeviceConfiguration,
@@ -575,10 +576,23 @@ unsafe fn attach_storage_devices(
 
         let disk_path = NSString::from_str(&disk.path.to_string_lossy());
         let disk_url = NSURL::initFileURLWithPath(NSURL::alloc(), &disk_path);
-        let attachment = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
+        // We intentionally force Linux-safe defaults for VZ disk image attachments instead of
+        // relying on framework defaults.
+        //
+        // Tart does the same for Linux VMs in `Sources/tart/VM.swift`, defaulting to `.cached`
+        // caching with `.full` synchronization and pointing to `cirruslabs/tart#675`, where they
+        // tracked Linux guest filesystem corruption and read-only remounts on Apple
+        // Virtualization. That discussion also links similar reports from Lima and UTM.
+        //
+        // Today Bentobox only supports Linux guests on the VZ path, so `Cached + Full` is the
+        // safest default. When macOS guests are supported on VZ, revisit this helper and pick
+        // per-guest defaults instead of assuming the Linux workaround is universally optimal.
+        let attachment = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
             VZDiskImageStorageDeviceAttachment::alloc(),
             &disk_url,
             disk.read_only,
+            VZDiskImageCachingMode::Cached,
+            VZDiskImageSynchronizationMode::Full
         )
         .map_err(|err| {
             MachineError::Backend(format!(

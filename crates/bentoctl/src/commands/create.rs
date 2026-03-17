@@ -12,6 +12,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const BYTES_PER_GB: u64 = 1_000_000_000;
+
 #[derive(Args, Debug)]
 pub struct Cmd {
     pub name: String,
@@ -33,6 +35,12 @@ pub struct Cmd {
     pub initramfs: Option<PathBuf>,
     #[arg(long, help = "Base image name or OCI reference")]
     pub image: Option<String>,
+    #[arg(
+        long,
+        value_name = "GB",
+        help = "Resize the image-backed root disk to this size in GB"
+    )]
+    pub disk_size: Option<u64>,
     #[arg(long, help = "Enable nested virtualization for supported VZ guests")]
     pub nested_virtualization: bool,
     #[arg(
@@ -65,6 +73,14 @@ impl Display for Cmd {
 impl Cmd {
     pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
         let mut image_store = ImageStore::open()?;
+
+        if self.disk_size.is_some() && self.image.is_none() {
+            eyre::bail!("--disk-size requires --image");
+        }
+
+        if matches!(self.disk_size, Some(0)) {
+            eyre::bail!("--disk-size must be greater than 0");
+        }
 
         let kernel_path = resolve_optional_path(self.kernel.as_deref(), "kernel")?;
         let initramfs_path = resolve_optional_path(self.initramfs.as_deref(), "initramfs")?;
@@ -132,6 +148,10 @@ impl Cmd {
 
         if let Some(image) = selected_image {
             image_store.clone_base_image(&image, &inst.file(InstanceFile::RootDisk))?;
+
+            if let Some(size_bytes) = gigabytes_to_bytes_checked(self.disk_size) {
+                ImageStore::resize_raw_disk(&inst.file(InstanceFile::RootDisk), size_bytes)?;
+            }
         }
 
         pending.commit()?;
@@ -139,6 +159,14 @@ impl Cmd {
         println!("created {}", self.name);
         Ok(())
     }
+}
+
+fn gigabytes_to_bytes(size_gb: u64) -> u64 {
+    size_gb.saturating_mul(BYTES_PER_GB)
+}
+
+fn gigabytes_to_bytes_checked(size_gb: Option<u64>) -> Option<u64> {
+    size_gb.map(gigabytes_to_bytes)
 }
 
 fn resolve_optional_path(path: Option<&Path>, kind: &str) -> eyre::Result<Option<PathBuf>> {
@@ -292,6 +320,27 @@ mod tests {
     }
 
     #[test]
+    fn create_command_parses_disk_size_flag() {
+        let cmd = BentoCtlCmd::try_parse_from([
+            "bentoctl",
+            "new",
+            "dev",
+            "--image",
+            "example:image",
+            "--disk-size",
+            "40",
+        ])
+        .expect("create command should parse");
+
+        let create = match cmd.cmd {
+            Command::New(cmd) => cmd,
+            other => panic!("expected create command, got {other:?}"),
+        };
+
+        assert_eq!(create.disk_size, Some(40));
+    }
+
+    #[test]
     fn resolve_optional_path_returns_none_when_unset() {
         let resolved = resolve_optional_path(None, "kernel").expect("unset path should resolve");
         assert!(resolved.is_none());
@@ -341,6 +390,7 @@ mod tests {
             kernel: None,
             initramfs: None,
             image: None,
+            disk_size: None,
             nested_virtualization: false,
             rosetta: false,
             userdata: None,
@@ -363,5 +413,38 @@ mod tests {
 
         assert!(err.to_string().contains("kernel path is not a file"));
         assert!(!tmp.path().join("bento/test").exists());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_disk_size_without_image() {
+        let cmd = Cmd {
+            name: "test".to_string(),
+            cpus: 2,
+            memory: 1024,
+            kernel: None,
+            initramfs: None,
+            image: None,
+            disk_size: Some(40),
+            nested_virtualization: false,
+            rosetta: false,
+            userdata: None,
+            disks: Vec::new(),
+            mounts: Vec::new(),
+            network: None,
+            enabled_extensions: Vec::new(),
+        };
+
+        let store = InstanceStore::new();
+        let err = cmd
+            .run(&store)
+            .await
+            .expect_err("disk size without image should fail");
+
+        assert!(err.to_string().contains("--disk-size requires --image"));
+    }
+
+    #[test]
+    fn gigabytes_to_bytes_uses_decimal_units() {
+        assert_eq!(gigabytes_to_bytes(40), 40_000_000_000);
     }
 }
