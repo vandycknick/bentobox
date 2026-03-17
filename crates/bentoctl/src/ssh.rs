@@ -7,7 +7,7 @@ use eyre::{bail, Context};
 
 pub(crate) fn exec_remote_shell(name: &str, user: Option<&str>) -> eyre::Result<()> {
     let remote_command = format!(
-        "{}; exec \"${{SHELL:-/bin/bash}}\" -l",
+        "/bin/sh -lc '{}; exec \"${{SHELL:-/bin/bash}}\" -l || exec /bin/sh'",
         current_dir_prologue()?
     );
     let err = ssh_command(name, user, true, Some(&remote_command))?.exec();
@@ -56,6 +56,7 @@ fn ssh_command(
     command
         .arg("-F")
         .arg("/dev/null")
+        .arg("-A")
         .arg("-o")
         .arg(format!(
             "IdentityFile={}",
