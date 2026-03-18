@@ -1,5 +1,4 @@
 use bento_instanced::machine::prepare_instance;
-use bento_runtime::images::features::ImageFeatures;
 use bento_runtime::images::store::ImageStore;
 use bento_runtime::instance::{
     BootstrapConfig, InstanceFile, MountConfig, NetworkConfig, NetworkMode,
@@ -16,15 +15,12 @@ const BYTES_PER_GB: u64 = 1_000_000_000;
 
 #[derive(Args, Debug)]
 pub struct Cmd {
+    pub image_ref: String,
     pub name: String,
-    #[arg(long, default_value_t = 1, help = "number of virtual CPUs")]
-    pub cpus: u8,
-    #[arg(
-        long,
-        default_value_t = 512,
-        help = "virtual machine RAM size in mibibytes"
-    )]
-    pub memory: u32,
+    #[arg(long, help = "number of virtual CPUs")]
+    pub cpus: Option<u8>,
+    #[arg(long, help = "virtual machine RAM size in mibibytes")]
+    pub memory: Option<u32>,
     #[arg(long, help = "Path to a custom kernel, only works for Linux.")]
     pub kernel: Option<PathBuf>,
     #[arg(
@@ -33,8 +29,6 @@ pub struct Cmd {
         help = "Path to a custom initramfs image, only works for Linux."
     )]
     pub initramfs: Option<PathBuf>,
-    #[arg(long, help = "Base image name or OCI reference")]
-    pub image: Option<String>,
     #[arg(
         long,
         value_name = "GB",
@@ -74,10 +68,6 @@ impl Cmd {
     pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
         let mut image_store = ImageStore::open()?;
 
-        if self.disk_size.is_some() && self.image.is_none() {
-            eyre::bail!("--disk-size requires --image");
-        }
-
         if matches!(self.disk_size, Some(0)) {
             eyre::bail!("--disk-size must be greater than 0");
         }
@@ -87,23 +77,12 @@ impl Cmd {
         let userdata_path = resolve_optional_path(self.userdata.as_deref(), "userdata")?;
         let disk_paths = resolve_existing_paths(&self.disks, "disk")?;
 
-        let selected_image = self
-            .image
-            .as_deref()
-            .map(|image_arg| -> eyre::Result<_> {
-                Ok(match image_store.resolve(image_arg)? {
-                    Some(image) => image,
-                    None => image_store.pull(image_arg, None)?,
-                })
-            })
-            .transpose()?;
+        let selected_image = match image_store.resolve(&self.image_ref)? {
+            Some(image) => image,
+            None => image_store.pull(&self.image_ref, None)?,
+        };
 
-        let image_features = selected_image
-            .as_ref()
-            .map(|image| ImageFeatures::from_annotations(&image.annotations))
-            .unwrap_or_default();
-
-        let mut extensions = image_features.extensions.clone();
+        let mut extensions = selected_image.metadata.extensions.clone();
         for extension in &self.enabled_extensions {
             match extension.as_str() {
                 "docker" => extensions.docker = true,
@@ -121,17 +100,26 @@ impl Cmd {
             (userdata_path.is_some() || extensions.requires_bootstrap() || self.rosetta)
                 .then(BootstrapConfig::cidata_cloud_init);
 
-        if bootstrap.is_some() && !image_features.supports_bootstrap() {
+        if bootstrap.is_some() && !selected_image.metadata.bootstrap.cidata_cloud_init {
             eyre::bail!(
                 "instance requires bootstrap for userdata or enabled extensions, but the selected image does not advertise bootstrap support"
             );
         }
 
+        let resolved_kernel =
+            kernel_path.or_else(|| image_store.image_kernel_path(&selected_image));
+        let resolved_initramfs =
+            initramfs_path.or_else(|| image_store.image_initramfs_path(&selected_image));
+        let resolved_cpus = self.cpus.unwrap_or(selected_image.metadata.defaults.cpu);
+        let resolved_memory = self
+            .memory
+            .unwrap_or(selected_image.metadata.defaults.memory_mib);
+
         let options = InstanceCreateOptions::default()
-            .with_cpus(self.cpus)
-            .with_memory(self.memory)
-            .with_kernel(kernel_path)
-            .with_initramfs(initramfs_path)
+            .with_cpus(resolved_cpus)
+            .with_memory(resolved_memory)
+            .with_kernel(resolved_kernel)
+            .with_initramfs(resolved_initramfs)
             .with_nested_virtualization(self.nested_virtualization)
             .with_rosetta(self.rosetta)
             .with_disks(disk_paths)
@@ -146,12 +134,10 @@ impl Cmd {
 
         prepare_instance(inst)?;
 
-        if let Some(image) = selected_image {
-            image_store.clone_base_image(&image, &inst.file(InstanceFile::RootDisk))?;
+        image_store.clone_base_image(&selected_image, &inst.file(InstanceFile::RootDisk))?;
 
-            if let Some(size_bytes) = gigabytes_to_bytes_checked(self.disk_size) {
-                ImageStore::resize_raw_disk(&inst.file(InstanceFile::RootDisk), size_bytes)?;
-            }
+        if let Some(size_bytes) = gigabytes_to_bytes_checked(self.disk_size) {
+            ImageStore::resize_raw_disk(&inst.file(InstanceFile::RootDisk), size_bytes)?;
         }
 
         pending.commit()?;
@@ -197,7 +183,7 @@ fn resolve_existing_path(path: &Path, kind: &str) -> eyre::Result<PathBuf> {
     Ok(abs)
 }
 
-fn parse_mount_arg(input: &str) -> Result<MountConfig, String> {
+pub(crate) fn parse_mount_arg(input: &str) -> Result<MountConfig, String> {
     let (location, mode) = input
         .rsplit_once(':')
         .ok_or_else(|| "invalid mount, expected PATH:ro|rw".to_string())?;
@@ -222,7 +208,7 @@ fn parse_mount_arg(input: &str) -> Result<MountConfig, String> {
     })
 }
 
-fn parse_network_mode(input: &str) -> Result<NetworkMode, String> {
+pub(crate) fn parse_network_mode(input: &str) -> Result<NetworkMode, String> {
     match input {
         "vznat" => Ok(NetworkMode::VzNat),
         "none" => Ok(NetworkMode::None),
@@ -238,16 +224,8 @@ fn parse_network_mode(input: &str) -> Result<NetworkMode, String> {
 mod tests {
     use super::*;
     use crate::commands::{BentoCtlCmd, Command};
-    use bento_runtime::instance_store::InstanceStore;
     use clap::Parser;
-    use std::sync::OnceLock;
     use tempfile::TempDir;
-    use tokio::sync::Mutex;
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn parse_mount_arg_accepts_ro_and_rw() {
@@ -294,12 +272,17 @@ mod tests {
 
     #[test]
     fn create_command_parses_nested_virtualization_flag() {
-        let cmd =
-            BentoCtlCmd::try_parse_from(["bentoctl", "new", "dev", "--nested-virtualization"])
-                .expect("create command should parse");
+        let cmd = BentoCtlCmd::try_parse_from([
+            "bentoctl",
+            "create",
+            "ghcr.io/acme/base:latest",
+            "dev",
+            "--nested-virtualization",
+        ])
+        .expect("create command should parse");
 
         let create = match cmd.cmd {
-            Command::New(cmd) => cmd,
+            Command::Create(cmd) => cmd,
             other => panic!("expected create command, got {other:?}"),
         };
 
@@ -308,11 +291,17 @@ mod tests {
 
     #[test]
     fn create_command_parses_rosetta_flag() {
-        let cmd = BentoCtlCmd::try_parse_from(["bentoctl", "new", "dev", "--rosetta"])
-            .expect("create command should parse");
+        let cmd = BentoCtlCmd::try_parse_from([
+            "bentoctl",
+            "create",
+            "ghcr.io/acme/base:latest",
+            "dev",
+            "--rosetta",
+        ])
+        .expect("create command should parse");
 
         let create = match cmd.cmd {
-            Command::New(cmd) => cmd,
+            Command::Create(cmd) => cmd,
             other => panic!("expected create command, got {other:?}"),
         };
 
@@ -323,17 +312,16 @@ mod tests {
     fn create_command_parses_disk_size_flag() {
         let cmd = BentoCtlCmd::try_parse_from([
             "bentoctl",
-            "new",
+            "create",
+            "example.com/acme/image:latest",
             "dev",
-            "--image",
-            "example:image",
             "--disk-size",
             "40",
         ])
         .expect("create command should parse");
 
         let create = match cmd.cmd {
-            Command::New(cmd) => cmd,
+            Command::Create(cmd) => cmd,
             other => panic!("expected create command, got {other:?}"),
         };
 
@@ -372,75 +360,6 @@ mod tests {
             .expect_err("missing disk should fail");
 
         assert!(err.to_string().contains("disk path does not exist"));
-    }
-
-    #[tokio::test]
-    async fn create_rolls_back_when_default_boot_assets_are_missing() {
-        let _guard = env_lock().lock().await;
-        let tmp = TempDir::new().expect("temp dir should be creatable");
-        let original = std::env::var_os("XDG_DATA_HOME");
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", tmp.path());
-        }
-
-        let cmd = Cmd {
-            name: "test".to_string(),
-            cpus: 2,
-            memory: 1024,
-            kernel: None,
-            initramfs: None,
-            image: None,
-            disk_size: None,
-            nested_virtualization: false,
-            rosetta: false,
-            userdata: None,
-            disks: Vec::new(),
-            mounts: Vec::new(),
-            network: None,
-            enabled_extensions: Vec::new(),
-        };
-
-        let store = InstanceStore::new();
-        let err = cmd
-            .run(&store)
-            .await
-            .expect_err("missing default boot assets should fail create");
-
-        match original {
-            Some(value) => unsafe { std::env::set_var("XDG_DATA_HOME", value) },
-            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
-        }
-
-        assert!(err.to_string().contains("kernel path is not a file"));
-        assert!(!tmp.path().join("bento/test").exists());
-    }
-
-    #[tokio::test]
-    async fn create_rejects_disk_size_without_image() {
-        let cmd = Cmd {
-            name: "test".to_string(),
-            cpus: 2,
-            memory: 1024,
-            kernel: None,
-            initramfs: None,
-            image: None,
-            disk_size: Some(40),
-            nested_virtualization: false,
-            rosetta: false,
-            userdata: None,
-            disks: Vec::new(),
-            mounts: Vec::new(),
-            network: None,
-            enabled_extensions: Vec::new(),
-        };
-
-        let store = InstanceStore::new();
-        let err = cmd
-            .run(&store)
-            .await
-            .expect_err("disk size without image should fail");
-
-        assert!(err.to_string().contains("--disk-size requires --image"));
     }
 
     #[test]

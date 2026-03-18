@@ -287,6 +287,7 @@ pub struct InstanceCreateOptions {
     pub memory: u32,
     pub kernel: Option<PathBuf>,
     pub initramfs: Option<PathBuf>,
+    pub root_disk: Option<PathBuf>,
     pub nested_virtualization: bool,
     pub rosetta: bool,
     pub disks: Vec<PathBuf>,
@@ -304,6 +305,7 @@ impl Default for InstanceCreateOptions {
             memory: 512,
             kernel: None,
             initramfs: None,
+            root_disk: None,
             nested_virtualization: false,
             rosetta: false,
             disks: Vec::new(),
@@ -329,6 +331,11 @@ impl InstanceCreateOptions {
 
     pub fn with_initramfs(mut self, path: Option<PathBuf>) -> Self {
         self.initramfs = path;
+        self
+    }
+
+    pub fn with_root_disk(mut self, path: Option<PathBuf>) -> Self {
+        self.root_disk = path;
         self
     }
 
@@ -387,6 +394,7 @@ fn apply_create_options(
         memory,
         kernel,
         initramfs,
+        root_disk,
         nested_virtualization,
         rosetta,
         disks,
@@ -403,13 +411,18 @@ fn apply_create_options(
     config.initramfs_path = initramfs;
     config.nested_virtualization = Some(nested_virtualization);
     config.rosetta = Some(rosetta);
-    config.disks = disks
+    config.disks = root_disk
         .iter()
         .map(|path| DiskConfig {
             path: path.clone(),
-            role: Some(DiskRole::Data),
+            role: Some(DiskRole::Root),
             read_only: Some(false),
         })
+        .chain(disks.iter().map(|path| DiskConfig {
+            path: path.clone(),
+            role: Some(DiskRole::Data),
+            read_only: Some(false),
+        }))
         .collect();
     config.mounts = normalize_mounts(&mounts)?;
     config.network = network;

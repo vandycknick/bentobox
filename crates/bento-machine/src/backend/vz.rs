@@ -331,9 +331,14 @@ unsafe fn create_vm_config(spec: &ResolvedMachineSpec) -> Result<VmBootstrap, Ma
     let initramfs_url = NSURL::initFileURLWithPath(NSURL::alloc(), &initramfs);
     bootloader.setInitialRamdiskURL(Some(&initramfs_url));
 
+    let root_arg = config
+        .root_disk
+        .as_ref()
+        .map(|_| "root=/dev/vda")
+        .unwrap_or("");
     let command_line = format!(
-        "console=hvc0 rd.break=initqueue root=/dev/vda {}={}",
-        KERNEL_PARAM_DISCOVERY_PORT, DEFAULT_DISCOVERY_PORT,
+        "console=hvc0 rd.break=initqueue {} {}={}",
+        root_arg, KERNEL_PARAM_DISCOVERY_PORT, DEFAULT_DISCOVERY_PORT,
     );
     bootloader.setCommandLine(&NSString::from_str(&command_line));
 

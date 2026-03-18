@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use oci_client::client::{Client, ClientConfig};
 use oci_client::manifest::OciManifest;
 use oci_client::secrets::RegistryAuth;
@@ -17,17 +15,25 @@ use thiserror::Error;
 use tokio::runtime::Builder;
 
 use crate::directories::Directory;
+use crate::images::metadata::ImageMetadata;
 
 const REGISTRY_INDEX_VERSION: u32 = 1;
 const REGISTRY_FILE_NAME: &str = "registry.json";
 const ARTIFACT_TYPE: &str = "application/vnd.bentobox.base-image.v1";
-const CONFIG_MEDIA_TYPE: &str = "application/vnd.bentobox.base-image.config.v1+json";
-const LAYER_MEDIA_TYPE_ZSTD: &str = "application/vnd.bentobox.disk.raw.v1+zstd";
+const CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.v1+json";
+const METADATA_MEDIA_TYPE: &str = "application/vnd.bentobox.image.metadata.v1+json";
+const LAYER_MEDIA_TYPE_ZSTD: &str = "application/vnd.bentobox.disk.chunk.v1+zstd";
 const LAYER_MEDIA_TYPE_GZIP: &str = "application/vnd.bentobox.disk.raw.v1+gzip";
+const KERNEL_MEDIA_TYPE: &str = "application/vnd.bentobox.boot.kernel.v1";
+const INITRAMFS_MEDIA_TYPE: &str = "application/vnd.bentobox.boot.initramfs.v1";
 const OCI_MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 const OCI_INDEX_MEDIA_TYPE: &str = "application/vnd.oci.image.index.v1+json";
 const OCI_LAYOUT_VERSION: &str = "1.0.0";
 const MISSING_ARTIFACT_TYPE: &str = "<missing> (possibly OCI container image manifest)";
+const IMAGE_METADATA_FILE_NAME: &str = "metadata.json";
+const IMAGE_KERNEL_FILE_NAME: &str = "kernel";
+const IMAGE_INITRAMFS_FILE_NAME: &str = "initramfs";
+const ROOTFS_CHUNK_SIZE_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -37,13 +43,6 @@ pub enum ImageCompression {
 }
 
 impl ImageCompression {
-    fn layer_media_type(self) -> &'static str {
-        match self {
-            Self::Zstd => LAYER_MEDIA_TYPE_ZSTD,
-            Self::Gzip => LAYER_MEDIA_TYPE_GZIP,
-        }
-    }
-
     fn from_layer_media_type(media_type: &str) -> Result<Self, ImageStoreError> {
         match media_type {
             LAYER_MEDIA_TYPE_ZSTD => Ok(Self::Zstd),
@@ -64,7 +63,15 @@ pub struct ImageRecord {
     pub compression: ImageCompression,
     pub os: Option<String>,
     pub arch: Option<String>,
+    #[serde(default)]
+    pub metadata_relpath: PathBuf,
     pub rootfs_relpath: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_relpath: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initramfs_relpath: Option<PathBuf>,
+    #[serde(default)]
+    pub metadata: ImageMetadata,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -105,6 +112,12 @@ impl RegistryIndex {
 pub struct ImageStore {
     root: PathBuf,
     registry: RegistryIndex,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackLayout {
+    pub work_dir: PathBuf,
+    pub layout_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,53 +351,126 @@ impl ImageStore {
             });
         }
 
-        let layer = manifest_value
+        let manifest_layers = manifest_value
             .get("layers")
             .and_then(|v| v.as_array())
-            .and_then(|layers| layers.first())
             .ok_or_else(|| ImageStoreError::MissingLayer {
                 reference: reference.to_string(),
             })?;
-
-        let layer_media_type =
-            layer
-                .get("mediaType")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| ImageStoreError::MissingLayer {
-                    reference: reference.to_string(),
-                })?;
-        let compression = ImageCompression::from_layer_media_type(layer_media_type)?;
-
-        let layer_digest = layer
-            .get("digest")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ImageStoreError::MissingLayer {
+        if manifest_layers.is_empty() {
+            return Err(ImageStoreError::MissingLayer {
                 reference: reference.to_string(),
-            })?
-            .to_string();
+            });
+        }
 
         let image_id = image_id_from_digest(&manifest_digest);
         let image_dir = self.root.join(&image_id);
         fs::create_dir_all(&image_dir)?;
 
-        let compressed_path = image_dir.join("rootfs.img.compressed");
-        let out = runtime
-            .block_on(tokio::fs::File::create(&compressed_path))
-            .map_err(ImageStoreError::Io)?;
-
-        runtime
-            .block_on(client.pull_blob(&parsed, layer_digest.as_str(), out))
-            .map_err(|err| ImageStoreError::Oci(err.to_string()))?;
-
-        let rootfs_path = image_dir.join("rootfs.img");
-        decompress_to_file(compression, &compressed_path, &rootfs_path)?;
-        let _ = fs::remove_file(&compressed_path);
-
         let annotations = read_annotations(&manifest_value);
+        let metadata_path = image_dir.join(IMAGE_METADATA_FILE_NAME);
+        let rootfs_path = image_dir.join("rootfs.img");
+        let kernel_path = image_dir.join(IMAGE_KERNEL_FILE_NAME);
+        let initramfs_path = image_dir.join(IMAGE_INITRAMFS_FILE_NAME);
+        let mut metadata: Option<ImageMetadata> = None;
+        let mut compression = ImageCompression::Zstd;
+        let mut rootfs_layers = Vec::new();
+        let mut kernel_digest: Option<String> = None;
+        let mut initramfs_digest: Option<String> = None;
+
+        for layer in manifest_layers {
+            let media_type = layer
+                .get("mediaType")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ImageStoreError::MissingLayer {
+                    reference: reference.to_string(),
+                })?;
+            let digest = layer
+                .get("digest")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ImageStoreError::MissingLayer {
+                    reference: reference.to_string(),
+                })?
+                .to_string();
+
+            match media_type {
+                METADATA_MEDIA_TYPE => {
+                    let out = runtime
+                        .block_on(tokio::fs::File::create(&metadata_path))
+                        .map_err(ImageStoreError::Io)?;
+                    runtime
+                        .block_on(client.pull_blob(&parsed, digest.as_str(), out))
+                        .map_err(|err| ImageStoreError::Oci(err.to_string()))?;
+                    metadata = Some(serde_json::from_slice(&fs::read(&metadata_path)?)?);
+                }
+                KERNEL_MEDIA_TYPE => {
+                    if kernel_digest.replace(digest).is_some() {
+                        return Err(ImageStoreError::UnsupportedMediaType {
+                            media_type: "duplicate kernel layer".to_string(),
+                        });
+                    }
+                }
+                INITRAMFS_MEDIA_TYPE => {
+                    if initramfs_digest.replace(digest).is_some() {
+                        return Err(ImageStoreError::UnsupportedMediaType {
+                            media_type: "duplicate initramfs layer".to_string(),
+                        });
+                    }
+                }
+                LAYER_MEDIA_TYPE_ZSTD | LAYER_MEDIA_TYPE_GZIP => {
+                    compression = ImageCompression::from_layer_media_type(media_type)?;
+                    rootfs_layers.push(digest);
+                }
+                _ => {
+                    return Err(ImageStoreError::UnsupportedMediaType {
+                        media_type: media_type.to_string(),
+                    });
+                }
+            }
+        }
+
+        if rootfs_layers.is_empty() {
+            return Err(ImageStoreError::MissingLayer {
+                reference: reference.to_string(),
+            });
+        }
+
+        let metadata = metadata.ok_or_else(|| ImageStoreError::MissingLayer {
+            reference: format!("{reference} (missing metadata layer)"),
+        })?;
+
+        reconstruct_remote_rootfs(
+            &runtime,
+            &client,
+            &parsed,
+            compression,
+            &rootfs_layers,
+            &rootfs_path,
+        )?;
+
+        if let Some(digest) = kernel_digest.as_ref() {
+            let out = runtime
+                .block_on(tokio::fs::File::create(&kernel_path))
+                .map_err(ImageStoreError::Io)?;
+            runtime
+                .block_on(client.pull_blob(&parsed, digest.as_str(), out))
+                .map_err(|err| ImageStoreError::Oci(err.to_string()))?;
+        }
+
+        if let Some(digest) = initramfs_digest.as_ref() {
+            let out = runtime
+                .block_on(tokio::fs::File::create(&initramfs_path))
+                .map_err(ImageStoreError::Io)?;
+            runtime
+                .block_on(client.pull_blob(&parsed, digest.as_str(), out))
+                .map_err(|err| ImageStoreError::Oci(err.to_string()))?;
+        }
+
+        write_atomic_json(&metadata_path, &metadata)?;
+
         let tag_name = alias
             .map(ToOwned::to_owned)
-            .or_else(|| annotations.get("io.bentobox.image.name").cloned())
-            .unwrap_or_else(|| default_name_from_reference(reference));
+            .unwrap_or_else(|| reference.to_string());
 
         let now = now_rfc3339();
         let mut record = ImageRecord {
@@ -393,9 +479,17 @@ impl ImageStore {
             manifest_digest,
             artifact_type: ARTIFACT_TYPE.to_string(),
             compression,
-            os: annotations.get("io.bentobox.image.os").cloned(),
-            arch: annotations.get("io.bentobox.image.arch").cloned(),
+            os: Some(metadata.os.clone()),
+            arch: Some(metadata.arch.clone()),
+            metadata_relpath: PathBuf::from(format!("{image_id}/{IMAGE_METADATA_FILE_NAME}")),
             rootfs_relpath: PathBuf::from(format!("{image_id}/rootfs.img")),
+            kernel_relpath: kernel_digest
+                .as_ref()
+                .map(|_| PathBuf::from(format!("{image_id}/{IMAGE_KERNEL_FILE_NAME}"))),
+            initramfs_relpath: initramfs_digest
+                .as_ref()
+                .map(|_| PathBuf::from(format!("{image_id}/{IMAGE_INITRAMFS_FILE_NAME}"))),
+            metadata,
             created_at: now.clone(),
             updated_at: now,
             annotations,
@@ -458,7 +552,7 @@ impl ImageStore {
 
     fn import_from_layout(
         &mut self,
-        source: &Path,
+        _source: &Path,
         layout_path: &Path,
     ) -> Result<ImageRecord, ImageStoreError> {
         let oci_layout_path = layout_path.join("oci-layout");
@@ -538,58 +632,118 @@ impl ImageStore {
             });
         }
 
-        let layer = manifest.layers().first().ok_or_else(|| {
-            ImageStoreError::ImportMissingLayerDescriptor {
+        if manifest.layers().is_empty() {
+            return Err(ImageStoreError::ImportMissingLayerDescriptor {
                 path: manifest_blob_path.clone(),
-            }
-        })?;
-        let layer_digest = layer.digest().to_string();
-        if layer_digest.is_empty() {
-            return Err(ImageStoreError::ImportMissingLayerDigest {
-                path: manifest_blob_path.clone(),
-            });
-        }
-        let media_type = layer.media_type().to_string();
-        if media_type.is_empty() {
-            return Err(ImageStoreError::ImportMissingLayerMediaType {
-                path: manifest_blob_path.clone(),
-            });
-        }
-        let compression = ImageCompression::from_layer_media_type(&media_type)?;
-
-        let layer_blob_path = blob_path(layout_path, &layer_digest);
-        if !layer_blob_path.is_file() {
-            return Err(ImageStoreError::ImportMissingLayerBlob {
-                path: layer_blob_path,
-                digest: layer_digest.clone(),
             });
         }
 
         let image_id = image_id_from_digest(&manifest_digest);
         let image_dir = self.root.join(&image_id);
         fs::create_dir_all(&image_dir)?;
+        let metadata_path = image_dir.join(IMAGE_METADATA_FILE_NAME);
         let rootfs_path = image_dir.join("rootfs.img");
-        decompress_to_file(
-            compression,
-            &blob_path(layout_path, &layer_digest),
-            &rootfs_path,
-        )?;
+        let kernel_path = image_dir.join(IMAGE_KERNEL_FILE_NAME);
+        let initramfs_path = image_dir.join(IMAGE_INITRAMFS_FILE_NAME);
+        let mut metadata: Option<ImageMetadata> = None;
+        let mut compression = ImageCompression::Zstd;
+        let mut rootfs_layers = Vec::new();
+        let mut kernel_relpath = None;
+        let mut initramfs_relpath = None;
+
+        for layer in manifest.layers() {
+            let layer_digest = layer.digest().to_string();
+            if layer_digest.is_empty() {
+                return Err(ImageStoreError::ImportMissingLayerDigest {
+                    path: manifest_blob_path.clone(),
+                });
+            }
+            let media_type = layer.media_type().to_string();
+            if media_type.is_empty() {
+                return Err(ImageStoreError::ImportMissingLayerMediaType {
+                    path: manifest_blob_path.clone(),
+                });
+            }
+
+            let layer_blob_path = blob_path(layout_path, &layer_digest);
+            if !layer_blob_path.is_file() {
+                return Err(ImageStoreError::ImportMissingLayerBlob {
+                    path: layer_blob_path,
+                    digest: layer_digest.clone(),
+                });
+            }
+
+            match media_type.as_str() {
+                METADATA_MEDIA_TYPE => {
+                    fs::copy(&layer_blob_path, &metadata_path)?;
+                    metadata = Some(serde_json::from_slice(&fs::read(&metadata_path)?)?);
+                }
+                KERNEL_MEDIA_TYPE => {
+                    if kernel_relpath.is_some() {
+                        return Err(ImageStoreError::UnsupportedMediaType {
+                            media_type: "duplicate kernel layer".to_string(),
+                        });
+                    }
+                    fs::copy(&layer_blob_path, &kernel_path)?;
+                    kernel_relpath = Some(PathBuf::from(format!(
+                        "{image_id}/{IMAGE_KERNEL_FILE_NAME}"
+                    )));
+                }
+                INITRAMFS_MEDIA_TYPE => {
+                    if initramfs_relpath.is_some() {
+                        return Err(ImageStoreError::UnsupportedMediaType {
+                            media_type: "duplicate initramfs layer".to_string(),
+                        });
+                    }
+                    fs::copy(&layer_blob_path, &initramfs_path)?;
+                    initramfs_relpath = Some(PathBuf::from(format!(
+                        "{image_id}/{IMAGE_INITRAMFS_FILE_NAME}"
+                    )));
+                }
+                LAYER_MEDIA_TYPE_ZSTD | LAYER_MEDIA_TYPE_GZIP => {
+                    compression = ImageCompression::from_layer_media_type(&media_type)?;
+                    rootfs_layers.push(layer_blob_path);
+                }
+                _ => {
+                    return Err(ImageStoreError::UnsupportedMediaType { media_type });
+                }
+            }
+        }
+
+        if rootfs_layers.is_empty() {
+            return Err(ImageStoreError::ImportMissingLayerDescriptor {
+                path: manifest_blob_path.clone(),
+            });
+        }
+
+        let metadata = metadata.ok_or_else(|| ImageStoreError::ImportMissingLayerDescriptor {
+            path: manifest_blob_path.clone(),
+        })?;
+
+        reconstruct_layout_rootfs(compression, &rootfs_layers, &rootfs_path)?;
 
         let annotations = read_annotations(&manifest_value);
-        let tag_name = annotations
-            .get("io.bentobox.image.name")
+        write_atomic_json(&metadata_path, &metadata)?;
+        let tag_name = descriptor
+            .annotations()
+            .as_ref()
+            .and_then(|map| map.get("org.opencontainers.image.ref.name"))
             .cloned()
             .unwrap_or_else(|| image_id.clone());
         let now = now_rfc3339();
         let mut record = ImageRecord {
             id: image_id.clone(),
-            source_ref: format!("oci-layout:{}", source.display()),
+            source_ref: tag_name.clone(),
             manifest_digest,
             artifact_type: ARTIFACT_TYPE.to_string(),
             compression,
-            os: annotations.get("io.bentobox.image.os").cloned(),
-            arch: annotations.get("io.bentobox.image.arch").cloned(),
+            os: Some(metadata.os.clone()),
+            arch: Some(metadata.arch.clone()),
+            metadata_relpath: PathBuf::from(format!("{image_id}/{IMAGE_METADATA_FILE_NAME}")),
             rootfs_relpath: PathBuf::from(format!("{image_id}/rootfs.img")),
+            kernel_relpath,
+            initramfs_relpath,
+            metadata,
             created_at: now.clone(),
             updated_at: now,
             annotations,
@@ -604,96 +758,53 @@ impl ImageStore {
         Ok(record)
     }
 
-    pub fn pack_oci_archive(
-        disk_image: &Path,
-        name: &str,
-        out_path: &Path,
-        os: &str,
-        arch: &str,
-        compression: ImageCompression,
-    ) -> Result<PathBuf, ImageStoreError> {
-        let _ = parse_reference(name)?;
+    pub fn pack_instance(
+        &mut self,
+        reference: &str,
+        rootfs: &Path,
+        metadata: &ImageMetadata,
+        kernel: Option<&Path>,
+        initramfs: Option<&Path>,
+        annotations: BTreeMap<String, String>,
+    ) -> Result<ImageRecord, ImageStoreError> {
+        let pack_layout =
+            Self::build_pack_layout(reference, rootfs, metadata, kernel, initramfs, annotations)?;
+        let result = self.import_from_layout(Path::new(reference), &pack_layout.layout_root);
+        let _ = fs::remove_dir_all(&pack_layout.work_dir);
+        result
+    }
 
+    pub fn build_pack_layout(
+        reference: &str,
+        rootfs: &Path,
+        metadata: &ImageMetadata,
+        kernel: Option<&Path>,
+        initramfs: Option<&Path>,
+        annotations: BTreeMap<String, String>,
+    ) -> Result<PackLayout, ImageStoreError> {
+        let _ = parse_reference(reference)?;
         let work_dir = std::env::temp_dir().join(format!("bento-pack-{}", now_unix_nanos()));
         fs::create_dir_all(&work_dir)?;
-        let compressed = work_dir.join("layer.bin");
         let oci_layout_root = work_dir.join("layout");
         fs::create_dir_all(oci_layout_root.join("blobs/sha256"))?;
 
-        compress_to_file(compression, disk_image, &compressed)?;
-        let compressed_bytes = fs::read(&compressed)?;
-        let layer_digest = format!("sha256:{}", sha256_hex(&compressed_bytes));
-        let layer_size = compressed_bytes.len();
-        write_blob(&oci_layout_root, &layer_digest, &compressed_bytes)?;
-
-        let config_bytes = b"{}";
-        let config_digest = format!("sha256:{}", sha256_hex(config_bytes));
-        write_blob(&oci_layout_root, &config_digest, config_bytes)?;
-
-        let mut annotations = BTreeMap::new();
-        annotations.insert("io.bentobox.image.name".to_string(), name.to_string());
-        annotations.insert("io.bentobox.image.os".to_string(), os.to_string());
-        annotations.insert("io.bentobox.image.arch".to_string(), arch.to_string());
-        annotations.insert(
-            "org.opencontainers.image.created".to_string(),
-            now_rfc3339(),
-        );
-
-        let manifest = serde_json::json!({
-            "schemaVersion": 2,
-            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
-            "artifactType": ARTIFACT_TYPE,
-            "config": {
-                "mediaType": CONFIG_MEDIA_TYPE,
-                "digest": config_digest,
-                "size": config_bytes.len(),
-            },
-            "layers": [
-                {
-                    "mediaType": compression.layer_media_type(),
-                    "digest": layer_digest,
-                    "size": layer_size,
-                    "annotations": {
-                        "org.opencontainers.image.title": "rootfs.img"
-                    }
-                }
-            ],
-            "annotations": annotations,
-        });
-        let _manifest_typed: oci_spec::image::ImageManifest =
-            serde_json::from_value(manifest.clone())?;
-        let manifest_bytes = serde_json::to_vec(&manifest)?;
-        let manifest_digest = format!("sha256:{}", sha256_hex(&manifest_bytes));
-        write_blob(&oci_layout_root, &manifest_digest, &manifest_bytes)?;
-
-        let index = serde_json::json!({
-            "schemaVersion": 2,
-            "mediaType": OCI_INDEX_MEDIA_TYPE,
-            "manifests": [
-                {
-                    "mediaType": OCI_MANIFEST_MEDIA_TYPE,
-                    "digest": manifest_digest,
-                    "size": manifest_bytes.len(),
-                    "annotations": {
-                        "org.opencontainers.image.ref.name": name,
-                    }
-                }
-            ]
-        });
-        fs::write(
-            oci_layout_root.join("index.json"),
-            serde_json::to_vec_pretty(&index)?,
+        build_oci_layout(
+            &oci_layout_root,
+            reference,
+            rootfs,
+            metadata,
+            kernel,
+            initramfs,
+            annotations,
         )?;
 
-        let layout = serde_json::json!({
-            "imageLayoutVersion": OCI_LAYOUT_VERSION,
-        });
-        let _layout_typed: oci_spec::image::OciLayout = serde_json::from_value(layout.clone())?;
-        fs::write(
-            oci_layout_root.join("oci-layout"),
-            serde_json::to_vec_pretty(&layout)?,
-        )?;
+        Ok(PackLayout {
+            work_dir,
+            layout_root: oci_layout_root,
+        })
+    }
 
+    pub fn write_oci_archive(layout_root: &Path, out_path: &Path) -> Result<(), ImageStoreError> {
         if let Some(parent) = out_path.parent() {
             if !parent.as_os_str().is_empty() {
                 fs::create_dir_all(parent)?;
@@ -705,11 +816,17 @@ impl ImageStore {
             source,
         })?;
         let mut tar_builder = tar::Builder::new(out_file);
-        tar_builder.append_dir_all(".", &oci_layout_root)?;
+        tar_builder.append_dir_all(".", layout_root)?;
         tar_builder.finish()?;
+        Ok(())
+    }
 
-        let _ = fs::remove_dir_all(&work_dir);
-        Ok(out_path.to_path_buf())
+    pub fn import_pack_layout(
+        &mut self,
+        reference: &str,
+        layout_root: &Path,
+    ) -> Result<ImageRecord, ImageStoreError> {
+        self.import_from_layout(Path::new(reference), layout_root)
     }
 
     pub fn clone_base_image(
@@ -790,6 +907,20 @@ impl ImageStore {
         self.root.join(&image.rootfs_relpath)
     }
 
+    pub fn image_kernel_path(&self, image: &ImageRecord) -> Option<PathBuf> {
+        image
+            .kernel_relpath
+            .as_ref()
+            .map(|path| self.root.join(path))
+    }
+
+    pub fn image_initramfs_path(&self, image: &ImageRecord) -> Option<PathBuf> {
+        image
+            .initramfs_relpath
+            .as_ref()
+            .map(|path| self.root.join(path))
+    }
+
     fn upsert_record(&mut self, record: ImageRecord) -> Result<(), ImageStoreError> {
         if let Some(existing) = self.registry.images.iter_mut().find(|r| r.id == record.id) {
             *existing = record;
@@ -811,6 +942,216 @@ impl ImageStore {
         write_atomic_json(&self.root.join(REGISTRY_FILE_NAME), &self.registry)
             .map_err(ImageStoreError::Io)
     }
+}
+
+fn build_oci_layout(
+    oci_layout_root: &Path,
+    reference: &str,
+    rootfs: &Path,
+    metadata: &ImageMetadata,
+    kernel: Option<&Path>,
+    initramfs: Option<&Path>,
+    annotations: BTreeMap<String, String>,
+) -> Result<(), ImageStoreError> {
+    let config_bytes = b"{}";
+    let config_digest = format!("sha256:{}", sha256_hex(config_bytes));
+    write_blob(oci_layout_root, &config_digest, config_bytes)?;
+
+    let metadata_bytes = serde_json::to_vec_pretty(metadata)?;
+    let metadata_digest = format!("sha256:{}", sha256_hex(&metadata_bytes));
+    write_blob(oci_layout_root, &metadata_digest, &metadata_bytes)?;
+
+    let mut layers = vec![serde_json::json!({
+        "mediaType": METADATA_MEDIA_TYPE,
+        "digest": metadata_digest,
+        "size": metadata_bytes.len(),
+        "annotations": {"org.opencontainers.image.title": IMAGE_METADATA_FILE_NAME}
+    })];
+
+    for (index, chunk) in rootfs_chunks(rootfs)? {
+        let digest = format!("sha256:{}", sha256_hex(&chunk));
+        write_blob(oci_layout_root, &digest, &chunk)?;
+        layers.push(serde_json::json!({
+            "mediaType": LAYER_MEDIA_TYPE_ZSTD,
+            "digest": digest,
+            "size": chunk.len(),
+            "annotations": {
+                "org.opencontainers.image.title": format!("rootfs.{index:04}.zst")
+            }
+        }));
+    }
+
+    if let Some(kernel) = kernel {
+        let bytes = fs::read(kernel)?;
+        let digest = format!("sha256:{}", sha256_hex(&bytes));
+        write_blob(oci_layout_root, &digest, &bytes)?;
+        layers.push(serde_json::json!({
+            "mediaType": KERNEL_MEDIA_TYPE,
+            "digest": digest,
+            "size": bytes.len(),
+            "annotations": {"org.opencontainers.image.title": IMAGE_KERNEL_FILE_NAME}
+        }));
+    }
+
+    if let Some(initramfs) = initramfs {
+        let bytes = fs::read(initramfs)?;
+        let digest = format!("sha256:{}", sha256_hex(&bytes));
+        write_blob(oci_layout_root, &digest, &bytes)?;
+        layers.push(serde_json::json!({
+            "mediaType": INITRAMFS_MEDIA_TYPE,
+            "digest": digest,
+            "size": bytes.len(),
+            "annotations": {"org.opencontainers.image.title": IMAGE_INITRAMFS_FILE_NAME}
+        }));
+    }
+
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+        "artifactType": ARTIFACT_TYPE,
+        "config": {
+            "mediaType": CONFIG_MEDIA_TYPE,
+            "digest": config_digest,
+            "size": config_bytes.len(),
+        },
+        "layers": layers,
+        "annotations": annotations,
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    let manifest_digest = format!("sha256:{}", sha256_hex(&manifest_bytes));
+    write_blob(oci_layout_root, &manifest_digest, &manifest_bytes)?;
+
+    let index = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": OCI_INDEX_MEDIA_TYPE,
+        "manifests": [{
+            "mediaType": OCI_MANIFEST_MEDIA_TYPE,
+            "digest": manifest_digest,
+            "size": manifest_bytes.len(),
+            "annotations": {"org.opencontainers.image.ref.name": reference}
+        }]
+    });
+    fs::write(
+        oci_layout_root.join("index.json"),
+        serde_json::to_vec_pretty(&index)?,
+    )?;
+    fs::write(
+        oci_layout_root.join("oci-layout"),
+        serde_json::to_vec_pretty(&serde_json::json!({"imageLayoutVersion": OCI_LAYOUT_VERSION}))?,
+    )?;
+
+    Ok(())
+}
+
+fn rootfs_chunks(rootfs: &Path) -> Result<Vec<(usize, Vec<u8>)>, ImageStoreError> {
+    let mut file = File::open(rootfs)?;
+    let mut index = 0usize;
+    let mut chunks = Vec::new();
+
+    loop {
+        let mut buf = vec![0u8; ROOTFS_CHUNK_SIZE_BYTES];
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        buf.truncate(read);
+
+        let mut encoder = zstd::Encoder::new(Vec::new(), 8)?;
+        encoder.write_all(&buf)?;
+        let compressed = encoder.finish()?;
+        chunks.push((index, compressed));
+        index += 1;
+    }
+
+    Ok(chunks)
+}
+
+fn reconstruct_layout_rootfs(
+    compression: ImageCompression,
+    chunks: &[PathBuf],
+    destination: &Path,
+) -> Result<(), ImageStoreError> {
+    let mut output = File::create(destination)?;
+    let mut total_len = 0u64;
+    for chunk in chunks {
+        total_len += append_decompressed_chunk(compression, chunk, &mut output)?;
+    }
+    output.set_len(total_len)?;
+    output.flush()?;
+    Ok(())
+}
+
+fn reconstruct_remote_rootfs(
+    runtime: &tokio::runtime::Runtime,
+    client: &Client,
+    parsed: &Reference,
+    compression: ImageCompression,
+    digests: &[String],
+    destination: &Path,
+) -> Result<(), ImageStoreError> {
+    let mut output = File::create(destination)?;
+    let mut total_len = 0u64;
+    for (index, digest) in digests.iter().enumerate() {
+        let temp = destination.with_extension(format!("chunk-{index}"));
+        let out = runtime
+            .block_on(tokio::fs::File::create(&temp))
+            .map_err(ImageStoreError::Io)?;
+        runtime
+            .block_on(client.pull_blob(parsed, digest.as_str(), out))
+            .map_err(|err| ImageStoreError::Oci(err.to_string()))?;
+        total_len += append_decompressed_chunk(compression, &temp, &mut output)?;
+        let _ = fs::remove_file(temp);
+    }
+    output.set_len(total_len)?;
+    output.flush()?;
+    Ok(())
+}
+
+fn append_decompressed_chunk(
+    compression: ImageCompression,
+    source: &Path,
+    output: &mut File,
+) -> Result<u64, ImageStoreError> {
+    let input = File::open(source)?;
+    let mut buf = [0u8; 1024 * 1024];
+    let mut total_len = 0u64;
+    match compression {
+        ImageCompression::Zstd => {
+            let mut decoder = zstd::Decoder::new(BufReader::new(input))?;
+            loop {
+                let n = decoder.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+
+                if buf[..n].iter().all(|byte| *byte == 0) {
+                    std::io::Seek::seek(output, std::io::SeekFrom::Current(n as i64))?;
+                } else {
+                    output.write_all(&buf[..n])?;
+                }
+
+                total_len += n as u64;
+            }
+        }
+        ImageCompression::Gzip => {
+            let mut decoder = GzDecoder::new(BufReader::new(input));
+            loop {
+                let n = decoder.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+
+                if buf[..n].iter().all(|byte| *byte == 0) {
+                    std::io::Seek::seek(output, std::io::SeekFrom::Current(n as i64))?;
+                } else {
+                    output.write_all(&buf[..n])?;
+                }
+
+                total_len += n as u64;
+            }
+        }
+    }
+    Ok(total_len)
 }
 
 fn parse_reference(reference: &str) -> Result<Reference, ImageStoreError> {
@@ -841,6 +1182,7 @@ fn is_tar_file(path: &Path) -> bool {
     }
 }
 
+#[cfg(test)]
 fn decompress_to_file(
     compression: ImageCompression,
     source: &Path,
@@ -861,7 +1203,7 @@ fn decompress_to_file(
                 }
 
                 if buf[..n].iter().all(|byte| *byte == 0) {
-                    output.seek(SeekFrom::Current(n as i64))?;
+                    std::io::Seek::seek(&mut output, std::io::SeekFrom::Current(n as i64))?;
                 } else {
                     output.write_all(&buf[..n])?;
                 }
@@ -878,7 +1220,7 @@ fn decompress_to_file(
                 }
 
                 if buf[..n].iter().all(|byte| *byte == 0) {
-                    output.seek(SeekFrom::Current(n as i64))?;
+                    std::io::Seek::seek(&mut output, std::io::SeekFrom::Current(n as i64))?;
                 } else {
                     output.write_all(&buf[..n])?;
                 }
@@ -893,6 +1235,7 @@ fn decompress_to_file(
     Ok(())
 }
 
+#[cfg(test)]
 fn compress_to_file(
     compression: ImageCompression,
     source: &Path,
@@ -904,12 +1247,12 @@ fn compress_to_file(
 
     match compression {
         ImageCompression::Zstd => {
-            let mut encoder = zstd::Encoder::new(BufWriter::new(output), 8)?;
+            let mut encoder = zstd::Encoder::new(output, 8)?;
             io::copy(&mut reader, &mut encoder)?;
             encoder.finish()?.flush()?;
         }
         ImageCompression::Gzip => {
-            let mut encoder = GzEncoder::new(BufWriter::new(output), Compression::default());
+            let mut encoder = flate2::write::GzEncoder::new(output, flate2::Compression::default());
             io::copy(&mut reader, &mut encoder)?;
             encoder.finish()?.flush()?;
         }
@@ -951,25 +1294,6 @@ fn image_id_from_digest(digest: &str) -> String {
         .strip_prefix("sha256:")
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| digest.to_string())
-}
-
-fn default_name_from_reference(reference: &str) -> String {
-    reference
-        .split('/')
-        .next_back()
-        .unwrap_or(reference)
-        .to_string()
-}
-
-pub fn default_archive_name(image_name: &str) -> String {
-    let safe = image_name
-        .chars()
-        .map(|ch| match ch {
-            '/' | ':' | '@' => '-',
-            _ => ch,
-        })
-        .collect::<String>();
-    format!("{safe}.oci.tar")
 }
 
 fn blob_path(layout: &Path, digest: &str) -> PathBuf {
@@ -1112,12 +1436,6 @@ mod tests {
     }
 
     #[test]
-    fn default_archive_name_is_oci_tar_and_sanitized() {
-        let name = default_archive_name("ghcr.io/acme/base:1.0@sha256:abc");
-        assert_eq!(name, "ghcr.io-acme-base-1.0-sha256-abc.oci.tar");
-    }
-
-    #[test]
     fn image_id_strips_sha256_prefix() {
         assert_eq!(
             image_id_from_digest("sha256:0123456789abcdef"),
@@ -1253,7 +1571,13 @@ mod tests {
                     compression: ImageCompression::Zstd,
                     os: Some("linux".to_string()),
                     arch: Some("arm64".to_string()),
+                    metadata_relpath: PathBuf::from(format!(
+                        "{image_id}/{IMAGE_METADATA_FILE_NAME}"
+                    )),
                     rootfs_relpath: PathBuf::from(format!("{image_id}/rootfs.img")),
+                    kernel_relpath: None,
+                    initramfs_relpath: None,
+                    metadata: ImageMetadata::default(),
                     created_at: now_rfc3339(),
                     updated_at: now_rfc3339(),
                     annotations: BTreeMap::new(),
@@ -1298,7 +1622,13 @@ mod tests {
                     compression: ImageCompression::Zstd,
                     os: Some("linux".to_string()),
                     arch: Some("arm64".to_string()),
+                    metadata_relpath: PathBuf::from(format!(
+                        "{image_id}/{IMAGE_METADATA_FILE_NAME}"
+                    )),
                     rootfs_relpath: PathBuf::from(format!("{image_id}/rootfs.img")),
+                    kernel_relpath: None,
+                    initramfs_relpath: None,
+                    metadata: ImageMetadata::default(),
                     created_at: now_rfc3339(),
                     updated_at: now_rfc3339(),
                     annotations: BTreeMap::new(),
@@ -1332,7 +1662,11 @@ mod tests {
             compression: ImageCompression::Zstd,
             os: Some("linux".to_string()),
             arch: Some("arm64".to_string()),
+            metadata_relpath: PathBuf::from(format!("{image_id}/{IMAGE_METADATA_FILE_NAME}")),
             rootfs_relpath: PathBuf::from(format!("{image_id}/rootfs.img")),
+            kernel_relpath: None,
+            initramfs_relpath: None,
+            metadata: ImageMetadata::default(),
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
             annotations: BTreeMap::new(),
@@ -1412,7 +1746,13 @@ mod tests {
                     compression: ImageCompression::Zstd,
                     os: Some("linux".to_string()),
                     arch: Some("arm64".to_string()),
+                    metadata_relpath: PathBuf::from(format!(
+                        "{image_id}/{IMAGE_METADATA_FILE_NAME}"
+                    )),
                     rootfs_relpath: PathBuf::from(format!("{image_id}/rootfs.img")),
+                    kernel_relpath: None,
+                    initramfs_relpath: None,
+                    metadata: ImageMetadata::default(),
                     created_at: now_rfc3339(),
                     updated_at: now_rfc3339(),
                     annotations: BTreeMap::new(),

@@ -8,34 +8,25 @@ Implemented
 
 ## Context
 
-We need image management for VM base images that supports the following:
+Bentobox needs an image workflow that supports:
 
-- OCI-backed base images for VM root disks.
-- Local image store with unpacked images and metadata index.
-- `bentoctl images` command group with `list`, `pull`, `import`, `pack`, and `rm`.
-- `bentoctl create --image` that accepts local names or OCI references and auto-pulls when missing.
-- Anonymous/public registry support in V1, credentials in V2.
-- Compressed disk payloads (zstd default, gzip fallback).
-- Existing runtime behavior where instance `rootfs.img` is used when present.
+- OCI-backed VM base images.
+- A shared local image store that acts as the persistent cache.
+- Pulling remote OCI images into that store.
+- Importing OCI tar archives into that store for offline and cross-machine transfer.
+- Packing a stopped local VM into the same store.
+- Creating instances from image refs.
+- Creating lower-level raw instances without requiring a base image.
 
-We also want to keep V1 simple and explicit:
-
-- No CAS-first blob store.
-- No built-in disk resize command yet.
-- No private registry credential handling yet.
-- No dedupe/GC/snapshot complexity yet.
-
-The local directory location must reuse existing `Directory` resolution logic.
+The core design choice is that OCI is only the transport format. Bentobox persists normalized
+images in its own local store and creates instances from that store. It does not keep a second
+long-lived OCI blob cache in V1.
 
 ## Decision
 
-We will implement a V1 image management system with a simple unpacked store and `registry.json` index.
+### Local image store
 
-### Directory and storage model
-
-Use `Directory::with_prefix("images").get_data_home()` from `crates/bento-runtime/src/directories.rs`.
-
-Image store root resolves to:
+Bentobox stores normalized images under `Directory::with_prefix("images").get_data_home()`:
 
 - `$XDG_DATA_HOME/bento/images`, else
 - `~/.local/share/bento/images`
@@ -46,101 +37,143 @@ Store layout:
 <images-root>/
   registry.json
   <image-id>/
+    metadata.json
     rootfs.img
-    source.json        # optional provenance snapshot
+    kernel        # optional
+    initramfs     # optional
 ```
 
-`<image-id>` is a stable local identifier derived from manifest digest, normalized by stripping the
-`sha256:` prefix.
+`<image-id>` is derived from the OCI manifest digest by stripping the `sha256:` prefix.
 
-### Registry index (`registry.json`)
+`registry.json` stores image records and tag mappings. A record tracks:
 
-Schema V1:
+- image ID and manifest digest
+- source ref
+- artifact type
+- metadata payload
+- rootfs path
+- optional kernel/initramfs paths
+- timestamps
+- standard OCI annotations retained from the manifest
+
+### OCI artifact format
+
+Bentobox uses a standard OCI image manifest with custom payload layers.
+
+- Artifact type: `application/vnd.bentobox.base-image.v1`
+- Config media type: `application/vnd.oci.image.config.v1+json`
+- Metadata layer: `application/vnd.bentobox.image.metadata.v1+json`
+- Rootfs chunk layer: `application/vnd.bentobox.disk.chunk.v1+zstd`
+- Kernel layer: `application/vnd.bentobox.boot.kernel.v1` (optional, at most one)
+- Initramfs layer: `application/vnd.bentobox.boot.initramfs.v1` (optional, at most one)
+
+Validation rules:
+
+- exactly one metadata layer
+- at least one rootfs chunk layer
+- at most one kernel layer
+- at most one initramfs layer
+
+The rootfs payload is a raw disk split into fixed-size chunks and compressed chunk-by-chunk with
+zstd. Chunks are reconstructed in manifest order into `rootfs.img` on ingest.
+
+The metadata JSON is the source of truth for image defaults and capabilities:
 
 ```json
 {
-  "version": 1,
-  "tags": [
-    {
-      "name": "ubuntu-24.04-arm64",
-      "image_id": "0123456789abcdef..."
-    }
-  ],
-  "images": [
-    {
-      "id": "<digest-no-sha256-prefix>",
-      "source_ref": "ghcr.io/example/ubuntu-base:24.04-arm64",
-      "manifest_digest": "sha256:...",
-      "artifact_type": "application/vnd.bentobox.base-image.v1",
-      "compression": "zstd",
-      "os": "ubuntu",
-      "arch": "arm64",
-      "rootfs_relpath": "<digest-no-sha256-prefix>/rootfs.img",
-      "created_at": "2026-02-20T12:34:56Z",
-      "updated_at": "2026-02-20T12:34:56Z",
-      "annotations": {
-        "io.bentobox.image.name": "ubuntu-24.04-arm64"
-      }
-    }
-  ]
+  "schemaVersion": 1,
+  "os": "linux",
+  "arch": "arm64",
+  "defaults": {
+    "cpu": 4,
+    "memoryMiB": 4096
+  },
+  "bootstrap": {
+    "cidataCloudInit": true
+  },
+  "extensions": {
+    "ssh": true,
+    "docker": false,
+    "portForward": false
+  }
 }
 ```
 
-Name resolution for `bentoctl create --image <value>`:
+Bundled boot assets are inferred from the presence of the optional kernel and initramfs layers, not
+from metadata fields.
 
-1. Match `tags[].name == value`, then resolve `image_id -> images[]`.
-2. Else match `images[].source_ref == value`.
-3. Else treat `value` as OCI reference and attempt pull.
-4. If pull succeeds, resolve using newly inserted record.
+### Instance creation from images
 
-Tag semantics:
+`bentoctl create <ref> <name>` resolves a local image or pulls it on demand, then:
 
-- Multiple tags may point to the same image ID.
-- Pull/import upsert image records by image ID and upsert a single tag mapping for the selected tag name.
-- Tags are first-class lookup keys for `create --image`, `images list`, and `images rm`.
+- applies image metadata defaults for CPU, memory, bootstrap capability, and extensions unless CLI
+  overrides them
+- prefers bundled `kernel` and `initramfs` when present unless CLI overrides them
+- falls back to the global default kernel and initramfs bundle when the image does not provide them
+- materializes the instance rootfs from the shared image store using `clonefile` on APFS when
+  available, otherwise falls back to a normal copy
 
-### OCI artifact contract (V1)
+### Raw instance creation
 
-- Artifact type: `application/vnd.bentobox.base-image.v1`
-- Layer media types:
-  - preferred: `application/vnd.bentobox.disk.raw.v1+zstd`
-  - fallback: `application/vnd.bentobox.disk.raw.v1+gzip`
-- Config media type: `application/vnd.bentobox.base-image.config.v1+json`
-- Metadata annotations:
-  - `io.bentobox.image.name` (fallback to `<repo>:<tag>` on ingest)
-  - `io.bentobox.image.os`
-  - `io.bentobox.image.arch`
-  - `org.opencontainers.image.created`
+`bentoctl create-raw <name>` is the lower-level workflow.
 
-Payload format is a compressed raw disk blob.
+- default rootfs mode is no root disk
+- `--rootfs <path>` attaches an existing root disk
+- `--empty-rootfs <gb>` creates a sparse raw root disk in the instance directory
 
-### Sparse and CoW behavior
+Backends must not assume a root disk always exists. Boot arguments should only include
+`root=/dev/vda` when a root disk is actually attached.
 
-- Pulled/imported base images are stored as `rootfs.img` in the image store.
-- For `create --image`, materialize instance `rootfs.img` by:
-  1. attempting APFS CoW clone via `clonefile`
-  2. falling back to normal copy if clone fails
+### Packing local VMs
 
-Notes:
+`bentoctl images pack <vm> <ref>`:
 
-- `clonefile` generally preserves CoW and sparse semantics.
-- fallback copy may materialize holes and increase physical size, accepted in V1.
+- requires a stopped VM with a root disk
+- captures the VM rootfs and metadata into the Bentobox OCI format
+- can optionally bundle the resolved kernel and/or initramfs with `--include-kernel` and
+  `--include-initrd`
+- ingests the resulting artifact into the shared local image store under `<ref>` by default
 
-### Backend disk semantics
+Optional pack output controls:
 
-For Apple `Virtualization.framework` guests backed by disk image files, we should not rely on the
-framework defaults for Linux guests. Tart hit Linux guest filesystem corruption on Apple
-Virtualization and now defaults Linux VMs to `.cached` caching with `.full` synchronization in
-`Sources/tart/VM.swift`, citing `cirruslabs/tart#675`.
+- `--outfile <path>` writes the generated OCI layout as a tar archive and skips importing it into
+  the local image store
+- `--debug` keeps the temporary OCI layout work directory on disk for inspection instead of deleting
+  it after pack completes
 
-Current Bentobox policy:
+Bundled boot asset rules:
 
-- VZ Linux guests use `Cached + Full` internally.
-- These knobs stay private to the VZ backend.
-- When VZ macOS guests are added, revisit the default and choose the best macOS-specific setting
-  instead of assuming the Linux workaround is ideal there too.
+- default: do not bundle kernel or initramfs
+- `--include-kernel` resolves the VM-specific kernel first, then the global default
+- `--include-initrd` resolves the VM-specific initramfs first, then the global default
 
-Comparison of the backend features we care about today:
+### Pulling remote images
+
+`bentoctl images pull <ref>` downloads the OCI artifact, validates it, reconstructs the normalized
+image directory, and updates `registry.json`.
+
+### Importing OCI tar archives
+
+`bentoctl images import <path>` ingests an OCI tar archive into the normalized local image store.
+
+- input is restricted to OCI tar archives in V1
+- imported artifacts follow the same validation and reconstruction rules as pulled artifacts
+- imported images converge onto the same local representation as pulled and packed images
+
+Pulled and packed images must converge onto the same local representation.
+
+### Backend disk policy
+
+For file-backed Linux guests on the VZ backend, Bentobox sets explicit host caching and
+synchronization defaults in the backend rather than relying on framework defaults.
+
+Current policy:
+
+- VZ Linux guests use cached disk image I/O with full synchronization
+- the policy is private to the VZ backend
+- when VZ macOS guests are added, the backend should choose the best guest-specific default there
+
+Comparison of the backend features that matter here:
 
 | Concern | VZ | Firecracker |
 | --- | --- | --- |
@@ -150,286 +183,28 @@ Comparison of the backend features we care about today:
 | Good persistent default today | Linux: `Cached + Full` | Later: likely `Writeback` for persistent disks |
 | Should this leak into shared machine types | No | No |
 
-### CLI UX
-
-#### `bentoctl images list` (alias: `bentoctl image list`)
-
-`image list` prints kubectl-style tabular output using Rust `tabwriter`.
-
-Formatting rules:
-
-- always print the header row, even when there are no local images
-- no extra title/summary lines (no `Base Images`, no `(no images)`)
-- rows are tab-aligned by `tabwriter`
-
-Required columns (in order):
-
-1. `NAME`
-2. `ID`
-3. `OS`
-4. `SIZE`
-5. `SOURCE_REF`
-6. `ARCH`
-
-Column semantics:
-
-- `NAME` is the tag name.
-- `ID` is a short display ID (prefix of the full image ID).
-
-`size` is the local `rootfs.img` file size in human-readable format.
-
-Deferred column for V2:
-
-- list/count of VMs using the base image.
-
-#### `bentoctl images pull <oci-ref> [--name <alias>]`
-
-- Pull anonymously from public OCI registries.
-- Validate artifact type and supported compression media type.
-- Decompress into `<images-root>/<image-id>/rootfs.img`.
-- Insert/update `registry.json`.
-
-#### `bentoctl images import <path>`
-
-Supported inputs:
-
-- OCI layout directory
-- OCI archive tar
-
-Behavior:
-
-- parse manifest/index
-- locate supported base-image artifact
-- decode blob into local store
-- update `registry.json`
-
-#### `bentoctl images pack --image <path> --os <os> --arch <arch> [--compression ...] [--out <path>] <name>`
-
-- requires `--os` and `--arch`
-- reads raw disk from `--image`
-- compresses using zstd by default (gzip fallback supported)
-- writes an OCI layout archive tarball to current directory by default, or `--out` when provided
-- output filename default is `<sanitized-name>.oci.tar`
-- never uploads to remote registry
-- never mutates local image store
-
-Image store mutation rules:
-
-- `images pull` updates image store directly.
-- `images import` updates image store from OCI layout directory or OCI tar archive.
-- `images pack` never updates image store.
-
-#### `bentoctl images rm <tag>`
-
-- Removes the requested tag mapping.
-- If other tags still reference the same image ID, keep the image record and on-disk volume.
-- If the removed tag was the last reference, delete both the image record and `<images-root>/<image-id>/`.
-
-#### `bentoctl create <instance-name> --image <name-or-ref> [existing flags...]`
-
-- resolve or auto-pull base image
-- materialize instance `rootfs.img`
-- proceed with existing create flow
-- runtime root disk probe picks up instance `rootfs.img`
-
-### Runtime API design
-
-Add `crates/bento-runtime/src/image_store.rs` and export it via `crates/bento-runtime/src/lib.rs`.
-
-Key types:
-
-```rust
-pub enum ImageCompression { Zstd, Gzip }
-
-pub struct ImageRecord {
-    pub id: String,
-    pub source_ref: String,
-    pub manifest_digest: String,
-    pub artifact_type: String,
-    pub compression: ImageCompression,
-    pub os: Option<String>,
-    pub arch: Option<String>,
-    pub rootfs_relpath: std::path::PathBuf,
-    pub created_at: String,
-    pub updated_at: String,
-    pub annotations: std::collections::BTreeMap<String, String>,
-}
-
-pub struct ImageTag {
-    pub name: String,
-    pub image_id: String,
-}
-
-pub struct TaggedImageRecord {
-    pub tag: String,
-    pub image: ImageRecord,
-}
-
-pub struct ImageStore { /* root path + registry state */ }
-```
-
-Key methods:
-
-```rust
-impl ImageStore {
-    pub fn open() -> Result<Self, ImageStoreError>;
-    pub fn list(&self) -> Result<Vec<TaggedImageRecord>, ImageStoreError>;
-    pub fn resolve(&self, name_or_ref: &str) -> Result<Option<ImageRecord>, ImageStoreError>;
-    pub fn pull(&mut self, reference: &str, alias: Option<&str>) -> Result<ImageRecord, ImageStoreError>;
-    pub fn import(&mut self, source: &std::path::Path) -> Result<ImageRecord, ImageStoreError>;
-    pub fn pack_oci_archive(disk_image: &std::path::Path, name: &str, out_path: &std::path::Path, os: &str, arch: &str, compression: ImageCompression) -> Result<std::path::PathBuf, ImageStoreError>;
-    pub fn clone_base_image(&self, image: &ImageRecord, instance_rootfs: &std::path::Path) -> Result<(), ImageStoreError>;
-    pub fn remove_image(&mut self, tag_name: &str) -> Result<(), ImageStoreError>;
-}
-```
-
-### Dependency plan
-
-Add to `crates/bento-runtime/Cargo.toml`:
-
-- `oci-client`
-- `oci-spec`
-- `tokio`
-- `zstd`
-- `flate2`
-- `tar`
-- `sha2` (if needed)
-- `tempfile` (if needed)
-
-No shell-out to external CLI tools for OCI/compression flows.
-
-### Error model
-
-`ImageStoreError` will cover:
-
-- store path resolution failures
-- registry JSON load/save/parse errors
-- OCI reference/registry errors
-- unsupported artifact/compression/media type
-- compression encode/decode errors
-- file IO + atomic write failures
-- clone/copy materialization failures
-
-All user-facing errors must include actionable context (reference/path/media type).
-
-### Manual disk expansion (V1)
-
-No built-in resize command in V1. Manual external CLI usage is supported.
-
-Host-side grow file example:
-
-```bash
-truncate -s +10G /path/to/instance/rootfs.img
-```
-
-Common guest-side filesystem grow examples:
-
-```bash
-sudo growpart /dev/vda 1
-sudo resize2fs /dev/vda1
-```
-
-or
-
-```bash
-sudo growpart /dev/vda 1
-sudo xfs_growfs /
-```
-
-Verify in guest:
-
-```bash
-lsblk
-df -h
-```
-
 ## Consequences
 
 ### Positive
 
-- Clear, simple V1 image workflow with low implementation risk.
-- Consistent local storage path via existing `Directory` abstraction.
-- Easy user flow for instance creation from local names or OCI references.
-- Compressed payloads reduce practical transfer/storage overhead for sparse-ish raw disks.
-- Keeps runtime boot logic mostly unchanged.
+- Pulled and packed images behave the same locally.
+- Shared base images are stored once and cloned into instances from a single cache.
+- The common image-backed workflow stays simple.
+- Chunked compressed payloads reduce transfer overhead and keep retries smaller.
+- Optional bundled boot assets improve portability without forcing every image to carry them.
 
 ### Negative
 
-- No private registry credentials in V1.
-- Fallback copy may lose sparse behavior and increase disk usage.
-- No built-in resize command yet.
-- No dedupe/GC/CAS optimizations.
+- The OCI artifact format is more complex than a single compressed disk blob.
+- V1 does not keep a persistent OCI blob cache or implement CAS-style dedupe.
+- `images push` is still deferred.
+- Fallback copy can still lose sparse behavior when APFS clone is unavailable.
 
-### Deferred (V2+)
+## Deferred
 
-1. Registry credential integration.
-2. Signed artifact verification.
-3. Multi-arch index selection.
-4. GC/pruning and dedupe.
-5. Built-in `bentoctl images resize`.
-6. `image list` column showing VM usage per base image.
-
-## Implementation Plan
-
-### Phase 1: Foundation and list
-
-- [x] Create `image_store.rs` module and export in `lib.rs`.
-- [x] Implement store root resolution via `Directory::with_prefix("images")`.
-- [x] Implement `registry.json` load/create/save with atomic writes.
-- [x] Implement `ImageStore::list`.
-- [x] Add `bentoctl images` command wiring in `commands/mod.rs`.
-- [x] Implement `bentoctl images list`.
-- [x] Implement table renderer with heading and columns: `name`, `id`, `os`, `size`, `source_ref`, `arch`.
-
-### Phase 2: Pull and install
-
-- [x] Implement anonymous pull pipeline with `oci-client`.
-- [x] Validate artifact type and layer media type.
-- [x] Implement zstd decode path.
-- [x] Implement gzip decode fallback path.
-- [x] Write decoded `rootfs.img` atomically into image dir.
-- [x] Extract annotations and fallback naming logic.
-- [x] Upsert image record in `registry.json`.
-- [x] Add `bentoctl images pull` command.
-
-### Phase 3: Create integration
-
-- [x] Extend `bentoctl create` with `--image`.
-- [x] Resolve local image by tag/source ref.
-- [x] Auto-pull on cache miss.
-- [x] Materialize instance `rootfs.img` from base image.
-- [x] Try `clonefile` first.
-- [x] Fallback to normal copy if clone fails.
-- [x] Keep existing runtime boot flow unchanged.
-
-### Phase 4: Pack (`images pack`)
-
-- [x] Implement raw disk to compressed blob (zstd default).
-- [x] Support gzip path as fallback.
-- [x] Build OCI archive tarball using `oci-spec` structures and local blobs.
-- [x] Apply metadata annotations (`name`, `os`, `arch`).
-- [x] Add `bentoctl images pack` command.
-- [x] Ensure `images pack` does not update local image store.
-
-### Phase 5: Import
-
-- [x] Implement `bentoctl images import` for OCI layout directory.
-- [x] Implement `bentoctl images import` for OCI archive tar.
-- [x] Reuse pull ingest pipeline for decode + registration.
-
-### Phase 6: Tags and remove semantics
-
-- [x] Move registry schema to tag mappings plus image records (version remains `1`).
-- [x] Resolve `create --image` by tag first, then `source_ref`.
-- [x] Implement `bentoctl images rm <tag>`.
-- [x] Delete image record and on-disk volume only when removing the last tag.
-
-### Phase 7: Docs and validation
-
-- [x] Update README/docs with image management usage.
-- [x] Document manual disk expansion workflow.
-- [x] Add unit tests for store/index/compression paths.
-- [ ] Add integration tests for list/pull/create/import flows.
-- [x] Run `cargo fmt`.
-- [x] Run `cargo clippy --all --benches --tests --examples --all-features`.
-- [x] Run targeted tests for touched runtime/CLI paths.
+- `bentoctl images push <src> <ref>`
+- registry credential integration
+- signed artifact verification
+- multi-arch index selection
+- persistent OCI blob cache or CAS/dedupe layer if needed
+- built-in `bentoctl images resize`

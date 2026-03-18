@@ -7,6 +7,7 @@ use eyre::Context;
 use crate::daemon_control::InstancedLauncher;
 
 pub mod create;
+pub mod create_raw;
 pub mod delete;
 pub mod exec;
 pub mod images;
@@ -34,9 +35,10 @@ pub struct BentoCtlCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    Create(create::Cmd),
+    #[command(name = "new", hide = true)]
     New(create::Cmd),
-    #[command(name = "create", hide = true)]
-    CreateAlias(create::Cmd),
+    CreateRaw(create_raw::Cmd),
     Start(start::Cmd),
     Stop(stop::Cmd),
     Shell(shell::Cmd),
@@ -54,8 +56,9 @@ pub enum Command {
 impl Display for Command {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Command::Create(cmd) => write!(f, "create {}", cmd),
             Command::New(cmd) => write!(f, "new {}", cmd),
-            Command::CreateAlias(cmd) => write!(f, "new {}", cmd),
+            Command::CreateRaw(cmd) => write!(f, "create-raw {}", cmd),
             Command::Start(cmd) => write!(f, "start {}", cmd),
             Command::Stop(cmd) => write!(f, "stop {}", cmd),
             Command::Shell(cmd) => write!(f, "shell {}", cmd),
@@ -77,11 +80,15 @@ impl BentoCtlCmd {
 
     async fn invoke_sub_command(&self) -> eyre::Result<()> {
         match &self.cmd {
+            Command::Create(cmd) => {
+                let store = instance_store();
+                cmd.run(&store).await
+            }
             Command::New(cmd) => {
                 let store = instance_store();
                 cmd.run(&store).await
             }
-            Command::CreateAlias(cmd) => {
+            Command::CreateRaw(cmd) => {
                 let store = instance_store();
                 cmd.run(&store).await
             }
