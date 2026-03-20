@@ -1,7 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::{self, Seek, Write};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bento_runtime::global_config::{ensure_guest_agent_binary, GlobalConfig};
@@ -9,6 +9,7 @@ use bento_runtime::host_user::{self, HostUser};
 use bento_runtime::instance::{resolve_mount_location, Instance, InstanceFile, NetworkMode};
 use bento_runtime::ssh_keys;
 use eyre::Context;
+use fatfs::{format_volume, FileSystem, FormatVolumeOptions, FsOptions};
 use serde::Serialize;
 
 const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-guestd";
@@ -20,6 +21,9 @@ const GUEST_BOOTSTRAP_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-boot
 const GUEST_INSTALL_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-install.sh");
 const TASK_REGISTER_GUESTD_CONTENT: &str = include_str!("../scripts/tasks/10-register-guestd.sh");
 const TASK_SETUP_ROSETTA_CONTENT: &str = include_str!("../scripts/tasks/20-setup-rosetta.sh");
+const CIDATA_VOLUME_LABEL: &str = "CIDATA";
+const CIDATA_MIN_SIZE_BYTES: u64 = 16 * 1024 * 1024;
+const CIDATA_SIZE_OVERHEAD_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct CidataEntry {
@@ -29,7 +33,7 @@ struct CidataEntry {
 
 pub fn rebuild_bootstrap(inst: &Instance) -> eyre::Result<()> {
     if !inst.uses_bootstrap() {
-        let iso_path = inst.file(InstanceFile::CidataIso);
+        let iso_path = inst.file(InstanceFile::CidataDisk);
         if iso_path.exists() {
             std::fs::remove_file(&iso_path)
                 .with_context(|| format!("remove stale cidata {}", iso_path.display()))?;
@@ -40,10 +44,10 @@ pub fn rebuild_bootstrap(inst: &Instance) -> eyre::Result<()> {
     let host_user = host_user::current_host_user().context("resolve current host user")?;
     let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure user SSH keys")?;
 
-    build_cidata_iso(inst, &host_user, &user_keys.public_key_openssh)
+    build_cidata_disk(inst, &host_user, &user_keys.public_key_openssh)
 }
 
-fn build_cidata_iso(
+fn build_cidata_disk(
     inst: &Instance,
     host_user: &HostUser,
     ssh_public_key: &str,
@@ -59,7 +63,7 @@ fn build_cidata_iso(
     let network_config = render_network_config_for_instance(inst)?;
     let guestd_config = render_guestd_config(&desired_state)?;
     let config_env = render_config_env(inst, &desired_state)?;
-    let iso_path = inst.file(InstanceFile::CidataIso);
+    let iso_path = inst.file(InstanceFile::CidataDisk);
 
     let mut files = vec![
         CidataEntry {
@@ -106,97 +110,93 @@ fn build_cidata_iso(
         });
     }
 
-    write_cidata_iso_hdiutil(&iso_path, "CIDATA", &files)
-        .with_context(|| format!("build cidata ISO at {}", iso_path.display()))?;
+    write_cidata_fat_image(&iso_path, &files)
+        .with_context(|| format!("build cidata disk at {}", iso_path.display()))?;
 
     Ok(())
 }
 
-fn write_cidata_iso_hdiutil(
-    output_path: &Path,
-    volume_label: &str,
-    entries: &[CidataEntry],
-) -> eyre::Result<()> {
-    let staging_root = make_temp_dir("bento-cidata")?;
-    for entry in entries {
-        let file_path = staging_root.join(&entry.name);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create cidata entry parent {}", parent.display()))?;
-        }
-        std::fs::write(&file_path, &entry.contents)
-            .with_context(|| format!("write cidata entry {}", file_path.display()))?;
-    }
-
+fn write_cidata_fat_image(output_path: &Path, entries: &[CidataEntry]) -> eyre::Result<()> {
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create output directory {}", parent.display()))?;
     }
-
-    let output_prefix = make_temp_path("bento-cidata-output");
-    let status = Command::new("hdiutil")
-        .arg("makehybrid")
-        .arg("-iso")
-        .arg("-joliet")
-        .arg("-default-volume-name")
-        .arg(volume_label)
-        .arg("-o")
-        .arg(&output_prefix)
-        .arg(&staging_root)
-        .status()
-        .context("run hdiutil makehybrid")?;
-
-    if !status.success() {
-        return Err(eyre::eyre!(
-            "hdiutil makehybrid failed with status {}",
-            status
-        ));
-    }
-
-    let generated = resolve_hdiutil_output_path(&output_prefix)?;
     if output_path.exists() {
         std::fs::remove_file(output_path)
             .with_context(|| format!("remove existing output {}", output_path.display()))?;
     }
-    std::fs::rename(&generated, output_path).with_context(|| {
-        format!(
-            "move generated iso from {} to {}",
-            generated.display(),
-            output_path.display()
-        )
-    })?;
 
-    let _ = std::fs::remove_dir_all(staging_root);
+    // Use a VFAT volume with the NoCloud `CIDATA` label so the same bootstrap media works on
+    // both VZ and Firecracker without depending on host-specific ISO tooling.
+    let mut image = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(output_path)
+        .with_context(|| format!("create cidata image {}", output_path.display()))?;
+    image
+        .set_len(cidata_image_size(entries))
+        .with_context(|| format!("size cidata image {}", output_path.display()))?;
+
+    let mut label = [b' '; 11];
+    label[..CIDATA_VOLUME_LABEL.len()].copy_from_slice(CIDATA_VOLUME_LABEL.as_bytes());
+    format_volume(&mut image, FormatVolumeOptions::new().volume_label(label))
+        .context("format cidata FAT volume")?;
+    image.rewind().context("rewind cidata image after format")?;
+
+    let fs = FileSystem::new(image, FsOptions::new()).context("mount cidata FAT volume")?;
+    let root = fs.root_dir();
+    for entry in entries {
+        write_cidata_entry(&root, entry)
+            .with_context(|| format!("write cidata entry {}", entry.name))?;
+    }
+
+    drop(root);
+    fs.unmount().context("flush cidata FAT volume")?;
     Ok(())
 }
 
-fn resolve_hdiutil_output_path(prefix: &Path) -> eyre::Result<PathBuf> {
-    let candidates = [
-        prefix.to_path_buf(),
-        PathBuf::from(format!("{}.iso", prefix.display())),
-        PathBuf::from(format!("{}.cdr", prefix.display())),
-        PathBuf::from(format!("{}.iso.cdr", prefix.display())),
-    ];
-
-    candidates
-        .into_iter()
-        .find(|path| path.exists())
-        .ok_or_else(|| eyre::eyre!("hdiutil did not produce an output image"))
+fn cidata_image_size(entries: &[CidataEntry]) -> u64 {
+    // Keep the image comfortably larger than the payload so FAT metadata and directory growth do
+    // not force fragile exact sizing logic.
+    let payload_bytes = entries
+        .iter()
+        .map(|entry| entry.contents.len() as u64 + entry.name.len() as u64)
+        .sum::<u64>();
+    (payload_bytes + CIDATA_SIZE_OVERHEAD_BYTES).max(CIDATA_MIN_SIZE_BYTES)
 }
 
-fn make_temp_dir(prefix: &str) -> eyre::Result<PathBuf> {
-    let path = make_temp_path(prefix);
-    std::fs::create_dir_all(&path)
-        .with_context(|| format!("create temporary directory {}", path.display()))?;
-    Ok(path)
-}
+fn write_cidata_entry(
+    root: &fatfs::Dir<'_, std::fs::File>,
+    entry: &CidataEntry,
+) -> eyre::Result<()> {
+    let mut parts = entry.name.split('/').peekable();
+    let mut current = root.clone();
 
-fn make_temp_path(prefix: &str) -> PathBuf {
-    let nonce = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(duration) => duration.as_nanos(),
-        Err(_) => 0,
-    };
-    std::env::temp_dir().join(format!("{prefix}-{nonce}"))
+    while let Some(part) = parts.next() {
+        if parts.peek().is_some() {
+            current = match current.open_dir(part) {
+                Ok(dir) => dir,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => current
+                    .create_dir(part)
+                    .with_context(|| format!("create cidata directory {part}"))?,
+                Err(err) => {
+                    return Err(err).with_context(|| format!("open cidata directory {part}"))
+                }
+            };
+        } else {
+            let mut file = current
+                .create_file(part)
+                .with_context(|| format!("create cidata file {part}"))?;
+            file.truncate().context("truncate cidata file")?;
+            file.write_all(&entry.contents)
+                .with_context(|| format!("write cidata file {part}"))?;
+            file.flush().context("flush cidata file")?;
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Serialize)]

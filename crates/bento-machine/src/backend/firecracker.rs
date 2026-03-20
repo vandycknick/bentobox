@@ -4,6 +4,7 @@ use crate::types::{
     MachineError, MachineExitEvent, MachineExitReceiver, MachineKind, MachineState, NetworkMode,
     ResolvedMachineSpec,
 };
+use bento_protocol::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use reqwest::blocking::Client;
@@ -11,8 +12,10 @@ use reqwest::Method;
 use serde::Serialize;
 use std::env;
 use std::fs::{self, File};
-use std::io;
+use std::hash::{Hash, Hasher};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
@@ -24,6 +27,7 @@ const FIRECRACKER_BINARY_ENV: &str = "FIRECRACKER_BIN";
 const FIRECRACKER_BINARY_NAME: &str = "firecracker";
 const API_SOCKET_NAME: &str = "firecracker.sock";
 const TRACE_LOG_NAME: &str = "fc.trace.log";
+const VSOCK_SOCKET_NAME: &str = "firecracker.vsock";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -34,6 +38,7 @@ pub(crate) struct FirecrackerMachineBackend {
     runtime_dir: PathBuf,
     api_socket_path: PathBuf,
     trace_log_path: PathBuf,
+    vsock_socket_path: PathBuf,
     api_client: FirecrackerApiClient,
     state: Arc<Mutex<MachineState>>,
     exit_sender: Option<Arc<Mutex<Option<oneshot::Sender<MachineExitEvent>>>>>,
@@ -63,6 +68,7 @@ impl FirecrackerMachineBackend {
         let runtime_dir = runtime_dir_for(&spec);
         let api_socket_path = runtime_dir.join(API_SOCKET_NAME);
         let trace_log_path = runtime_dir.join(TRACE_LOG_NAME);
+        let vsock_socket_path = runtime_dir.join(VSOCK_SOCKET_NAME);
         let api_client = FirecrackerApiClient::new(api_socket_path.clone())?;
 
         Ok(Self {
@@ -71,6 +77,7 @@ impl FirecrackerMachineBackend {
             runtime_dir,
             api_socket_path,
             trace_log_path,
+            vsock_socket_path,
             api_client,
             state: Arc::new(Mutex::new(MachineState::Created)),
             exit_sender: None,
@@ -91,6 +98,9 @@ impl FirecrackerMachineBackend {
         fs::create_dir_all(&self.runtime_dir)?;
         if self.api_socket_path.exists() {
             fs::remove_file(&self.api_socket_path)?;
+        }
+        if self.vsock_socket_path.exists() {
+            let _ = fs::remove_file(&self.vsock_socket_path);
         }
         Ok(())
     }
@@ -209,7 +219,44 @@ impl FirecrackerMachineBackend {
                     .expect("validated initramfs path missing")
                     .display()
                     .to_string(),
-                boot_args: default_boot_args().to_string(),
+                boot_args: build_boot_args(config),
+            },
+        )?;
+        for (index, disk, is_root_device) in config
+            .root_disk
+            .iter()
+            .map(|disk| (0usize, disk, true))
+            .chain(
+                config
+                    .data_disks
+                    .iter()
+                    .enumerate()
+                    .map(|(index, disk)| (index + 1, disk, false)),
+            )
+        {
+            let drive_id = if index == 0 {
+                "rootfs".to_string()
+            } else {
+                format!("disk{index}")
+            };
+            self.api_client.put_json(
+                &format!("/drives/{drive_id}"),
+                &DriveRequest {
+                    drive_id,
+                    partuuid: None,
+                    is_root_device: index == 0 && is_root_device,
+                    cache_type: "Writeback",
+                    is_read_only: disk.read_only,
+                    path_on_host: disk.path.display().to_string(),
+                    io_engine: "Sync",
+                },
+            )?;
+        }
+        self.api_client.put_json(
+            "/vsock",
+            &VsockRequest {
+                guest_cid: guest_cid_for(&self.spec),
+                uds_path: self.vsock_socket_path.display().to_string(),
             },
         )?;
         tracing::debug!(
@@ -267,20 +314,6 @@ pub(crate) fn validate(spec: &ResolvedMachineSpec) -> Result<(), MachineError> {
             id: spec.id.clone(),
             reason: "firecracker requires memory_mib to be greater than zero".to_string(),
         });
-    }
-
-    if config.root_disk.is_some() {
-        return not_implemented(
-            spec,
-            "root disks are not implemented for the firecracker backend yet",
-        );
-    }
-
-    if !config.data_disks.is_empty() {
-        return not_implemented(
-            spec,
-            "data disks are not implemented for the firecracker backend yet",
-        );
     }
 
     if !config.mounts.is_empty() {
@@ -357,6 +390,12 @@ pub(crate) fn prepare(spec: &ResolvedMachineSpec) -> Result<(), MachineError> {
 
     ensure_path_exists(spec, kernel_path, "kernel image")?;
     ensure_path_exists(spec, initramfs_path, "initramfs")?;
+    if let Some(root_disk) = spec.config.root_disk.as_ref() {
+        ensure_path_exists(spec, &root_disk.path, "root disk")?;
+    }
+    for (index, disk) in spec.config.data_disks.iter().enumerate() {
+        ensure_path_exists(spec, &disk.path, &format!("data disk #{index}"))?;
+    }
 
     fs::create_dir_all(runtime_dir_for(spec))?;
     Ok(())
@@ -530,14 +569,37 @@ impl MachineBackend for FirecrackerMachineBackend {
         if self.api_socket_path.exists() {
             let _ = fs::remove_file(&self.api_socket_path);
         }
+        if self.vsock_socket_path.exists() {
+            let _ = fs::remove_file(&self.vsock_socket_path);
+        }
         Ok(())
     }
 
-    fn open_vsock(&self, _port: u32) -> Result<RawVsockConnection, MachineError> {
-        Err(MachineError::Unimplemented {
-            kind: MachineKind::Firecracker,
-            operation: "open_vsock",
-        })
+    fn open_vsock(&self, port: u32) -> Result<RawVsockConnection, MachineError> {
+        self.refresh_state_from_child()?;
+        if self.state()? != MachineState::Running {
+            return Err(MachineError::Backend(format!(
+                "cannot open vsock stream because machine {:?} is not running",
+                self.spec.id.as_str()
+            )));
+        }
+
+        let mut stream = StdUnixStream::connect(&self.vsock_socket_path)?;
+        stream.write_all(format!("CONNECT {port}\n").as_bytes())?;
+        stream.flush()?;
+
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut response = String::new();
+        reader.read_line(&mut response)?;
+        let expected_prefix = "OK ";
+        if !response.starts_with(expected_prefix) {
+            return Err(MachineError::Backend(format!(
+                "firecracker vsock connection handshake failed for port {port}: {}",
+                response.trim()
+            )));
+        }
+
+        Ok(RawVsockConnection::Unix(stream))
     }
 
     fn open_serial(&self) -> Result<RawSerialConnection, MachineError> {
@@ -617,8 +679,28 @@ fn not_implemented(spec: &ResolvedMachineSpec, reason: &str) -> Result<(), Machi
     })
 }
 
-fn default_boot_args() -> &'static str {
-    "console=ttyS0 reboot=k panic=1 pci=off"
+fn build_boot_args(config: &crate::types::MachineConfig) -> String {
+    let mut args = vec![
+        "console=ttyS0".to_string(),
+        "reboot=k".to_string(),
+        "panic=1".to_string(),
+        "pci=off".to_string(),
+    ];
+    if config.root_disk.is_some() {
+        args.push("root=/dev/vda".to_string());
+    }
+    args.push(format!(
+        "{}={}",
+        KERNEL_PARAM_DISCOVERY_PORT, DEFAULT_DISCOVERY_PORT
+    ));
+    args.join(" ")
+}
+
+fn guest_cid_for(spec: &ResolvedMachineSpec) -> u32 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    spec.id.as_str().hash(&mut hasher);
+    let cid_base = 3u32;
+    cid_base + (hasher.finish() as u32 % 0x3fff_fffc)
 }
 
 fn terminate_child(child: &mut Child) -> Result<(), MachineError> {
@@ -847,6 +929,23 @@ struct ActionRequest {
     action_type: &'static str,
 }
 
+#[derive(Serialize)]
+struct DriveRequest {
+    drive_id: String,
+    partuuid: Option<String>,
+    is_root_device: bool,
+    cache_type: &'static str,
+    is_read_only: bool,
+    path_on_host: String,
+    io_engine: &'static str,
+}
+
+#[derive(Serialize)]
+struct VsockRequest {
+    guest_cid: u32,
+    uds_path: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,19 +971,18 @@ mod tests {
 
     #[test]
     fn default_boot_args_enable_serial_console() {
-        assert!(default_boot_args().contains("console=ttyS0"));
+        assert!(build_boot_args(&spec().config).contains("console=ttyS0"));
     }
 
     #[test]
-    fn validate_rejects_root_disk() {
+    fn build_boot_args_include_root_when_present() {
         let mut spec = spec();
         spec.config.root_disk = Some(crate::types::DiskImage {
             path: PathBuf::from("/tmp/rootfs"),
             read_only: false,
         });
 
-        let err = validate(&spec).expect_err("root disk should be rejected");
-        assert!(matches!(err, MachineError::InvalidConfig { .. }));
+        assert!(build_boot_args(&spec.config).contains("root=/dev/vda"));
     }
 
     #[test]

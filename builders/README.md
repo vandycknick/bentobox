@@ -5,21 +5,12 @@
 Create an image:
 
 ```sh
-truncate -s 20G images/archlinux.img
-```
-
-Boot kernel with ArchBoot:
-
-```sh
-stty -isig
-vfkit \
-  --cpus 4 \
-  --memory 4096 \
-    --bootloader "linux,kernel=./images/Image,initrd=./images/initrd-aarch64.img,cmdline=root=/dev/vda rw console=hvc0" \
-  --device virtio-blk,path=./images/archlinux.img \
-  --device virtio-net,nat \
-  --device virtio-serial,stdio
-stty isig
+./target/release/bentoctl create-raw \
+    --kernel ./builders/images/Image \
+    --initramfs ./builders/images/initrd-aarch64.img \
+    --cpus 2 --memory 2048 \
+    --empty-rootfs 20 \
+    archboot
 ```
 
 # Inside the VM run the following commands:
@@ -54,7 +45,7 @@ systemctl enable systemd-networkd.service
 systemctl enable systemd-resolved.service
 systemctl enable systemd-timesyncd.service
 systemctl enable sshd.service
-systemctl enable cloud-init-local.service cloud-init-network.service cloud-init-main.service
+systemctl enable cloud-init-local.service cloud-init-network.service cloud-init-main.service cloud-final.service
 
 sudo rm -f /etc/resolv.conf
 sudo ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
@@ -70,44 +61,7 @@ echo archlinux > /etc/hostname
 truncate -s 0 /etc/machine-id
 rm -f /var/lib/dbus/machine-id
 
-passwd
 exit
-```
-
-# Add VSOCK to SSH bridge service (inside chroot)
-
-Create a systemd unit that forwards guest VSOCK port `2222` to local SSH (`127.0.0.1:22`):
-
-```sh
-cat > /etc/systemd/system/vsock-ssh-bridge.service <<'EOF'
-[Unit]
-Description=Bento VSOCK to SSH bridge
-After=sshd.service
-Requires=sshd.service
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/socat VSOCK-LISTEN:2222,fork,reuseaddr TCP:127.0.0.1:22
-Restart=always
-RestartSec=1
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl enable vsock-ssh-bridge.service
-```
-
-This config keeps `sshd` reachable only on loopback and allows passwordless root login for local development.
-
-Shrink disk
-
-```sh
-btrfs filesystem usage /mnt
 ```
 
 Cleanup
@@ -119,7 +73,7 @@ umount -R /mnt
 Package
 
 ```sh
-cargo run -- images pack archlinux:202602 --image ./builders/images/archlinux.img --out ./builders/images/arch.iso.tar --os linux --arch arm64
+./target/release/bentoctl images pack archboot ghcr.io/vandycknick/archlinux:latest
 ```
 
 # DNS management on Linux distros

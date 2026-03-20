@@ -8,6 +8,7 @@ bento-machine = { path = "../bento-machine" }
 bento-protocol = { path = "../bento-protocol" }
 bento-runtime = { path = "../bento-runtime" }
 eyre = "0.6.12"
+fatfs = "0.3.6"
 futures = "0.3.31"
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 libc = "0.2.180"

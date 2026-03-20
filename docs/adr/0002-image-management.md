@@ -102,6 +102,11 @@ The metadata JSON is the source of truth for image defaults and capabilities:
 Bundled boot assets are inferred from the presence of the optional kernel and initramfs layers, not
 from metadata fields.
 
+Bootstrap media for guest initialization is a separate concern from OCI image transport. Bentobox
+uses a local NoCloud seed disk with volume label `CIDATA`, formatted as VFAT, so the same
+bootstrap artifact can be attached on both VZ and Firecracker backends without host-specific ISO
+tooling.
+
 ### Instance creation from images
 
 `bentoctl create <ref> <name>` resolves a local image or pulls it on demand, then:
