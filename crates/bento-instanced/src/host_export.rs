@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use bento_machine::MachineHandle;
+use bento_machine::MachineInstance;
 use eyre::Context;
 use tokio::net::UnixListener;
 
@@ -9,7 +9,7 @@ use crate::discovery::{ServiceRegistry, ServiceTarget};
 use crate::tunnel::spawn_tunnel;
 
 pub(crate) fn listen_host_service(
-    machine: MachineHandle,
+    machine: MachineInstance,
     socket_path: &Path,
     service: String,
 ) -> eyre::Result<tokio::task::JoinHandle<eyre::Result<()>>> {

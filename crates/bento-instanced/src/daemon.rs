@@ -54,7 +54,7 @@ impl InstanceDaemon {
         remove_stale_socket(&inst.file(InstanceFile::InstancedSocket))?;
 
         let machine_spec = machine_spec_for_instance(&inst)?;
-        let machine = Machine::create_or_get(machine_spec.clone()).await?;
+        let machine = Machine::create(machine_spec.clone()).await?;
         let serial_console = SerialConsole::new(machine.clone());
         let store = Arc::new(new_instance_store());
         let expects_guest_agent = inst.uses_bootstrap();
@@ -100,7 +100,7 @@ impl InstanceDaemon {
             .stream_to_file(&inst.file(InstanceFile::SerialLog))
             .await
         {
-            let _ = Machine::release(&machine_spec.id).await;
+            let _ = machine.stop().await;
             return Err(err);
         }
 
@@ -228,12 +228,12 @@ impl InstanceDaemon {
         }
 
         if vm_already_stopped {
-            tracing::info!(instance = %self.name, "vm already stopped, finalizing machine release");
+            tracing::info!(instance = %self.name, "vm already stopped, finalizing instance shutdown");
         } else {
             tracing::info!(instance = %self.name, "sending stop signal to vm");
         }
 
-        Machine::release(&machine_spec.id).await?;
+        machine.stop().await?;
 
         store.dispatch(Action::VmTransition {
             state: LifecycleState::Stopped,
@@ -250,7 +250,7 @@ impl InstanceDaemon {
 
 fn spawn_guest_extension_monitor(
     inst: Instance,
-    machine: bento_machine::MachineHandle,
+    machine: bento_machine::MachineInstance,
     store: Arc<crate::state::InstanceStore>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -379,7 +379,7 @@ fn classify_guest_discovery_retry(err: &eyre::Report) -> &'static str {
 }
 
 fn spawn_port_forward_manager_when_guest_ready(
-    machine: bento_machine::MachineHandle,
+    machine: bento_machine::MachineInstance,
     store: Arc<crate::state::InstanceStore>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

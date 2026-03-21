@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_machine::MachineHandle;
+use bento_machine::MachineInstance;
 use bento_runtime::negotiate::{
     Accept, Negotiate, ProxyMode, Reject, RejectCode, Response, Upgrade, NEGOTIATE_PROTOCOL_VERSION,
 };
@@ -21,14 +21,14 @@ const RETRY_AFTER_STARTING_MS: u32 = 1000;
 
 #[derive(Clone)]
 pub(crate) struct InstanceServer {
-    machine: MachineHandle,
+    machine: MachineInstance,
     serial_console: Arc<SerialConsole>,
     store: Arc<InstanceStore>,
 }
 
 impl InstanceServer {
     pub(crate) fn new(
-        machine: MachineHandle,
+        machine: MachineInstance,
         serial_console: Arc<SerialConsole>,
         store: Arc<InstanceStore>,
     ) -> Self {

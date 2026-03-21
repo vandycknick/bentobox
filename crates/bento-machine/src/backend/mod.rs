@@ -8,12 +8,59 @@ use crate::types::{
     MachineError, MachineExitReceiver, MachineKind, MachineState, ResolvedMachineSpec,
 };
 
-pub(crate) trait MachineBackend {
-    fn state(&self) -> Result<MachineState, MachineError>;
-    fn start(&mut self) -> Result<MachineExitReceiver, MachineError>;
-    fn stop(&mut self) -> Result<(), MachineError>;
-    fn open_vsock(&self, port: u32) -> Result<RawVsockConnection, MachineError>;
-    fn open_serial(&self) -> Result<RawSerialConnection, MachineError>;
+#[derive(Debug)]
+pub(crate) enum Backend {
+    #[cfg(target_os = "linux")]
+    Firecracker(firecracker::FirecrackerMachineBackend),
+    #[cfg(target_os = "macos")]
+    Vz(vz::VzMachineBackend),
+}
+
+impl Backend {
+    pub(crate) async fn state(&self) -> Result<MachineState, MachineError> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Firecracker(backend) => backend.state().await,
+            #[cfg(target_os = "macos")]
+            Self::Vz(backend) => backend.state().await,
+        }
+    }
+
+    pub(crate) async fn start(&self) -> Result<MachineExitReceiver, MachineError> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Firecracker(backend) => backend.start().await,
+            #[cfg(target_os = "macos")]
+            Self::Vz(backend) => backend.start().await,
+        }
+    }
+
+    pub(crate) async fn stop(&self) -> Result<(), MachineError> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Firecracker(backend) => backend.stop().await,
+            #[cfg(target_os = "macos")]
+            Self::Vz(backend) => backend.stop().await,
+        }
+    }
+
+    pub(crate) async fn open_vsock(&self, port: u32) -> Result<RawVsockConnection, MachineError> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Firecracker(backend) => backend.open_vsock(port).await,
+            #[cfg(target_os = "macos")]
+            Self::Vz(backend) => backend.open_vsock(port).await,
+        }
+    }
+
+    pub(crate) async fn open_serial(&self) -> Result<RawSerialConnection, MachineError> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Firecracker(backend) => backend.open_serial().await,
+            #[cfg(target_os = "macos")]
+            Self::Vz(backend) => backend.open_serial().await,
+        }
+    }
 }
 
 pub(crate) fn validate(spec: &ResolvedMachineSpec) -> Result<(), MachineError> {
@@ -42,16 +89,14 @@ pub(crate) fn prepare(spec: &ResolvedMachineSpec) -> Result<(), MachineError> {
     }
 }
 
-pub(crate) fn create_backend(
-    spec: &ResolvedMachineSpec,
-) -> Result<Box<dyn MachineBackend>, MachineError> {
+pub(crate) fn create_backend(spec: &ResolvedMachineSpec) -> Result<Backend, MachineError> {
     match spec.kind {
         #[cfg(target_os = "macos")]
-        MachineKind::Vz => Ok(Box::new(vz::VzMachineBackend::new(spec.clone())?)),
+        MachineKind::Vz => Ok(Backend::Vz(vz::VzMachineBackend::new(spec.clone())?)),
         #[cfg(target_os = "linux")]
-        MachineKind::Firecracker => Ok(Box::new(firecracker::FirecrackerMachineBackend::new(
-            spec.clone(),
-        )?)),
+        MachineKind::Firecracker => Ok(Backend::Firecracker(
+            firecracker::FirecrackerMachineBackend::new(spec.clone())?,
+        )),
         kind => Err(MachineError::UnsupportedBackend {
             kind,
             reason: "backend is not compiled for this host platform".to_string(),

@@ -3,7 +3,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_machine::MachineHandle;
+use bento_machine::MachineInstance;
 use bento_protocol::guest::v1::guest_discovery_service_client::GuestDiscoveryServiceClient;
 use bento_protocol::guest::v1::{PortForwardEvent, PortForwardEventType, WatchPortForwardsRequest};
 use bento_protocol::instance::v1::PortForwardStatus;
@@ -26,7 +26,7 @@ struct RunningHostForward {
 }
 
 impl RunningHostForward {
-    fn new(machine: MachineHandle, guest_port: u32, vsock_port: u32) -> eyre::Result<Self> {
+    fn new(machine: MachineInstance, guest_port: u32, vsock_port: u32) -> eyre::Result<Self> {
         let host_port = u16::try_from(guest_port)
             .map_err(|_| eyre::eyre!("guest port {guest_port} is out of host tcp range"))?;
         let listener = std::net::TcpListener::bind(("127.0.0.1", host_port)).map_err(|err| {
@@ -91,7 +91,7 @@ impl RunningHostForward {
 }
 
 pub(crate) fn spawn_port_forward_manager(
-    machine: MachineHandle,
+    machine: MachineInstance,
     store: Arc<InstanceStore>,
 ) -> tokio::task::JoinHandle<eyre::Result<()>> {
     tokio::spawn(async move {
@@ -164,7 +164,7 @@ pub(crate) fn spawn_port_forward_manager(
 }
 
 async fn apply_event(
-    machine: &MachineHandle,
+    machine: &MachineInstance,
     active_forwards: &mut BTreeMap<u32, RunningHostForward>,
     statuses: &mut BTreeMap<u32, PortForwardStatus>,
     store: &InstanceStore,
@@ -263,7 +263,7 @@ fn publish_status_snapshot(statuses: &BTreeMap<u32, PortForwardStatus>, store: &
 }
 
 async fn connect_guest_client(
-    machine: &MachineHandle,
+    machine: &MachineInstance,
 ) -> eyre::Result<GuestDiscoveryServiceClient<tonic::transport::Channel>> {
     let stream = machine.open_vsock(DEFAULT_DISCOVERY_PORT).await?;
     let stream_slot = Arc::new(Mutex::new(Some(stream)));
@@ -292,7 +292,7 @@ async fn connect_guest_client(
 }
 
 async fn handle_host_connection(
-    machine: MachineHandle,
+    machine: MachineInstance,
     mut host_stream: TcpStream,
     vsock_port: u32,
 ) -> io::Result<()> {

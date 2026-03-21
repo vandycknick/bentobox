@@ -2,7 +2,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use bento_machine::{MachineHandle, SerialStream as MachineSerialStream};
+use bento_machine::{MachineInstance, SerialStream as MachineSerialStream};
 use eyre::Context;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
@@ -62,7 +62,7 @@ struct SerialAttachment {
 
 #[derive(Debug)]
 pub(crate) struct SerialConsole {
-    machine: MachineHandle,
+    machine: MachineInstance,
     hub: Arc<Mutex<SerialHub>>,
     attachment: Arc<Mutex<Option<SerialAttachment>>>,
     file_sinks: Arc<Mutex<Vec<tokio::fs::File>>>,
@@ -79,7 +79,7 @@ pub(crate) struct SerialStream {
 }
 
 impl SerialConsole {
-    pub(crate) fn new(machine: MachineHandle) -> Arc<Self> {
+    pub(crate) fn new(machine: MachineInstance) -> Arc<Self> {
         let (output_tx, _) = broadcast::channel(256);
         Arc::new(Self {
             machine,

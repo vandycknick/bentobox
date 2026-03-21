@@ -1,16 +1,18 @@
+#![allow(dead_code)]
+
 use objc2_virtualization::{
     VZGenericPlatformConfiguration, VZLinuxRosettaAvailability, VZLinuxRosettaDirectoryShare,
     VZVirtualMachine,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RosettaAvailability {
+pub(crate) enum RosettaAvailability {
     NotSupported,
     NotInstalled,
     Installed,
 }
 
-pub fn os_version() -> (i64, i64, i64) {
+pub(crate) fn os_version() -> (i64, i64, i64) {
     use objc2_foundation::NSProcessInfo;
     let version = NSProcessInfo::processInfo().operatingSystemVersion();
     (
@@ -20,23 +22,19 @@ pub fn os_version() -> (i64, i64, i64) {
     )
 }
 
-pub fn is_os_version_at_least(major: i64, minor: i64, patch: i64) -> bool {
-    let current = os_version();
-    current >= (major, minor, patch)
+pub(crate) fn is_os_version_at_least(major: i64, minor: i64, patch: i64) -> bool {
+    os_version() >= (major, minor, patch)
 }
 
-#[inline]
-pub fn vz_virtual_machine_is_supported() -> bool {
+pub(crate) fn vz_virtual_machine_is_supported() -> bool {
     unsafe { VZVirtualMachine::isSupported() }
 }
 
-#[inline]
-pub fn vz_nested_virtualization_is_supported() -> bool {
+pub(crate) fn vz_nested_virtualization_is_supported() -> bool {
     unsafe { VZGenericPlatformConfiguration::isNestedVirtualizationSupported() }
 }
 
-#[inline]
-pub fn vz_rosetta_availability() -> RosettaAvailability {
+pub(crate) fn vz_rosetta_availability() -> RosettaAvailability {
     match unsafe { VZLinuxRosettaDirectoryShare::availability() } {
         VZLinuxRosettaAvailability::NotSupported => RosettaAvailability::NotSupported,
         VZLinuxRosettaAvailability::NotInstalled => RosettaAvailability::NotInstalled,

@@ -256,6 +256,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bento-fc"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "bento-guestd"
 version = "0.1.0"
 dependencies = [
@@ -356,6 +364,21 @@ dependencies = [
  "tokio",
  "vsock",
  "zstd",
+]
+
+[[package]]
+name = "bento-vz"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "crossbeam",
+ "nix 0.31.1",
+ "objc2",
+ "objc2-foundation",
+ "objc2-virtualization",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

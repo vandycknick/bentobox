@@ -6,7 +6,7 @@ use std::{
     os::fd::{BorrowedFd, OwnedFd},
     path::Path,
     ptr,
-    sync::{mpsc::sync_channel, Arc, Mutex},
+    sync::{Arc, Mutex},
 };
 
 use block2::StackBlock;
@@ -24,6 +24,7 @@ use objc2_virtualization::{
     VZVirtualMachineConfiguration, VZVirtualMachineState,
 };
 use thiserror::Error;
+use tokio::sync::oneshot;
 
 use crate::types::{MachineError, MachineState};
 
@@ -75,6 +76,12 @@ pub struct VirtualMachine {
     serial_guest_input: Arc<OwnedFd>,
     serial_guest_output: Arc<OwnedFd>,
 }
+
+// SAFETY: Every Virtualization.framework interaction goes through the VM's serial dispatch queue,
+// or reads cached state maintained by callbacks that also run on that queue.
+unsafe impl Send for VirtualMachine {}
+// SAFETY: See above. The queue is the synchronization boundary, not the calling thread.
+unsafe impl Sync for VirtualMachine {}
 
 type StateSubscriber = (Sender<VirtualMachineState>, Receiver<VirtualMachineState>);
 
@@ -182,85 +189,116 @@ impl VirtualMachine {
         }
     }
 
-    pub fn start(&self) -> Result<(), VirtualMachineError> {
+    pub async fn start(&self) -> Result<(), VirtualMachineError> {
         let machine = self.machine.clone();
-        let (sender, receiver) = sync_channel(0);
-        let completion_handler = StackBlock::new(move |err: *mut NSError| {
-            let err = unsafe { err.as_ref() };
-            let result = match err {
-                Some(error) => Err(VirtualMachineError::from_nserror(error)),
-                None => Ok(()),
-            };
-            let _ = sender.send(result);
-        });
+        let (sender, receiver) = oneshot::channel();
+        let shared_sender = Arc::new(Mutex::new(Some(sender)));
+        let completion_sender = shared_sender.clone();
 
         self.queue
             .exec_block_async(&StackBlock::new(move || unsafe {
+                let completion_sender = completion_sender.clone();
+                let completion_handler = StackBlock::new(move |err: *mut NSError| {
+                    let err = err.as_ref();
+                    let result = match err {
+                        Some(error) => Err(VirtualMachineError::from_nserror(error)),
+                        None => Ok(()),
+                    };
+                    if let Some(sender) = completion_sender
+                        .lock()
+                        .ok()
+                        .and_then(|mut guard| guard.take())
+                    {
+                        let _ = sender.send(result);
+                    }
+                });
+
                 machine.startWithCompletionHandler(&completion_handler);
             }));
 
         receiver
-            .recv()
+            .await
             .map_err(|_| VirtualMachineError::completion_channel_closed("start"))?
     }
 
-    pub fn stop(&self) -> Result<(), VirtualMachineError> {
+    pub async fn stop(&self) -> Result<(), VirtualMachineError> {
         let machine = self.machine.clone();
-        let (sender, receiver) = sync_channel(0);
-        let completion_handler = StackBlock::new(move |err: *mut NSError| {
-            let err = unsafe { err.as_ref() };
-            let result = match err {
-                Some(error) => Err(VirtualMachineError::from_nserror(error)),
-                None => Ok(()),
-            };
-            let _ = sender.send(result);
-        });
+        let (sender, receiver) = oneshot::channel();
+        let shared_sender = Arc::new(Mutex::new(Some(sender)));
+        let completion_sender = shared_sender.clone();
 
         self.queue
             .exec_block_async(&StackBlock::new(move || unsafe {
+                let completion_sender = completion_sender.clone();
+                let completion_handler = StackBlock::new(move |err: *mut NSError| {
+                    let err = err.as_ref();
+                    let result = match err {
+                        Some(error) => Err(VirtualMachineError::from_nserror(error)),
+                        None => Ok(()),
+                    };
+                    if let Some(sender) = completion_sender
+                        .lock()
+                        .ok()
+                        .and_then(|mut guard| guard.take())
+                    {
+                        let _ = sender.send(result);
+                    }
+                });
+
                 machine.stopWithCompletionHandler(&completion_handler);
             }));
 
         receiver
-            .recv()
+            .await
             .map_err(|_| VirtualMachineError::completion_channel_closed("stop"))?
     }
 
-    pub fn open_vsock_stream(&self, port: u32) -> Result<std::fs::File, VirtualMachineError> {
+    pub async fn open_vsock_stream(&self, port: u32) -> Result<std::fs::File, VirtualMachineError> {
         let machine = self.machine.clone();
-        let (sender, receiver) = sync_channel(0);
+        let (sender, receiver) = oneshot::channel();
+        let shared_sender = Arc::new(Mutex::new(Some(sender)));
 
         self.queue
             .exec_block_async(&StackBlock::new(move || unsafe {
+                let operation_sender = shared_sender.clone();
                 let devices = machine.socketDevices();
                 let Some(device) = devices.firstObject() else {
-                    let _ = sender.send(Err(virtual_machine_error(
-                        "no socket device configured in VM",
-                    )));
+                    send_completion_once(
+                        &operation_sender,
+                        Err(virtual_machine_error("no socket device configured in VM")),
+                    );
                     return;
                 };
 
                 let Some(vsock) = device.downcast_ref::<VZVirtioSocketDevice>() else {
-                    let _ = sender.send(Err(virtual_machine_error(
-                        "socket device is not a virtio socket device",
-                    )));
+                    send_completion_once(
+                        &operation_sender,
+                        Err(virtual_machine_error(
+                            "socket device is not a virtio socket device",
+                        )),
+                    );
                     return;
                 };
 
-                let completion_sender = sender.clone();
+                let completion_sender = operation_sender.clone();
                 let completion_handler = StackBlock::new(
                     move |connection: *mut VZVirtioSocketConnection, err: *mut NSError| {
                         let err = err.as_ref();
                         if let Some(error) = err {
-                            let _ = completion_sender
-                                .send(Err(VirtualMachineError::from_nserror(error)));
+                            send_completion_once(
+                                &completion_sender,
+                                Err(VirtualMachineError::from_nserror(error)),
+                            );
                             return;
                         }
 
                         let Some(connection) = connection.as_ref() else {
-                            let _ = completion_sender.send(Err(virtual_machine_error(
-                                "vsock connection completed without a connection object",
-                            )));
+                            send_completion_once(
+                                &completion_sender,
+                                Err(virtual_machine_error(
+                                    "vsock connection completed without a connection object",
+                                )),
+                            );
                             return;
                         };
 
@@ -271,7 +309,7 @@ impl VirtualMachine {
                                 "duplicate vsock file descriptor: {err}"
                             ))
                         });
-                        let _ = completion_sender.send(result);
+                        send_completion_once(&completion_sender, result);
                     },
                 );
 
@@ -279,7 +317,7 @@ impl VirtualMachine {
             }));
 
         receiver
-            .recv()
+            .await
             .map_err(|_| VirtualMachineError::completion_channel_closed("open_vsock_stream"))?
     }
 
@@ -361,6 +399,12 @@ fn virtual_machine_error(description: &str) -> VirtualMachineError {
         description: description.to_string(),
         failure_reason: String::new(),
         recovery_suggestion: String::new(),
+    }
+}
+
+fn send_completion_once<T>(sender: &Arc<Mutex<Option<oneshot::Sender<T>>>>, value: T) {
+    if let Some(sender) = sender.lock().ok().and_then(|mut guard| guard.take()) {
+        let _ = sender.send(value);
     }
 }
 

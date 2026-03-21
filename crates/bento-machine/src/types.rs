@@ -125,7 +125,6 @@ pub enum MachineState {
     Created,
     Running,
     Stopped,
-    Released,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,16 +137,6 @@ pub type MachineExitReceiver = oneshot::Receiver<MachineExitEvent>;
 
 #[derive(Debug, Error)]
 pub enum MachineError {
-    #[error("machine {id:?} was requested with a different spec")]
-    SpecMismatch {
-        id: MachineId,
-        existing: Box<ResolvedMachineSpec>,
-        requested: Box<ResolvedMachineSpec>,
-    },
-
-    #[error("machine {id:?} has been released")]
-    MachineReleased { id: MachineId },
-
     #[error("machine {id:?} is already running")]
     AlreadyRunning { id: MachineId },
 

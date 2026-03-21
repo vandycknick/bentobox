@@ -3,7 +3,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_machine::MachineHandle;
+use bento_machine::MachineInstance;
 use bento_protocol::guest::v1::guest_discovery_service_client::GuestDiscoveryServiceClient;
 use bento_protocol::guest::v1::{
     ExtensionStatus, HealthRequest, ListExtensionsRequest, ListServicesRequest, ServiceStatus,
@@ -30,7 +30,7 @@ pub(crate) struct ServiceRegistry {
 }
 
 impl ServiceRegistry {
-    pub(crate) async fn discover(machine: &MachineHandle) -> eyre::Result<Self> {
+    pub(crate) async fn discover(machine: &MachineInstance) -> eyre::Result<Self> {
         let mut by_name = BTreeMap::new();
         by_name.insert(SERVICE_SERIAL.to_string(), ServiceTarget::Serial);
 
@@ -82,7 +82,7 @@ impl ServiceRegistry {
 }
 
 pub(crate) async fn request_guest_shutdown(
-    machine: &MachineHandle,
+    machine: &MachineInstance,
     reboot: bool,
 ) -> eyre::Result<()> {
     let mut client = connect_guest_client(machine).await?;
@@ -97,7 +97,7 @@ pub(crate) async fn request_guest_shutdown(
 }
 
 async fn connect_guest_client(
-    machine: &MachineHandle,
+    machine: &MachineInstance,
 ) -> eyre::Result<GuestDiscoveryServiceClient<tonic::transport::Channel>> {
     let stream = machine.open_vsock(DEFAULT_DISCOVERY_PORT).await?;
     let stream_slot = Arc::new(Mutex::new(Some(stream)));
