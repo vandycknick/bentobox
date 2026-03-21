@@ -77,7 +77,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_directory_share(fs_config)
         .build()?;
 
+    let mut state_updates = vm.subscribe_state();
     vm.start().await?;
+    vm.wait_for_state(bento_vz::VirtualMachineState::Running).await?;
+
+    if state_updates.changed().await.is_ok() {
+        println!("vm state changed: {:?}", *state_updates.borrow());
+    }
 
     let mut serial = serial_port.open_stream()?;
     tokio::io::AsyncWriteExt::write_all(&mut serial, b"hello serial\n").await?;

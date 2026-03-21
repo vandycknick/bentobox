@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 use std::fmt::{Debug, Display};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use block2::StackBlock;
 use objc2::{
@@ -13,7 +14,8 @@ use objc2_foundation::{
 use objc2_virtualization::{
     VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineState,
 };
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
+use tokio::time;
 
 use crate::configuration::VirtualMachineConfiguration;
 use crate::device::{
@@ -38,6 +40,8 @@ pub enum VirtualMachineState {
     Stopping = 7,
     Saving = 8,
     Restoring = 9,
+    #[default]
+    Unknown = -1,
 }
 
 impl Display for VirtualMachineState {
@@ -53,6 +57,7 @@ impl Display for VirtualMachineState {
             Self::Stopping => write!(f, "Stopping"),
             Self::Saving => write!(f, "Saving"),
             Self::Restoring => write!(f, "Restoring"),
+            Self::Unknown => write!(f, "Unknown"),
         }
     }
 }
@@ -70,6 +75,7 @@ impl From<VZVirtualMachineState> for VirtualMachineState {
             7 => Self::Stopping,
             8 => Self::Saving,
             9 => Self::Restoring,
+            _ => Self::Unknown,
         }
     }
 }
@@ -84,7 +90,7 @@ pub struct VirtualMachine {
     // field may be removable after verifying the VM remains stable when the Rust-side config drops.
     _config: Retained<VZVirtualMachineConfiguration>,
     _observer: Retained<VirtualMachineStateObserver>,
-    current_state: Arc<Mutex<VirtualMachineState>>,
+    state_tx: watch::Sender<VirtualMachineState>,
 }
 
 pub struct VirtualMachineBuilder {
@@ -109,8 +115,9 @@ impl VirtualMachine {
         machine: Retained<VZVirtualMachine>,
         config: Retained<VZVirtualMachineConfiguration>,
     ) -> Self {
-        let current_state = Arc::new(Mutex::new(unsafe { machine.state().into() }));
-        let observer_current_state = current_state.clone();
+        let initial_state: VirtualMachineState = unsafe { machine.state().into() };
+        let (state_tx, _state_rx) = watch::channel(initial_state);
+        let observer_state_tx = state_tx.clone();
         let observer = VirtualMachineStateObserver::new(machine.clone(), move |change| {
             let state = change.objectForKey(ns_string!("new"));
             let Some(number) = state.and_then(|value| value.downcast::<NSNumber>().ok()) else {
@@ -118,11 +125,7 @@ impl VirtualMachine {
             };
             let state = VZVirtualMachineState(number.as_isize());
             let state_msg: VirtualMachineState = state.into();
-
-            let mut current = observer_current_state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *current = state_msg;
+            let _ = observer_state_tx.send(state_msg);
         });
 
         Self {
@@ -130,7 +133,7 @@ impl VirtualMachine {
             machine,
             _config: config,
             _observer: observer,
-            current_state,
+            state_tx,
         }
     }
 
@@ -206,11 +209,62 @@ impl VirtualMachine {
         })?
     }
 
-    pub fn state(&self) -> VirtualMachineState {
-        self.current_state
+    pub fn state(&self) -> Result<VirtualMachineState, VzError> {
+        let state = Arc::new(Mutex::new(None));
+        let state_out = state.clone();
+        let machine = self.machine.clone();
+
+        self.queue.exec_block_sync(&StackBlock::new(move || unsafe {
+            let current_state: VirtualMachineState = machine.state().into();
+            let mut slot = state_out
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *slot = Some(current_state);
+        }));
+
+        let result = state
             .lock()
-            .map(|state| *state)
-            .unwrap_or_default()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| VzError::Backend("failed to read VM state".to_string()));
+
+        result
+    }
+
+    pub fn subscribe_state(&self) -> watch::Receiver<VirtualMachineState> {
+        self.state_tx.subscribe()
+    }
+
+    pub async fn wait_for_state(&self, target: VirtualMachineState) -> Result<(), VzError> {
+        let mut state_rx = self.subscribe_state();
+
+        loop {
+            let state = *state_rx.borrow_and_update();
+            if state == target {
+                return Ok(());
+            }
+
+            if state == VirtualMachineState::Error {
+                return Err(VzError::InvalidState {
+                    expected: target.to_string(),
+                    actual: state.to_string(),
+                });
+            }
+
+            state_rx.changed().await.map_err(|_| {
+                VzError::Backend("state watcher closed before target state was reached".to_string())
+            })?;
+        }
+    }
+
+    pub async fn wait_for_state_timeout(
+        &self,
+        target: VirtualMachineState,
+        timeout: Duration,
+    ) -> Result<(), VzError> {
+        time::timeout(timeout, self.wait_for_state(target))
+            .await
+            .map_err(|_| VzError::Timeout(format!("timed out waiting for state {}", target)))?
     }
 
     pub fn open_devices(&self) -> Result<Vec<VirtioSocketDevice>, VzError> {
