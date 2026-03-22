@@ -6,7 +6,7 @@ use objc2_virtualization::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RosettaAvailability {
+pub enum RosettaAvailability {
     NotSupported,
     NotInstalled,
     Installed,
@@ -34,7 +34,7 @@ pub(crate) fn vz_nested_virtualization_is_supported() -> bool {
     unsafe { VZGenericPlatformConfiguration::isNestedVirtualizationSupported() }
 }
 
-pub(crate) fn vz_rosetta_availability() -> RosettaAvailability {
+pub fn rosetta_availability() -> RosettaAvailability {
     match unsafe { VZLinuxRosettaDirectoryShare::availability() } {
         VZLinuxRosettaAvailability::NotSupported => RosettaAvailability::NotSupported,
         VZLinuxRosettaAvailability::NotInstalled => RosettaAvailability::NotInstalled,

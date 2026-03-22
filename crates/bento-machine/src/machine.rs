@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::backend::{self, Backend};
 use crate::stream::{SerialStream, VsockStream};
 use crate::types::{
-    MachineError, MachineExitReceiver, MachineSpec, MachineState, ResolvedMachineSpec,
+    MachineError, MachineSpec, MachineState, MachineStateReceiver, ResolvedMachineSpec,
 };
 
 pub struct Machine;
@@ -52,8 +52,12 @@ impl MachineInstance {
         self.inner.backend.state().await
     }
 
-    pub async fn start(&self) -> Result<MachineExitReceiver, MachineError> {
+    pub async fn start(&self) -> Result<(), MachineError> {
         self.inner.backend.start().await
+    }
+
+    pub fn subscribe_state(&self) -> MachineStateReceiver {
+        self.inner.backend.subscribe_state()
     }
 
     pub async fn stop(&self) -> Result<(), MachineError> {

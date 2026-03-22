@@ -12,6 +12,9 @@ pub mod dispatch;
 
 mod utils;
 
-pub use crate::configuration::{GenericPlatform, LinuxBootLoader, VirtualMachineConfiguration};
+pub use crate::configuration::{
+    GenericMachineIdentifier, GenericPlatform, LinuxBootLoader, VirtualMachineConfiguration,
+};
 pub use crate::error::VzError;
+pub use crate::utils::{rosetta_availability, RosettaAvailability};
 pub use crate::vm::{VirtualMachine, VirtualMachineState};

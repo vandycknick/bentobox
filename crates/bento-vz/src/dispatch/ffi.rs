@@ -1,4 +1,4 @@
-use std::ffi::{c_char, c_ulong};
+use std::ffi::{c_char, c_ulong, c_void};
 
 use block2::Block;
 use objc2::{Encode, Encoding, RefEncode};
@@ -17,6 +17,8 @@ unsafe impl RefEncode for dispatch_object_s {
     const ENCODING_REF: Encoding = Encoding::Object;
 }
 
+#[allow(non_camel_case_types)]
+pub type dispatch_function_t = extern "C" fn(*mut c_void);
 #[allow(non_camel_case_types)]
 pub(super) type dispatch_object_t = *mut dispatch_object_s;
 #[allow(non_camel_case_types)]
@@ -48,6 +50,11 @@ extern "C" {
         label: *const c_char,
         attr: dispatch_queue_attr_t,
     ) -> dispatch_queue_t;
+    pub fn dispatch_sync_f(
+        queue: dispatch_queue_t,
+        context: *mut c_void,
+        work: dispatch_function_t,
+    );
     pub(super) fn dispatch_async(queue: dispatch_queue_t, block: &Block<dyn Fn() -> ()>);
     pub(super) fn dispatch_sync(queue: dispatch_queue_t, block: &Block<dyn Fn() -> ()>);
     pub(super) fn dispatch_release(object: dispatch_object_t);

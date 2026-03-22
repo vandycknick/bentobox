@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::sync::{watch, Mutex as AsyncMutex};
 
 use crate::backend::firecracker::api::{
     ActionRequest, BootSourceRequest, DriveRequest, FirecrackerApiClient,
@@ -21,13 +21,11 @@ use crate::backend::firecracker::config::{
     API_SOCKET_NAME, TRACE_LOG_NAME, VSOCK_SOCKET_NAME,
 };
 use crate::backend::firecracker::process::{
-    format_exit_message, send_exit_once, spawn_exit_watcher, terminate_child, try_wait_child,
-    FirecrackerRuntime, RunningFirecracker, EXIT_POLL_INTERVAL, STARTUP_TIMEOUT, STOP_TIMEOUT,
+    format_exit_message, spawn_exit_watcher, terminate_child, try_wait_child, FirecrackerRuntime,
+    RunningFirecracker, EXIT_POLL_INTERVAL, STARTUP_TIMEOUT, STOP_TIMEOUT,
 };
 use crate::stream::{RawSerialConnection, RawVsockConnection};
-use crate::types::{
-    MachineError, MachineExitEvent, MachineExitReceiver, MachineState, ResolvedMachineSpec,
-};
+use crate::types::{MachineError, MachineState, MachineStateReceiver, ResolvedMachineSpec};
 
 pub(crate) struct FirecrackerMachineBackend {
     spec: ResolvedMachineSpec,
@@ -39,6 +37,7 @@ pub(crate) struct FirecrackerMachineBackend {
     api_client: FirecrackerApiClient,
     state: Arc<Mutex<MachineState>>,
     runtime: AsyncMutex<FirecrackerRuntime>,
+    state_tx: watch::Sender<MachineState>,
 }
 
 impl std::fmt::Debug for FirecrackerMachineBackend {
@@ -59,6 +58,7 @@ impl FirecrackerMachineBackend {
         let trace_log_path = runtime_dir.join(TRACE_LOG_NAME);
         let vsock_socket_path = runtime_dir.join(VSOCK_SOCKET_NAME);
         let api_client = FirecrackerApiClient::new(api_socket_path.clone(), STARTUP_TIMEOUT)?;
+        let (state_tx, _state_rx) = watch::channel(MachineState::Created);
 
         Ok(Self {
             spec,
@@ -70,6 +70,7 @@ impl FirecrackerMachineBackend {
             api_client,
             state: Arc::new(Mutex::new(MachineState::Created)),
             runtime: AsyncMutex::new(FirecrackerRuntime::default()),
+            state_tx,
         })
     }
 
@@ -82,7 +83,7 @@ impl FirecrackerMachineBackend {
             .map_err(|_| MachineError::RegistryPoisoned)
     }
 
-    pub(crate) async fn start(&self) -> Result<MachineExitReceiver, MachineError> {
+    pub(crate) async fn start(&self) -> Result<(), MachineError> {
         let mut runtime = self.runtime.lock().await;
         self.refresh_state_from_child_locked(&mut runtime)?;
         if self
@@ -154,15 +155,13 @@ impl FirecrackerMachineBackend {
             MachineError::Backend("firecracker child stdout pipe was not available".to_string())
         })?));
 
-        let (exit_tx, exit_rx) = oneshot::channel();
-        let shared_exit = Arc::new(Mutex::new(Some(exit_tx)));
         let shared_child = Arc::new(Mutex::new(child));
         let state = self.state.clone();
         let exit_watcher = spawn_exit_watcher(
             self.spec.id.as_str().to_string(),
             shared_child.clone(),
             state,
-            shared_exit.clone(),
+            self.state_tx.clone(),
         );
 
         runtime.running = Some(RunningFirecracker {
@@ -172,8 +171,8 @@ impl FirecrackerMachineBackend {
             exit_watcher: Some(exit_watcher),
         });
         self.set_state(MachineState::Running)?;
-        runtime.exit_sender = Some(shared_exit);
-        Ok(exit_rx)
+        let _ = self.state_tx.send(MachineState::Running);
+        Ok(())
     }
 
     pub(crate) async fn stop(&self) -> Result<(), MachineError> {
@@ -227,13 +226,8 @@ impl FirecrackerMachineBackend {
             let _ = exit_watcher.join();
         }
 
-        send_exit_once(
-            runtime.exit_sender.as_ref(),
-            MachineState::Stopped,
-            "machine stopped by host request",
-        );
-        runtime.exit_sender = None;
         self.set_state(MachineState::Stopped)?;
+        let _ = self.state_tx.send(MachineState::Stopped);
         if self.api_socket_path.exists() {
             let _ = fs::remove_file(&self.api_socket_path);
         }
@@ -274,12 +268,16 @@ impl FirecrackerMachineBackend {
             )));
         }
 
-        Ok(RawVsockConnection::Unix(stream))
+        RawVsockConnection::from_unix(stream).map_err(MachineError::from)
     }
 
     pub(crate) async fn open_serial(&self) -> Result<RawSerialConnection, MachineError> {
         let mut runtime = self.runtime.lock().await;
         self.serial_connection_locked(&mut runtime)
+    }
+
+    pub(crate) fn subscribe_state(&self) -> MachineStateReceiver {
+        self.state_tx.subscribe()
     }
 
     fn set_state(&self, state: MachineState) -> Result<(), MachineError> {
@@ -318,11 +316,7 @@ impl FirecrackerMachineBackend {
 
         if let Some(status) = status {
             self.set_state(MachineState::Stopped)?;
-            send_exit_once(
-                runtime.exit_sender.as_ref(),
-                MachineState::Stopped,
-                &format_exit_message(status),
-            );
+            let _ = self.state_tx.send(MachineState::Stopped);
         }
 
         Ok(())
@@ -348,10 +342,11 @@ impl FirecrackerMachineBackend {
             ))
         })?;
 
-        Ok(RawSerialConnection {
-            read: running.serial_read.try_clone()?,
-            write: running.serial_write.try_clone()?,
-        })
+        RawSerialConnection::from_files(
+            running.serial_read.try_clone()?,
+            running.serial_write.try_clone()?,
+        )
+        .map_err(MachineError::from)
     }
 
     fn wait_for_api_socket(&self, child: &mut Child) -> Result<(), MachineError> {

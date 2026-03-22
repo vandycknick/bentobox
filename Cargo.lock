@@ -310,6 +310,7 @@ name = "bento-machine"
 version = "0.1.0"
 dependencies = [
  "bento-protocol",
+ "bento-vz",
  "block2",
  "crossbeam",
  "nix 0.31.1",

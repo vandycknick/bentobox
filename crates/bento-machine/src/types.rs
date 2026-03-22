@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use thiserror::Error;
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MachineId(String);
@@ -127,13 +127,7 @@ pub enum MachineState {
     Stopped,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MachineExitEvent {
-    pub state: MachineState,
-    pub message: String,
-}
-
-pub type MachineExitReceiver = oneshot::Receiver<MachineExitEvent>;
+pub type MachineStateReceiver = watch::Receiver<MachineState>;
 
 #[derive(Debug, Error)]
 pub enum MachineError {

@@ -1,8 +1,3 @@
-use std::ffi::c_void;
-use std::fmt::{Debug, Display};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use block2::StackBlock;
 use objc2::{
     define_class, msg_send, rc::Retained, runtime::AnyObject, AllocAnyThread, DefinedClass,
@@ -14,8 +9,10 @@ use objc2_foundation::{
 use objc2_virtualization::{
     VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineState,
 };
+use std::ffi::c_void;
+use std::fmt::{Debug, Display};
+use std::sync::{Arc, Mutex};
 use tokio::sync::{oneshot, watch};
-use tokio::time;
 
 use crate::configuration::VirtualMachineConfiguration;
 use crate::device::{
@@ -209,82 +206,60 @@ impl VirtualMachine {
         })?
     }
 
-    pub fn state(&self) -> Result<VirtualMachineState, VzError> {
-        let state = Arc::new(Mutex::new(None));
-        let state_out = state.clone();
+    pub fn can_request_stop(&self) -> bool {
+        self.queue
+            .exec_sync(move || unsafe { self.machine.canRequestStop() })
+    }
+
+    pub fn request_stop(&self) -> Result<(), VzError> {
+        let result = Arc::new(Mutex::new(None));
+        let result_out = result.clone();
         let machine = self.machine.clone();
 
         self.queue.exec_block_sync(&StackBlock::new(move || unsafe {
-            let current_state: VirtualMachineState = machine.state().into();
-            let mut slot = state_out
+            let mut error: *mut NSError = std::ptr::null_mut();
+            let ok: bool = msg_send![&*machine, requestStopWithError: &mut error];
+            let request_result = if ok {
+                Ok(())
+            } else if let Some(error) = error.as_ref() {
+                Err(VzError::Backend(error.localizedDescription().to_string()))
+            } else {
+                Err(VzError::Backend(
+                    "requestStop failed without an error".to_string(),
+                ))
+            };
+
+            let mut slot = result_out
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *slot = Some(current_state);
+            *slot = Some(request_result);
         }));
 
-        let result = state
+        let result = result
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
-            .ok_or_else(|| VzError::Backend("failed to read VM state".to_string()));
+            .ok_or_else(|| VzError::Backend("failed to request graceful stop".to_string()))?;
 
         result
+    }
+
+    pub fn state(&self) -> VirtualMachineState {
+        self.queue
+            .exec_sync(move || unsafe { self.machine.state().into() })
     }
 
     pub fn subscribe_state(&self) -> watch::Receiver<VirtualMachineState> {
         self.state_tx.subscribe()
     }
 
-    pub async fn wait_for_state(&self, target: VirtualMachineState) -> Result<(), VzError> {
-        let mut state_rx = self.subscribe_state();
-
-        loop {
-            let state = *state_rx.borrow_and_update();
-            if state == target {
-                return Ok(());
-            }
-
-            if state == VirtualMachineState::Error {
-                return Err(VzError::InvalidState {
-                    expected: target.to_string(),
-                    actual: state.to_string(),
-                });
-            }
-
-            state_rx.changed().await.map_err(|_| {
-                VzError::Backend("state watcher closed before target state was reached".to_string())
-            })?;
-        }
-    }
-
-    pub async fn wait_for_state_timeout(
-        &self,
-        target: VirtualMachineState,
-        timeout: Duration,
-    ) -> Result<(), VzError> {
-        time::timeout(timeout, self.wait_for_state(target))
-            .await
-            .map_err(|_| VzError::Timeout(format!("timed out waiting for state {}", target)))?
-    }
-
-    pub fn open_devices(&self) -> Result<Vec<VirtioSocketDevice>, VzError> {
-        let count = Arc::new(Mutex::new(0usize));
-        let count_out = count.clone();
-        let machine = self.machine.clone();
-        self.queue.exec_block_sync(&StackBlock::new(move || unsafe {
-            let devices = machine.socketDevices();
-            let mut count = count_out
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *count = devices.count();
-        }));
-
-        let count = *count
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok((0..count)
+    pub fn open_devices(&self) -> Vec<VirtioSocketDevice> {
+        let count = self
+            .queue
+            .exec_sync(move || unsafe { self.machine.socketDevices().count() });
+        (0..count)
             .map(|index| VirtioSocketDevice::new(self.machine.clone(), self.queue.clone(), index))
-            .collect())
+            .collect()
     }
 }
 

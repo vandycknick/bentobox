@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_machine::{Machine, MachineExitEvent, MachineState};
+use bento_machine::{Machine, MachineState, MachineStateReceiver};
 use bento_protocol::instance::v1::{ExtensionStatus, HostSocket, LifecycleState};
 use bento_runtime::extensions::{BuiltinExtension, EXTENSION_DOCKER, EXTENSION_PORT_FORWARD};
 use bento_runtime::instance::{Instance, InstanceFile};
@@ -12,7 +12,7 @@ use tokio::signal::unix::signal;
 use tokio::signal::unix::SignalKind;
 
 use crate::bootstrap::rebuild_bootstrap;
-use crate::discovery::{request_guest_shutdown, ServiceRegistry};
+use crate::discovery::ServiceRegistry;
 use crate::host_export::listen_host_service;
 use crate::machine::machine_spec_for_instance;
 use crate::pid_guard::PidGuard;
@@ -23,12 +23,15 @@ use crate::state::{new_instance_store, Action};
 
 const GUEST_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const GUEST_DISCOVERY_RETRY: Duration = Duration::from_secs(1);
-const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-
 enum LoopExit {
     Signal(&'static str),
     InternalExit(&'static str),
-    VmStopped(MachineExitEvent),
+    VmStopped(VmStopInfo),
+}
+
+struct VmStopInfo {
+    state: MachineState,
+    message: String,
 }
 
 pub struct InstanceDaemon {
@@ -94,7 +97,8 @@ impl InstanceDaemon {
 
         store.dispatch(Action::vm_starting());
 
-        let mut machine_exit = machine.start().await?;
+        let mut machine_state = machine.subscribe_state();
+        machine.start().await?;
 
         if let Err(err) = serial_console
             .stream_to_file(&inst.file(InstanceFile::SerialLog))
@@ -141,17 +145,17 @@ impl InstanceDaemon {
                 });
                 LoopExit::Signal("SIGTERM")
             }
-            result = &mut machine_exit => {
+            result = wait_for_machine_stop(&mut machine_state) => {
                 match result {
                     Ok(event) => {
                         tracing::info!(instance = %self.name, state = ?event.state, message = %event.message, "machine exited");
                         LoopExit::VmStopped(event)
                     }
                     Err(_) => {
-                        tracing::warn!(instance = %self.name, "machine exit channel closed");
-                        LoopExit::VmStopped(MachineExitEvent {
+                        tracing::warn!(instance = %self.name, "machine state watcher closed");
+                        LoopExit::VmStopped(VmStopInfo {
                             state: MachineState::Stopped,
-                            message: String::from("machine exit channel closed"),
+                            message: String::from("machine state watcher closed"),
                         })
                     }
                 }
@@ -188,34 +192,10 @@ impl InstanceDaemon {
             task.abort();
         }
 
-        let mut vm_already_stopped = matches!(loop_exit, LoopExit::VmStopped(_));
+        let vm_already_stopped = matches!(loop_exit, LoopExit::VmStopped(_));
 
         if let LoopExit::Signal(reason) = &loop_exit {
             tracing::info!(instance = %self.name, reason, "beginning shutdown flow");
-            if expects_guest_agent {
-                match request_guest_shutdown(&machine, false).await {
-                    Ok(()) => {
-                        tracing::info!(instance = %self.name, "requested graceful guest shutdown");
-                        match tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, &mut machine_exit)
-                            .await
-                        {
-                            Ok(Ok(event)) => {
-                                tracing::info!(instance = %self.name, state = ?event.state, message = %event.message, "guest shutdown observed before force-stop fallback");
-                                vm_already_stopped = true;
-                            }
-                            Ok(Err(_)) => {
-                                tracing::warn!(instance = %self.name, "machine exit channel closed during graceful shutdown wait");
-                            }
-                            Err(_) => {
-                                tracing::warn!(instance = %self.name, timeout = ?GRACEFUL_SHUTDOWN_TIMEOUT, "graceful shutdown timed out, forcing stop");
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(instance = %self.name, error = %err, "failed to request graceful guest shutdown, forcing stop");
-                    }
-                }
-            }
         } else if let LoopExit::InternalExit(reason) = &loop_exit {
             tracing::warn!(instance = %self.name, reason, "background task exited, forcing vm stop");
         }
@@ -288,6 +268,25 @@ fn spawn_guest_extension_monitor(
             }
         }
     })
+}
+
+async fn wait_for_machine_stop(
+    receiver: &mut MachineStateReceiver,
+) -> Result<VmStopInfo, tokio::sync::watch::error::RecvError> {
+    loop {
+        receiver.changed().await?;
+        let state = *receiver.borrow_and_update();
+        match state {
+            MachineState::Stopped => {
+                return Ok(VmStopInfo {
+                    state,
+                    message: String::from("machine stopped"),
+                });
+            }
+            MachineState::Running => {}
+            MachineState::Created => {}
+        }
+    }
 }
 
 fn project_extension_statuses(inst: &Instance, registry: &ServiceRegistry) -> Vec<ExtensionStatus> {

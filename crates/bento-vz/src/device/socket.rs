@@ -1,9 +1,7 @@
 use std::fmt;
-use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
-use std::pin::Pin;
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::sync::{Arc, Mutex};
-use std::task::{ready, Context, Poll};
 
 use block2::StackBlock;
 use nix::unistd::dup;
@@ -12,8 +10,6 @@ use objc2_virtualization::{
     VZSocketDevice, VZSocketDeviceConfiguration, VZVirtioSocketConnection, VZVirtioSocketDevice,
     VZVirtioSocketDeviceConfiguration, VZVirtualMachine,
 };
-use tokio::io::unix::AsyncFd;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::oneshot;
 
 use crate::dispatch::Queue;
@@ -21,7 +17,7 @@ use crate::error::VzError;
 
 #[allow(async_fn_in_trait)]
 pub trait SocketDevice: Send + Sync {
-    type Connection: AsyncRead + AsyncWrite + Send + Unpin + 'static;
+    type Connection: Read + Write + AsRawFd + Send + 'static;
     type Listener;
 
     async fn connect(&self, port: u32) -> Result<Self::Connection, VzError>;
@@ -132,11 +128,12 @@ impl SocketDevice for VirtioSocketDevice {
 
                     let file_descriptor = connection.fileDescriptor();
                     let borrowed = BorrowedFd::borrow_raw(file_descriptor);
+                    let source_port = connection.sourcePort();
                     let result = dup(borrowed)
                         .map_err(|err| {
                             VzError::Backend(format!("duplicate vsock file descriptor: {err}"))
                         })
-                        .and_then(|fd| VirtioSocketConnection::new(fd, port));
+                        .and_then(|fd| VirtioSocketConnection::new(fd, source_port, port));
                     send_completion_once(&completion_sender, result);
                 },
             );
@@ -157,27 +154,34 @@ impl SocketDevice for VirtioSocketDevice {
 }
 
 pub struct VirtioSocketConnection {
-    inner: AsyncFd<std::fs::File>,
+    file: std::fs::File,
+    source_port: u32,
     destination_port: u32,
 }
 
 impl fmt::Debug for VirtioSocketConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VirtioSocketConnection")
-            .field("fd", &self.inner.get_ref().as_raw_fd())
+            .field("fd", &self.file.as_raw_fd())
+            .field("source_port", &self.source_port)
             .field("destination_port", &self.destination_port)
             .finish()
     }
 }
 
 impl VirtioSocketConnection {
-    fn new(fd: OwnedFd, destination_port: u32) -> Result<Self, VzError> {
+    fn new(fd: OwnedFd, source_port: u32, destination_port: u32) -> Result<Self, VzError> {
         let file = std::fs::File::from(fd);
         super::serial::set_nonblocking(&file)?;
         Ok(Self {
-            inner: AsyncFd::new(file)?,
+            file,
+            source_port,
             destination_port,
         })
+    }
+
+    pub fn source_port(&self) -> u32 {
+        self.source_port
     }
 
     pub fn destination_port(&self) -> u32 {
@@ -185,54 +189,41 @@ impl VirtioSocketConnection {
     }
 }
 
-impl AsyncRead for VirtioSocketConnection {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let bytes =
-            unsafe { &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]) };
-        loop {
-            let mut guard = ready!(self.inner.poll_read_ready(cx))?;
-            match guard.try_io(|inner| inner.get_ref().read(bytes)) {
-                Ok(Ok(n)) => {
-                    unsafe { buf.assume_init(n) };
-                    buf.advance(n);
-                    return Poll::Ready(Ok(()));
-                }
-                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Ok(Err(err)) => return Poll::Ready(Err(err)),
-                Err(_) => continue,
-            }
-        }
+impl AsRawFd for VirtioSocketConnection {
+    fn as_raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
     }
 }
 
-impl AsyncWrite for VirtioSocketConnection {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        loop {
-            let mut guard = ready!(self.inner.poll_write_ready(cx))?;
-            match guard.try_io(|inner| inner.get_ref().write(buf)) {
-                Ok(Ok(n)) => return Poll::Ready(Ok(n)),
-                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Ok(Err(err)) => return Poll::Ready(Err(err)),
-                Err(_) => continue,
-            }
-        }
+impl Read for VirtioSocketConnection {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Read for &VirtioSocketConnection {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        (&self.file).read(buf)
+    }
+}
+
+impl Write for VirtioSocketConnection {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl Write for &VirtioSocketConnection {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        (&self.file).write(buf)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.inner.get_ref().flush()?;
-        Poll::Ready(Ok(()))
+    fn flush(&mut self) -> std::io::Result<()> {
+        (&self.file).flush()
     }
 }
 

@@ -4,26 +4,63 @@ use std::fmt;
 use std::io;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+#[cfg(target_os = "linux")]
 use tokio::net::UnixStream;
 
 pub(crate) trait StreamIo: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
 
 impl<T> StreamIo for T where T: AsyncRead + AsyncWrite + Send + Unpin + 'static {}
 
-#[allow(dead_code)]
-pub(crate) enum RawVsockConnection {
-    File(std::fs::File),
-    Unix(StdUnixStream),
+pub(crate) struct RawVsockConnection {
+    inner: Box<dyn StreamIo>,
 }
 
 pub(crate) struct RawSerialConnection {
-    pub(crate) read: std::fs::File,
-    pub(crate) write: std::fs::File,
+    inner: Box<dyn StreamIo>,
+}
+
+impl RawVsockConnection {
+    pub(crate) fn new<T>(stream: T) -> Self
+    where
+        T: StreamIo,
+    {
+        Self {
+            inner: Box::new(stream),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_file(file: std::fs::File) -> io::Result<Self> {
+        Ok(Self::new(AsyncFdStream::new(file)?))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_unix(stream: StdUnixStream) -> io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        Ok(Self::new(UnixStream::from_std(stream)?))
+    }
+}
+
+impl RawSerialConnection {
+    pub(crate) fn new<T>(stream: T) -> Self
+    where
+        T: StreamIo,
+    {
+        Self {
+            inner: Box::new(stream),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_files(read: std::fs::File, write: std::fs::File) -> io::Result<Self> {
+        Ok(Self::new(SplitFdStream::new(read, write)?))
+    }
 }
 
 pub struct VsockStream {
@@ -51,13 +88,7 @@ impl VsockStream {
     }
 
     pub(crate) fn from_raw(raw: RawVsockConnection) -> io::Result<Self> {
-        match raw {
-            RawVsockConnection::File(file) => Self::from_file(file),
-            RawVsockConnection::Unix(stream) => {
-                stream.set_nonblocking(true)?;
-                Ok(Self::new(UnixStream::from_std(stream)?))
-            }
-        }
+        Ok(Self { inner: raw.inner })
     }
 }
 
@@ -114,7 +145,7 @@ impl SerialStream {
     }
 
     pub(crate) fn from_raw(raw: RawSerialConnection) -> io::Result<Self> {
-        Self::from_files(raw.read, raw.write)
+        Ok(Self { inner: raw.inner })
     }
 }
 
@@ -296,7 +327,7 @@ impl AsyncWrite for SplitFdStream {
     }
 }
 
-fn shutdown_write(file: &std::fs::File) -> io::Result<()> {
+fn shutdown_write<F: AsRawFd>(file: &F) -> io::Result<()> {
     match shutdown(file.as_raw_fd(), Shutdown::Write) {
         Ok(()) => Ok(()),
         Err(nix::errno::Errno::ENOTSOCK | nix::errno::Errno::ENOTCONN) => Ok(()),

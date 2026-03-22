@@ -26,6 +26,12 @@ pub struct SerialPortConfiguration {
     host_write: Arc<OwnedFd>,
 }
 
+// SAFETY: The wrapper owns a retained configuration object and duplicated host pipe file
+// descriptors. The public API only exposes immutable access plus host-side stream duplication.
+unsafe impl Send for SerialPortConfiguration {}
+// SAFETY: See above.
+unsafe impl Sync for SerialPortConfiguration {}
+
 impl SerialPortConfiguration {
     pub fn new() -> Self {
         Self::virtio_console()

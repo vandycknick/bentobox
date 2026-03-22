@@ -6,7 +6,6 @@ service GuestDiscoveryService {
   rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
   rpc ListExtensions(ListExtensionsRequest) returns (ListExtensionsResponse);
   rpc WatchPortForwards(WatchPortForwardsRequest) returns (stream PortForwardEvent);
-  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
   rpc ResolveService(ResolveServiceRequest) returns (ResolveServiceResponse);
   rpc Health(HealthRequest) returns (HealthResponse);
 }
@@ -46,12 +45,6 @@ message ListExtensionsResponse {
 }
 
 message WatchPortForwardsRequest {}
-
-message ShutdownRequest {
-  bool reboot = 1;
-}
-
-message ShutdownResponse {}
 
 message PortForward {
   uint32 guest_port = 1;

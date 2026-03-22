@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
-use crate::types::{MachineError, MachineExitEvent, MachineState};
+use crate::types::{MachineError, MachineState};
 
 pub(super) const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -17,7 +17,6 @@ pub(super) const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Default)]
 pub(super) struct FirecrackerRuntime {
-    pub(super) exit_sender: Option<Arc<Mutex<Option<oneshot::Sender<MachineExitEvent>>>>>,
     pub(super) running: Option<RunningFirecracker>,
 }
 
@@ -56,7 +55,7 @@ pub(super) fn spawn_exit_watcher(
     machine_id: String,
     child: Arc<Mutex<Child>>,
     state: Arc<Mutex<MachineState>>,
-    exit_sender: Arc<Mutex<Option<oneshot::Sender<MachineExitEvent>>>>,
+    state_tx: watch::Sender<MachineState>,
 ) -> JoinHandle<()> {
     thread::Builder::new()
         .name(format!("firecracker-machine-state:{machine_id}"))
@@ -71,12 +70,8 @@ pub(super) fn spawn_exit_watcher(
                     if let Ok(mut current_state) = state.lock() {
                         *current_state = MachineState::Stopped;
                     }
+                    let _ = state_tx.send(MachineState::Stopped);
                     tracing::info!(machine_id, status = %format_exit_message(status), "firecracker process exited");
-                    let _ = send_exit_once_inner(
-                        &exit_sender,
-                        MachineState::Stopped,
-                        &format_exit_message(status),
-                    );
                     return;
                 }
                 Ok(None) => thread::sleep(EXIT_POLL_INTERVAL),
@@ -84,28 +79,13 @@ pub(super) fn spawn_exit_watcher(
                     if let Ok(mut current_state) = state.lock() {
                         *current_state = MachineState::Stopped;
                     }
+                    let _ = state_tx.send(MachineState::Stopped);
                     tracing::warn!(machine_id, error = %err, "failed to poll firecracker process status");
-                    let _ = send_exit_once_inner(
-                        &exit_sender,
-                        MachineState::Stopped,
-                        &format!("failed to poll firecracker process status: {err}"),
-                    );
                     return;
                 }
             }
         })
         .expect("firecracker exit watcher thread should spawn")
-}
-
-pub(super) fn send_exit_once(
-    exit_sender: Option<&Arc<Mutex<Option<oneshot::Sender<MachineExitEvent>>>>>,
-    state: MachineState,
-    message: &str,
-) {
-    let Some(exit_sender) = exit_sender else {
-        return;
-    };
-    let _ = send_exit_once_inner(exit_sender, state, message);
 }
 
 pub(super) fn format_exit_message(status: ExitStatus) -> String {
@@ -121,24 +101,4 @@ pub(super) fn try_wait_child(child: &mut Child) -> Result<Option<ExitStatus>, Ma
         Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok(None),
         Err(err) => Err(MachineError::Io(err)),
     }
-}
-
-fn send_exit_once_inner(
-    exit_sender: &Arc<Mutex<Option<oneshot::Sender<MachineExitEvent>>>>,
-    state: MachineState,
-    message: &str,
-) -> Result<(), MachineError> {
-    let sender = exit_sender
-        .lock()
-        .map_err(|_| MachineError::RegistryPoisoned)?
-        .take();
-
-    if let Some(sender) = sender {
-        let _ = sender.send(MachineExitEvent {
-            state,
-            message: message.to_string(),
-        });
-    }
-
-    Ok(())
 }

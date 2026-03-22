@@ -5,7 +5,7 @@ mod vz;
 
 use crate::stream::{RawSerialConnection, RawVsockConnection};
 use crate::types::{
-    MachineError, MachineExitReceiver, MachineKind, MachineState, ResolvedMachineSpec,
+    MachineError, MachineKind, MachineState, MachineStateReceiver, ResolvedMachineSpec,
 };
 
 #[derive(Debug)]
@@ -26,12 +26,21 @@ impl Backend {
         }
     }
 
-    pub(crate) async fn start(&self) -> Result<MachineExitReceiver, MachineError> {
+    pub(crate) async fn start(&self) -> Result<(), MachineError> {
         match self {
             #[cfg(target_os = "linux")]
             Self::Firecracker(backend) => backend.start().await,
             #[cfg(target_os = "macos")]
             Self::Vz(backend) => backend.start().await,
+        }
+    }
+
+    pub(crate) fn subscribe_state(&self) -> MachineStateReceiver {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::Firecracker(backend) => backend.subscribe_state(),
+            #[cfg(target_os = "macos")]
+            Self::Vz(backend) => backend.subscribe_state(),
         }
     }
 

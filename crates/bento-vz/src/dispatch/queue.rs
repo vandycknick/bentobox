@@ -1,6 +1,11 @@
-use std::ffi::CString;
+use std::{
+    ffi::{c_void, CString},
+    mem,
+};
 
 use block2::Block;
+
+use crate::dispatch::ffi::{dispatch_function_t, dispatch_sync_f};
 
 use super::{
     ffi::{
@@ -21,6 +26,28 @@ impl Queue {
         let label = CString::new(label).expect("queue label should not contain NUL bytes");
         let queue = unsafe { dispatch_queue_create(label.as_ptr(), attr.as_raw()) };
         Self { ptr: queue }
+    }
+
+    pub fn exec_sync<T, F>(&self, work: F) -> T
+    where
+        F: Send + FnOnce() -> T,
+        T: Send,
+    {
+        let mut result = None;
+        {
+            let result_ref = &mut result;
+            let work = move || {
+                *result_ref = Some(work());
+            };
+
+            let mut work = Some(work);
+            let (context, work) = context_and_sync_function(&mut work);
+            unsafe {
+                dispatch_sync_f(self.ptr, context, work);
+            }
+        }
+        // This was set so it's safe to unwrap
+        result.unwrap()
     }
 
     pub fn exec_block_async(&self, block: &Block<dyn Fn() -> ()>) {
@@ -105,4 +132,22 @@ impl DispatchQoSClass {
             Self::Unspecified => qos_class_t::QOS_CLASS_UNSPECIFIED,
         }
     }
+}
+
+fn context_and_sync_function<F>(closure: &mut Option<F>) -> (*mut c_void, dispatch_function_t)
+where
+    F: FnOnce(),
+{
+    extern "C" fn work_read_closure<F>(context: &mut Option<F>)
+    where
+        F: FnOnce(),
+    {
+        // This is always passed Some, so it's safe to unwrap
+        let closure = context.take().unwrap();
+        closure();
+    }
+
+    let context: *mut Option<F> = closure;
+    let func: extern "C" fn(&mut Option<F>) = work_read_closure::<F>;
+    unsafe { (context as *mut c_void, mem::transmute(func)) }
 }
