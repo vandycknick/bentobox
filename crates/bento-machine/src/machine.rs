@@ -65,13 +65,11 @@ impl MachineInstance {
     }
 
     pub async fn open_vsock(&self, port: u32) -> Result<VsockStream, MachineError> {
-        let raw = self.inner.backend.open_vsock(port).await?;
-        VsockStream::from_raw(raw).map_err(MachineError::from)
+        self.inner.backend.open_vsock(port).await
     }
 
     pub async fn open_serial(&self) -> Result<SerialStream, MachineError> {
-        let raw = self.inner.backend.open_serial().await?;
-        SerialStream::from_raw(raw).map_err(MachineError::from)
+        self.inner.backend.open_serial().await
     }
 }
 

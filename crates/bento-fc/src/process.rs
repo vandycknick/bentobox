@@ -20,6 +20,8 @@ pub struct FirecrackerProcessBuilder {
     firecracker_bin: PathBuf,
     socket_path: PathBuf,
     id: Option<String>,
+    log_path: Option<PathBuf>,
+    log_level: Option<String>,
     socket_timeout: Duration,
     socket_poll_interval: Duration,
     cleanup_socket: bool,
@@ -31,6 +33,8 @@ impl FirecrackerProcessBuilder {
             firecracker_bin: firecracker_bin.into(),
             socket_path: socket_path.into(),
             id: None,
+            log_path: None,
+            log_level: None,
             socket_timeout: DEFAULT_SOCKET_TIMEOUT,
             socket_poll_interval: DEFAULT_SOCKET_POLL_INTERVAL,
             cleanup_socket: true,
@@ -39,6 +43,16 @@ impl FirecrackerProcessBuilder {
 
     pub fn id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    pub fn log_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.log_path = Some(path.into());
+        self
+    }
+
+    pub fn log_level(mut self, level: impl Into<String>) -> Self {
+        self.log_level = Some(level.into());
         self
     }
 
@@ -66,6 +80,16 @@ impl FirecrackerProcessBuilder {
         if let Some(id) = &self.id {
             args.push("--id".to_string());
             args.push(id.clone());
+        }
+
+        if let Some(log_path) = &self.log_path {
+            args.push("--log-path".to_string());
+            args.push(log_path.display().to_string());
+        }
+
+        if let Some(log_level) = &self.log_level {
+            args.push("--level".to_string());
+            args.push(log_level.clone());
         }
 
         args
@@ -167,6 +191,14 @@ impl FirecrackerProcess {
         })
         .await
         .map_err(|err| FirecrackerError::Io(std::io::Error::other(err.to_string())))?
+    }
+
+    pub fn try_wait(&self) -> Result<Option<ExitStatus>, FirecrackerError> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| FirecrackerError::ChildHandlePoisoned)?;
+        child.try_wait().map_err(FirecrackerError::Io)
     }
 }
 

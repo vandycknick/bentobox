@@ -3,7 +3,7 @@ mod firecracker;
 #[cfg(target_os = "macos")]
 mod vz;
 
-use crate::stream::{RawSerialConnection, RawVsockConnection};
+use crate::stream::{SerialStream, VsockStream};
 use crate::types::{
     MachineError, MachineKind, MachineState, MachineStateReceiver, ResolvedMachineSpec,
 };
@@ -53,7 +53,7 @@ impl Backend {
         }
     }
 
-    pub(crate) async fn open_vsock(&self, port: u32) -> Result<RawVsockConnection, MachineError> {
+    pub(crate) async fn open_vsock(&self, port: u32) -> Result<VsockStream, MachineError> {
         match self {
             #[cfg(target_os = "linux")]
             Self::Firecracker(backend) => backend.open_vsock(port).await,
@@ -62,7 +62,7 @@ impl Backend {
         }
     }
 
-    pub(crate) async fn open_serial(&self) -> Result<RawSerialConnection, MachineError> {
+    pub(crate) async fn open_serial(&self) -> Result<SerialStream, MachineError> {
         match self {
             #[cfg(target_os = "linux")]
             Self::Firecracker(backend) => backend.open_serial().await,

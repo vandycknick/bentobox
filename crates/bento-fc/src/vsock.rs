@@ -1,9 +1,10 @@
-use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::{UnixListener, UnixStream};
 
 use crate::error::FirecrackerError;
 
@@ -37,8 +38,6 @@ impl VsockDevice {
         stream.write_all(request.as_bytes()).await?;
 
         let source_port = read_connect_ack(&mut stream).await?;
-        let stream = stream.into_std()?;
-        stream.set_nonblocking(true)?;
 
         Ok(VsockConnection {
             stream,
@@ -50,7 +49,6 @@ impl VsockDevice {
     pub fn bind(&self, port: u32) -> Result<VsockListener, FirecrackerError> {
         let socket_path = listener_path(&self.uds_path, port);
         let listener = UnixListener::bind(&socket_path)?;
-        listener.set_nonblocking(true)?;
 
         Ok(VsockListener {
             listener,
@@ -83,35 +81,31 @@ impl AsRawFd for VsockConnection {
     }
 }
 
-impl Read for VsockConnection {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.stream.read(buf)
+impl AsyncRead for VsockConnection {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
     }
 }
 
-impl Read for &VsockConnection {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        (&self.stream).read(buf)
-    }
-}
-
-impl Write for VsockConnection {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.stream.write(buf)
+impl AsyncWrite for VsockConnection {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.stream.flush()
-    }
-}
-
-impl Write for &VsockConnection {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        (&self.stream).write(buf)
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        (&self.stream).flush()
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 
@@ -123,9 +117,8 @@ pub struct VsockListener {
 }
 
 impl VsockListener {
-    pub fn accept(&self) -> Result<VsockConnection, FirecrackerError> {
-        let (stream, _) = self.listener.accept()?;
-        stream.set_nonblocking(true)?;
+    pub async fn accept(&self) -> Result<VsockConnection, FirecrackerError> {
+        let (stream, _) = self.listener.accept().await?;
         Ok(VsockConnection {
             stream,
             source_port: None,

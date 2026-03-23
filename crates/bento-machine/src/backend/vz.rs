@@ -1,8 +1,6 @@
 use std::fs;
-use std::io::{self, ErrorKind, Read, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::task::{ready, Context, Poll};
 use std::time::Duration;
 
 use bento_protocol::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
@@ -10,17 +8,15 @@ use bento_vz::device::{
     EntropyDeviceConfiguration, LinuxRosettaDirectoryShare, MemoryBalloonDeviceConfiguration,
     NetworkDeviceConfiguration, SerialPortConfiguration, SharedDirectory, SingleDirectoryShare,
     SocketDevice, SocketDeviceConfiguration, StorageDeviceConfiguration,
-    VirtioFileSystemDeviceConfiguration, VirtioSocketConnection,
+    VirtioFileSystemDeviceConfiguration,
 };
 use bento_vz::{
     GenericMachineIdentifier, GenericPlatform, LinuxBootLoader, RosettaAvailability,
     VirtualMachine, VirtualMachineState,
 };
-use tokio::io::unix::AsyncFd;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{watch, Mutex as AsyncMutex};
 
-use crate::stream::{RawSerialConnection, RawVsockConnection};
+use crate::stream::{SerialStream, VsockStream};
 use crate::types::{
     MachineConfig, MachineError, MachineId, MachineState, MachineStateReceiver, NetworkMode,
     ResolvedMachineSpec,
@@ -175,7 +171,7 @@ impl VzMachineBackend {
         self.state_tx.subscribe()
     }
 
-    pub(crate) async fn open_vsock(&self, port: u32) -> Result<RawVsockConnection, MachineError> {
+    pub(crate) async fn open_vsock(&self, port: u32) -> Result<VsockStream, MachineError> {
         let vm = {
             let state = self.inner.lock().await;
             state.vm.clone().ok_or_else(|| {
@@ -191,11 +187,10 @@ impl VzMachineBackend {
         })?;
 
         let stream = device.connect(port).await.map_err(vz_error)?;
-        let stream = AsyncFd::new(stream).map_err(MachineError::from)?;
-        Ok(RawVsockConnection::new(VsockAsyncStream::new(stream)))
+        Ok(VsockStream::from_vz(stream))
     }
 
-    pub(crate) async fn open_serial(&self) -> Result<RawSerialConnection, MachineError> {
+    pub(crate) async fn open_serial(&self) -> Result<SerialStream, MachineError> {
         let serial_port = {
             let state = self.inner.lock().await;
             state.serial_port.clone().ok_or_else(|| {
@@ -207,7 +202,7 @@ impl VzMachineBackend {
         };
 
         let stream = serial_port.open_stream().map_err(vz_error)?;
-        Ok(RawSerialConnection::new(stream))
+        Ok(SerialStream::from_vz(stream))
     }
 }
 
@@ -549,75 +544,5 @@ fn map_machine_state(state: VirtualMachineState) -> MachineState {
         VirtualMachineState::Running => MachineState::Running,
         VirtualMachineState::Stopped => MachineState::Stopped,
         _ => MachineState::Created,
-    }
-}
-
-struct VsockAsyncStream {
-    inner: AsyncFd<VirtioSocketConnection>,
-}
-
-impl VsockAsyncStream {
-    fn new(inner: AsyncFd<VirtioSocketConnection>) -> Self {
-        Self { inner }
-    }
-}
-
-impl AsyncRead for VsockAsyncStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let bytes =
-            unsafe { &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]) };
-
-        loop {
-            let mut guard = ready!(self.inner.poll_read_ready(cx))?;
-            match guard.try_io(|inner| {
-                let mut conn = inner.get_ref();
-                conn.read(bytes)
-            }) {
-                Ok(Ok(n)) => {
-                    unsafe { buf.assume_init(n) };
-                    buf.advance(n);
-                    return Poll::Ready(Ok(()));
-                }
-                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Ok(Err(err)) => return Poll::Ready(Err(err)),
-                Err(_) => continue,
-            }
-        }
-    }
-}
-
-impl AsyncWrite for VsockAsyncStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        loop {
-            let mut guard = ready!(self.inner.poll_write_ready(cx))?;
-            match guard.try_io(|inner| {
-                let mut conn = inner.get_ref();
-                conn.write(buf)
-            }) {
-                Ok(Ok(n)) => return Poll::Ready(Ok(n)),
-                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Ok(Err(err)) => return Poll::Ready(Err(err)),
-                Err(_) => continue,
-            }
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut conn = self.inner.get_ref();
-        Poll::Ready(conn.flush())
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut conn = self.inner.get_ref();
-        conn.flush()?;
-        Poll::Ready(Ok(()))
     }
 }
