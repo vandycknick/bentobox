@@ -314,7 +314,7 @@ impl FirecrackerMachineBackend {
             .map_err(|_| MachineError::RegistryPoisoned)?;
         let status = try_wait_child(&mut child)?;
 
-        if let Some(status) = status {
+        if status.is_some() {
             self.set_state(MachineState::Stopped)?;
             let _ = self.state_tx.send(MachineState::Stopped);
         }
@@ -328,7 +328,12 @@ impl FirecrackerMachineBackend {
     ) -> Result<RawSerialConnection, MachineError> {
         self.refresh_state_from_child_locked(runtime)?;
 
-        if self.state()? != MachineState::Running {
+        let state = self
+            .state
+            .lock()
+            .map(|state| *state)
+            .map_err(|_| MachineError::RegistryPoisoned)?;
+        if state != MachineState::Running {
             return Err(MachineError::Backend(format!(
                 "cannot open serial stream because machine {:?} is not running",
                 self.spec.id.as_str()
