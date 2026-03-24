@@ -134,10 +134,8 @@ impl SocketDevice for VirtioSocketDevice {
                     let borrowed = BorrowedFd::borrow_raw(file_descriptor);
                     let source_port = connection.sourcePort();
                     let result = dup(borrowed)
-                        .map_err(|err| {
-                            VzError::Backend(format!("duplicate vsock file descriptor: {err}"))
-                        })
-                        .and_then(|fd| VirtioSocketConnection::new(fd, source_port, port));
+                        .map_err(|err| VzError::Backend(format!("duplicate vsock fd: {err}")))
+                        .map(|fd| (fd, source_port, port));
                     send_completion_once(&completion_sender, result);
                 },
             );
@@ -150,6 +148,10 @@ impl SocketDevice for VirtioSocketDevice {
                 "vsock completion channel closed before result was delivered".to_string(),
             )
         })?
+        .and_then(|(fd, source_port, destination_port)| {
+            VirtioSocketConnection::new(fd, source_port, destination_port)
+        })
+        .map_err(VzError::from)
     }
 
     fn listen(&self, _port: u32) -> Result<Self::Listener, VzError> {
