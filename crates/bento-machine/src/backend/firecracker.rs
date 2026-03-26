@@ -10,7 +10,7 @@ use bento_fc::types::{
     BootSource, Drive, DriveCacheType, DriveIoEngine, MachineConfiguration, Vsock,
 };
 use bento_fc::FirecrackerProcessBuilder;
-use bento_protocol::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
+use bento_protocol::{DEFAULT_AGENT_PORT, KERNEL_PARAM_AGENT_PORT};
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use tokio::time::timeout;
 
@@ -25,6 +25,7 @@ const FIRECRACKER_BINARY_NAME: &str = "firecracker";
 const API_SOCKET_NAME: &str = "firecracker.sock";
 const TRACE_LOG_NAME: &str = "fc.trace.log";
 const VSOCK_SOCKET_NAME: &str = "firecracker.vsock";
+const GUEST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -262,17 +263,34 @@ impl FirecrackerMachineBackend {
         };
 
         if running.process.try_wait().map_err(fc_error)?.is_none() {
-            let shutdown_result = timeout(STOP_TIMEOUT, running.process.shutdown()).await;
-            match shutdown_result {
-                Ok(Ok(_)) => {}
-                Ok(Err(err)) => return Err(fc_error(err)),
-                Err(_) => {
+            let graceful_shutdown = running.vm.send_ctrl_alt_del().await;
+            match graceful_shutdown {
+                Ok(()) => {
+                    tracing::debug!(
+                        machine_id = self.spec.id.as_str(),
+                        timeout = ?GUEST_SHUTDOWN_TIMEOUT,
+                        "sent Ctrl+Alt+Del to guest, waiting for graceful shutdown"
+                    );
+                    match timeout(GUEST_SHUTDOWN_TIMEOUT, running.process.wait()).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(err)) => return Err(fc_error(err)),
+                        Err(_) => {
+                            tracing::warn!(
+                                machine_id = self.spec.id.as_str(),
+                                timeout = ?GUEST_SHUTDOWN_TIMEOUT,
+                                "guest did not shut down after Ctrl+Alt+Del, falling back to SIGTERM"
+                            );
+                            shutdown_process(&self.spec, &running.process).await?;
+                        }
+                    }
+                }
+                Err(err) => {
                     tracing::warn!(
                         machine_id = self.spec.id.as_str(),
-                        timeout = ?STOP_TIMEOUT,
-                        "firecracker did not stop after SIGTERM, sending SIGKILL"
+                        error = %err,
+                        "failed to send Ctrl+Alt+Del, falling back to SIGTERM"
                     );
-                    running.process.kill().await.map_err(fc_error)?;
+                    shutdown_process(&self.spec, &running.process).await?;
                 }
             }
         }
@@ -498,7 +516,7 @@ fn build_boot_args(config: &crate::types::MachineConfig) -> String {
     }
     args.push(format!(
         "{}={}",
-        KERNEL_PARAM_DISCOVERY_PORT, DEFAULT_DISCOVERY_PORT
+        KERNEL_PARAM_AGENT_PORT, DEFAULT_AGENT_PORT
     ));
     args.join(" ")
 }
@@ -608,6 +626,26 @@ fn not_running(spec: &ResolvedMachineSpec) -> MachineError {
 
 fn fc_error(error: bento_fc::FirecrackerError) -> MachineError {
     MachineError::Backend(error.to_string())
+}
+
+async fn shutdown_process(
+    spec: &ResolvedMachineSpec,
+    process: &bento_fc::FirecrackerProcess,
+) -> Result<(), MachineError> {
+    let shutdown_result = timeout(STOP_TIMEOUT, process.shutdown()).await;
+    match shutdown_result {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) => Err(fc_error(err)),
+        Err(_) => {
+            tracing::warn!(
+                machine_id = spec.id.as_str(),
+                timeout = ?STOP_TIMEOUT,
+                "firecracker did not stop after SIGTERM, sending SIGKILL"
+            );
+            process.kill().await.map_err(fc_error)?;
+            Ok(())
+        }
+    }
 }
 
 fn invalid_config<T>(spec: &ResolvedMachineSpec, reason: &str) -> Result<T, MachineError> {
