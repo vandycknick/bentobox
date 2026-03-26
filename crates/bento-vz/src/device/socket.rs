@@ -143,15 +143,16 @@ impl SocketDevice for VirtioSocketDevice {
             vsock.connectToPort_completionHandler(port, &completion_handler);
         }));
 
-        receiver.await.map_err(|_| {
-            VzError::Backend(
-                "vsock completion channel closed before result was delivered".to_string(),
-            )
-        })?
-        .and_then(|(fd, source_port, destination_port)| {
-            VirtioSocketConnection::new(fd, source_port, destination_port)
-        })
-        .map_err(VzError::from)
+        receiver
+            .await
+            .map_err(|_| {
+                VzError::Backend(
+                    "vsock completion channel closed before result was delivered".to_string(),
+                )
+            })?
+            .and_then(|(fd, source_port, destination_port)| {
+                VirtioSocketConnection::new(fd, source_port, destination_port)
+            })
     }
 
     fn listen(&self, _port: u32) -> Result<Self::Listener, VzError> {

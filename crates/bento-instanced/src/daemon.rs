@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_machine::{Machine, MachineState, MachineStateReceiver};
 use bento_protocol::instance::v1::{ExtensionStatus, HostSocket, LifecycleState};
 use bento_runtime::extensions::{BuiltinExtension, EXTENSION_DOCKER, EXTENSION_PORT_FORWARD};
 use bento_runtime::instance::{Instance, InstanceFile};
 use bento_runtime::instance_store::InstanceStore;
 use bento_runtime::services::SERVICE_DOCKER;
+use bento_vmm::{VmExit, Vmm};
 use eyre::Context;
 use tokio::signal::unix::signal;
 use tokio::signal::unix::SignalKind;
@@ -14,10 +14,9 @@ use tokio::signal::unix::SignalKind;
 use crate::bootstrap::rebuild_bootstrap;
 use crate::discovery::ServiceRegistry;
 use crate::host_export::listen_host_service;
-use crate::machine::machine_spec_for_instance;
+use crate::machine::{instance_machine_config, machine_backend, machine_identifier_path};
 use crate::pid_guard::PidGuard;
 use crate::port_forward::spawn_port_forward_manager;
-use crate::serial::SerialConsole;
 use crate::server::InstanceServer;
 use crate::state::{new_instance_store, Action};
 
@@ -30,7 +29,6 @@ enum LoopExit {
 }
 
 struct VmStopInfo {
-    state: MachineState,
     message: String,
 }
 
@@ -56,9 +54,15 @@ impl InstanceDaemon {
 
         remove_stale_socket(&inst.file(InstanceFile::InstancedSocket))?;
 
-        let machine_spec = machine_spec_for_instance(&inst)?;
-        let machine = Machine::create(machine_spec.clone()).await?;
-        let serial_console = SerialConsole::new(machine.clone());
+        let machine_config = instance_machine_config(&inst)?;
+        let vmm = Vmm::new(machine_backend(inst.engine())?)?;
+        let machine = vmm.create(machine_config.config).await?;
+        if let Some(machine_identifier) = machine_config.machine_identifier.as_ref() {
+            if machine_identifier.was_generated() {
+                std::fs::write(machine_identifier_path(&inst), machine_identifier.bytes())?;
+            }
+        }
+        let serial_console = machine.serial();
         let store = Arc::new(new_instance_store());
         let expects_guest_agent = inst.uses_bootstrap();
 
@@ -97,7 +101,6 @@ impl InstanceDaemon {
 
         store.dispatch(Action::vm_starting());
 
-        let mut machine_state = machine.subscribe_state();
         machine.start().await?;
 
         if let Err(err) = serial_console
@@ -105,7 +108,7 @@ impl InstanceDaemon {
             .await
         {
             let _ = machine.stop().await;
-            return Err(err);
+            return Err(err.into());
         }
 
         store.dispatch(Action::vm_running());
@@ -145,17 +148,16 @@ impl InstanceDaemon {
                 });
                 LoopExit::Signal("SIGTERM")
             }
-            result = wait_for_machine_stop(&mut machine_state) => {
+            result = wait_for_machine_stop(&machine) => {
                 match result {
                     Ok(event) => {
-                        tracing::info!(instance = %self.name, state = ?event.state, message = %event.message, "machine exited");
+                        tracing::info!(instance = %self.name, message = %event.message, "machine exited");
                         LoopExit::VmStopped(event)
                     }
-                    Err(_) => {
-                        tracing::warn!(instance = %self.name, "machine state watcher closed");
+                    Err(err) => {
+                        tracing::warn!(instance = %self.name, error = %err, "machine wait failed");
                         LoopExit::VmStopped(VmStopInfo {
-                            state: MachineState::Stopped,
-                            message: String::from("machine state watcher closed"),
+                            message: format!("machine wait failed: {err}"),
                         })
                     }
                 }
@@ -230,7 +232,7 @@ impl InstanceDaemon {
 
 fn spawn_guest_extension_monitor(
     inst: Instance,
-    machine: bento_machine::MachineInstance,
+    machine: bento_vmm::VirtualMachine,
     store: Arc<crate::state::InstanceStore>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -271,22 +273,14 @@ fn spawn_guest_extension_monitor(
 }
 
 async fn wait_for_machine_stop(
-    receiver: &mut MachineStateReceiver,
-) -> Result<VmStopInfo, tokio::sync::watch::error::RecvError> {
-    loop {
-        receiver.changed().await?;
-        let state = *receiver.borrow_and_update();
-        match state {
-            MachineState::Stopped => {
-                return Ok(VmStopInfo {
-                    state,
-                    message: String::from("machine stopped"),
-                });
-            }
-            MachineState::Running => {}
-            MachineState::Created => {}
-        }
-    }
+    machine: &bento_vmm::VirtualMachine,
+) -> Result<VmStopInfo, eyre::Report> {
+    let exit = machine.wait().await?;
+    let message = match exit {
+        VmExit::Stopped => String::from("machine stopped"),
+        VmExit::StoppedWithError(error) => format!("machine stopped with error: {error}"),
+    };
+    Ok(VmStopInfo { message })
 }
 
 fn project_extension_statuses(inst: &Instance, registry: &ServiceRegistry) -> Vec<ExtensionStatus> {
@@ -378,7 +372,7 @@ fn classify_guest_discovery_retry(err: &eyre::Report) -> &'static str {
 }
 
 fn spawn_port_forward_manager_when_guest_ready(
-    machine: bento_machine::MachineInstance,
+    machine: bento_vmm::VirtualMachine,
     store: Arc<crate::state::InstanceStore>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

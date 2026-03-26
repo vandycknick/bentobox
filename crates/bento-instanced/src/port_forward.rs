@@ -3,11 +3,11 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_machine::MachineInstance;
 use bento_protocol::guest::v1::guest_discovery_service_client::GuestDiscoveryServiceClient;
 use bento_protocol::guest::v1::{PortForwardEvent, PortForwardEventType, WatchPortForwardsRequest};
 use bento_protocol::instance::v1::PortForwardStatus;
 use bento_protocol::DEFAULT_DISCOVERY_PORT;
+use bento_vmm::VirtualMachine;
 use eyre::Context;
 use hyper_util::rt::TokioIo;
 use tokio::io::copy_bidirectional;
@@ -26,7 +26,7 @@ struct RunningHostForward {
 }
 
 impl RunningHostForward {
-    fn new(machine: MachineInstance, guest_port: u32, vsock_port: u32) -> eyre::Result<Self> {
+    fn new(machine: VirtualMachine, guest_port: u32, vsock_port: u32) -> eyre::Result<Self> {
         let host_port = u16::try_from(guest_port)
             .map_err(|_| eyre::eyre!("guest port {guest_port} is out of host tcp range"))?;
         let listener = std::net::TcpListener::bind(("127.0.0.1", host_port)).map_err(|err| {
@@ -91,7 +91,7 @@ impl RunningHostForward {
 }
 
 pub(crate) fn spawn_port_forward_manager(
-    machine: MachineInstance,
+    machine: VirtualMachine,
     store: Arc<InstanceStore>,
 ) -> tokio::task::JoinHandle<eyre::Result<()>> {
     tokio::spawn(async move {
@@ -164,7 +164,7 @@ pub(crate) fn spawn_port_forward_manager(
 }
 
 async fn apply_event(
-    machine: &MachineInstance,
+    machine: &VirtualMachine,
     active_forwards: &mut BTreeMap<u32, RunningHostForward>,
     statuses: &mut BTreeMap<u32, PortForwardStatus>,
     store: &InstanceStore,
@@ -263,9 +263,9 @@ fn publish_status_snapshot(statuses: &BTreeMap<u32, PortForwardStatus>, store: &
 }
 
 async fn connect_guest_client(
-    machine: &MachineInstance,
+    machine: &VirtualMachine,
 ) -> eyre::Result<GuestDiscoveryServiceClient<tonic::transport::Channel>> {
-    let stream = machine.open_vsock(DEFAULT_DISCOVERY_PORT).await?;
+    let stream = machine.connect_vsock(DEFAULT_DISCOVERY_PORT).await?;
     let stream_slot = Arc::new(Mutex::new(Some(stream)));
     let connector = service_fn(move |_| {
         let stream_slot = Arc::clone(&stream_slot);
@@ -292,12 +292,12 @@ async fn connect_guest_client(
 }
 
 async fn handle_host_connection(
-    machine: MachineInstance,
+    machine: VirtualMachine,
     mut host_stream: TcpStream,
     vsock_port: u32,
 ) -> io::Result<()> {
     let mut vsock_stream = machine
-        .open_vsock(vsock_port)
+        .connect_vsock(vsock_port)
         .await
         .map_err(|err| io::Error::other(err.to_string()))?;
     let _ = copy_bidirectional(&mut host_stream, &mut vsock_stream).await?;

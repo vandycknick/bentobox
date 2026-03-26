@@ -1,13 +1,17 @@
 use block2::StackBlock;
 use objc2::{
-    define_class, msg_send, rc::Retained, runtime::AnyObject, AllocAnyThread, DefinedClass,
+    define_class, msg_send,
+    rc::Retained,
+    runtime::{AnyObject, ProtocolObject},
+    AllocAnyThread, DefinedClass,
 };
 use objc2_foundation::{
     ns_string, NSDictionary, NSError, NSKeyValueChangeKey, NSKeyValueObservingOptions, NSNumber,
     NSObject, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString,
 };
 use objc2_virtualization::{
-    VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineState,
+    VZNetworkDevice, VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineDelegate,
+    VZVirtualMachineState,
 };
 use std::ffi::c_void;
 use std::fmt::{Debug, Display};
@@ -24,6 +28,8 @@ use crate::dispatch::{Queue, QueueAttribute};
 use crate::error::VzError;
 use crate::vz_ext::VZVirtualMachineExt;
 use crate::{GenericPlatform, LinuxBootLoader};
+
+type ObjectiveCDelegate = Retained<ProtocolObject<dyn VZVirtualMachineDelegate>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VirtualMachineState {
@@ -88,6 +94,20 @@ pub struct VirtualMachine {
     _config: Retained<VZVirtualMachineConfiguration>,
     _observer: Retained<VirtualMachineStateObserver>,
     state_tx: watch::Sender<VirtualMachineState>,
+    #[allow(clippy::arc_with_non_send_sync)]
+    delegate: Arc<Mutex<Option<ObjectiveCDelegate>>>,
+}
+
+pub trait VirtualMachineDelegate: Send + Sync + 'static {
+    fn guest_did_stop(&self) {}
+
+    fn did_stop_with_error(&self, error: VzError) {
+        let _ = error;
+    }
+
+    fn network_disconnected(&self, error: VzError) {
+        let _ = error;
+    }
 }
 
 pub struct VirtualMachineBuilder {
@@ -124,6 +144,8 @@ impl VirtualMachine {
             let state_msg: VirtualMachineState = state.into();
             let _ = observer_state_tx.send(state_msg);
         });
+        #[allow(clippy::arc_with_non_send_sync)]
+        let delegate = Arc::new(Mutex::new(None));
 
         Self {
             queue,
@@ -131,7 +153,31 @@ impl VirtualMachine {
             _config: config,
             _observer: observer,
             state_tx,
+            delegate,
         }
+    }
+
+    pub fn set_delegate<D>(&self, delegate: D) -> Result<(), VzError>
+    where
+        D: VirtualMachineDelegate,
+    {
+        self.set_arc_delegate(Arc::new(delegate))
+    }
+
+    fn set_arc_delegate(&self, delegate: Arc<dyn VirtualMachineDelegate>) -> Result<(), VzError> {
+        let delegate = VmDelegateBridge::new_protocol_object(delegate);
+        let machine = self.machine.clone();
+        let delegate_for_set = delegate.clone();
+
+        self.queue.exec_block_sync(&StackBlock::new(move || unsafe {
+            machine.setDelegate(Some(&*delegate_for_set));
+        }));
+
+        let mut slot = self.delegate.lock().map_err(|_| {
+            VzError::Backend("virtual machine delegate registry was poisoned".to_string())
+        })?;
+        *slot = Some(delegate);
+        Ok(())
     }
 
     pub async fn start(&self) -> Result<(), VzError> {
@@ -340,6 +386,10 @@ struct Ivars {
     handler: ObserverHandler,
 }
 
+struct VmDelegateIvars {
+    delegate: Arc<dyn VirtualMachineDelegate>,
+}
+
 define_class!(
     #[unsafe(super(NSObject))]
     #[name = "BentoVzVirtualMachineStateObserver"]
@@ -364,6 +414,42 @@ define_class!(
     }
 
     unsafe impl NSObjectProtocol for VirtualMachineStateObserver {}
+);
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "BentoVzVirtualMachineDelegateBridge"]
+    #[ivars = VmDelegateIvars]
+    struct VmDelegateBridge;
+
+    impl VmDelegateBridge {
+        #[unsafe(method(guestDidStopVirtualMachine:))]
+        fn guest_did_stop(&self, _vm: &VZVirtualMachine) {
+            self.ivars().delegate.guest_did_stop();
+        }
+
+        #[unsafe(method(virtualMachine:didStopWithError:))]
+        fn did_stop_with_error(&self, _vm: &VZVirtualMachine, error: &NSError) {
+            self.ivars()
+                .delegate
+                .did_stop_with_error(VzError::Backend(error.localizedDescription().to_string()));
+        }
+
+        #[unsafe(method(virtualMachine:networkDevice:attachmentWasDisconnectedWithError:))]
+        fn network_disconnected(
+            &self,
+            _vm: &VZVirtualMachine,
+            _device: &VZNetworkDevice,
+            error: &NSError,
+        ) {
+            self.ivars()
+                .delegate
+                .network_disconnected(VzError::Backend(error.localizedDescription().to_string()));
+        }
+    }
+
+    unsafe impl NSObjectProtocol for VmDelegateBridge {}
+    unsafe impl VZVirtualMachineDelegate for VmDelegateBridge {}
 );
 
 type ObserverHandler =
@@ -396,6 +482,14 @@ impl VirtualMachineStateObserver {
         }
 
         observer
+    }
+}
+
+impl VmDelegateBridge {
+    fn new_protocol_object(delegate: Arc<dyn VirtualMachineDelegate>) -> ObjectiveCDelegate {
+        let delegate = Self::alloc().set_ivars(VmDelegateIvars { delegate });
+        let delegate: Retained<Self> = unsafe { msg_send![super(delegate), init] };
+        ProtocolObject::from_retained(delegate)
     }
 }
 

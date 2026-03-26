@@ -1,5 +1,9 @@
 use std::fmt;
+#[cfg(unix)]
+use std::fs::File;
 use std::io;
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -10,23 +14,27 @@ use bento_vz::device::{
     SerialPortStream as VzSerialStream, VirtioSocketConnection as VzVsockConnection,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+#[cfg(unix)]
+use tokio::net::UnixStream as TokioUnixStream;
 
 pub struct VsockStream {
     inner: VsockStreamInner,
 }
 
-pub struct SerialStream {
-    inner: SerialStreamInner,
+pub(crate) struct MachineSerialStream {
+    inner: MachineSerialStreamInner,
 }
 
 enum VsockStreamInner {
     #[cfg(target_os = "linux")]
     Firecracker(FcVsockConnection),
+    #[cfg(unix)]
+    Unix(TokioUnixStream),
     #[cfg(target_os = "macos")]
     Vz(VzVsockConnection),
 }
 
-enum SerialStreamInner {
+enum MachineSerialStreamInner {
     #[cfg(target_os = "linux")]
     Firecracker(FcSerialConnection),
     #[cfg(target_os = "macos")]
@@ -39,9 +47,10 @@ impl fmt::Debug for VsockStream {
     }
 }
 
-impl fmt::Debug for SerialStream {
+impl fmt::Debug for MachineSerialStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SerialStream").finish_non_exhaustive()
+        f.debug_struct("MachineSerialStream")
+            .finish_non_exhaustive()
     }
 }
 
@@ -60,10 +69,23 @@ impl VsockStream {
         }
     }
 
+    #[cfg(unix)]
+    pub fn from_file(file: File) -> io::Result<Self> {
+        let fd: OwnedFd = file.into();
+        let stream = std::os::unix::net::UnixStream::from(fd);
+        stream.set_nonblocking(true)?;
+        let stream = TokioUnixStream::from_std(stream)?;
+        Ok(Self {
+            inner: VsockStreamInner::Unix(stream),
+        })
+    }
+
     pub fn source_port(&self) -> Option<u32> {
         match &self.inner {
             #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => stream.source_port(),
+            #[cfg(unix)]
+            VsockStreamInner::Unix(_) => None,
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => Some(stream.source_port()),
         }
@@ -73,24 +95,26 @@ impl VsockStream {
         match &self.inner {
             #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => stream.destination_port(),
+            #[cfg(unix)]
+            VsockStreamInner::Unix(_) => 0,
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => stream.destination_port(),
         }
     }
 }
 
-impl SerialStream {
+impl MachineSerialStream {
     #[cfg(target_os = "linux")]
     pub(crate) fn from_firecracker(stream: FcSerialConnection) -> Self {
         Self {
-            inner: SerialStreamInner::Firecracker(stream),
+            inner: MachineSerialStreamInner::Firecracker(stream),
         }
     }
 
     #[cfg(target_os = "macos")]
     pub(crate) fn from_vz(stream: VzSerialStream) -> Self {
         Self {
-            inner: SerialStreamInner::Vz(stream),
+            inner: MachineSerialStreamInner::Vz(stream),
         }
     }
 }
@@ -104,6 +128,8 @@ impl AsyncRead for VsockStream {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(unix)]
+            VsockStreamInner::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => Pin::new(stream).poll_read(cx, buf),
         }
@@ -119,6 +145,8 @@ impl AsyncWrite for VsockStream {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(unix)]
+            VsockStreamInner::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => Pin::new(stream).poll_write(cx, buf),
         }
@@ -128,6 +156,8 @@ impl AsyncWrite for VsockStream {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(unix)]
+            VsockStreamInner::Unix(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => Pin::new(stream).poll_flush(cx),
         }
@@ -137,13 +167,15 @@ impl AsyncWrite for VsockStream {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(unix)]
+            VsockStreamInner::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => Pin::new(stream).poll_shutdown(cx),
         }
     }
 }
 
-impl AsyncRead for SerialStream {
+impl AsyncRead for MachineSerialStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -151,14 +183,14 @@ impl AsyncRead for SerialStream {
     ) -> Poll<io::Result<()>> {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
-            SerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_read(cx, buf),
+            MachineSerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(target_os = "macos")]
-            SerialStreamInner::Vz(stream) => Pin::new(stream).poll_read(cx, buf),
+            MachineSerialStreamInner::Vz(stream) => Pin::new(stream).poll_read(cx, buf),
         }
     }
 }
 
-impl AsyncWrite for SerialStream {
+impl AsyncWrite for MachineSerialStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -166,27 +198,27 @@ impl AsyncWrite for SerialStream {
     ) -> Poll<io::Result<usize>> {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
-            SerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_write(cx, buf),
+            MachineSerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(target_os = "macos")]
-            SerialStreamInner::Vz(stream) => Pin::new(stream).poll_write(cx, buf),
+            MachineSerialStreamInner::Vz(stream) => Pin::new(stream).poll_write(cx, buf),
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
-            SerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_flush(cx),
+            MachineSerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(target_os = "macos")]
-            SerialStreamInner::Vz(stream) => Pin::new(stream).poll_flush(cx),
+            MachineSerialStreamInner::Vz(stream) => Pin::new(stream).poll_flush(cx),
         }
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
-            SerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_shutdown(cx),
+            MachineSerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(target_os = "macos")]
-            SerialStreamInner::Vz(stream) => Pin::new(stream).poll_shutdown(cx),
+            MachineSerialStreamInner::Vz(stream) => Pin::new(stream).poll_shutdown(cx),
         }
     }
 }

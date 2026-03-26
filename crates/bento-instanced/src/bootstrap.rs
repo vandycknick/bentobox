@@ -289,7 +289,7 @@ fn desired_guestd_state(inst: &Instance) -> eyre::Result<GuestDesiredState> {
         .collect::<eyre::Result<Vec<_>>>()?;
 
     Ok(GuestDesiredState {
-        extensions: inst.config.extensions.clone(),
+        extensions: inst.extensions().clone(),
         mounts,
     })
 }

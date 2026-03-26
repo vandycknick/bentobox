@@ -3,13 +3,13 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_machine::MachineInstance;
 use bento_protocol::guest::v1::guest_discovery_service_client::GuestDiscoveryServiceClient;
 use bento_protocol::guest::v1::{
     ExtensionStatus, HealthRequest, ListExtensionsRequest, ListServicesRequest, ServiceStatus,
 };
 use bento_protocol::DEFAULT_DISCOVERY_PORT;
 use bento_runtime::services::SERVICE_SERIAL;
+use bento_vmm::VirtualMachine;
 use eyre::Context;
 use hyper_util::rt::TokioIo;
 use tokio::sync::Mutex;
@@ -29,7 +29,7 @@ pub(crate) struct ServiceRegistry {
 }
 
 impl ServiceRegistry {
-    pub(crate) async fn discover(machine: &MachineInstance) -> eyre::Result<Self> {
+    pub(crate) async fn discover(machine: &VirtualMachine) -> eyre::Result<Self> {
         let mut by_name = BTreeMap::new();
         by_name.insert(SERVICE_SERIAL.to_string(), ServiceTarget::Serial);
 
@@ -81,9 +81,9 @@ impl ServiceRegistry {
 }
 
 async fn connect_guest_client(
-    machine: &MachineInstance,
+    machine: &VirtualMachine,
 ) -> eyre::Result<GuestDiscoveryServiceClient<tonic::transport::Channel>> {
-    let stream = machine.open_vsock(DEFAULT_DISCOVERY_PORT).await?;
+    let stream = machine.connect_vsock(DEFAULT_DISCOVERY_PORT).await?;
     let stream_slot = Arc::new(Mutex::new(Some(stream)));
     let connector = service_fn(move |_| {
         let stream_slot = Arc::clone(&stream_slot);

@@ -141,7 +141,7 @@ This file tracks kernel-side config changes identified while debugging package u
 
 - Landlock can be used to create a sandbox around agent processes.
 - Without Landlock support, pacman fails with errors such as:
-  - `restricting filesystem access failed because Landlock is not supported by the kernel`
+    - `restricting filesystem access failed because Landlock is not supported by the kernel`
 
 ## 7) Seccomp support for sandbox compatibility
 
@@ -249,54 +249,54 @@ This file tracks kernel-side config changes identified while debugging package u
 ### Required config changes
 
 - Core container isolation and policy:
-  - `CONFIG_NAMESPACES=y`
-  - `CONFIG_UTS_NS=y`
-  - `CONFIG_IPC_NS=y`
-  - `CONFIG_PID_NS=y`
-  - `CONFIG_NET_NS=y`
-  - `CONFIG_USER_NS=y`
-  - `CONFIG_CGROUPS=y`
-  - `CONFIG_MEMCG=y`
-  - `CONFIG_BLK_CGROUP=y`
-  - `CONFIG_CGROUP_PIDS=y`
-  - `CONFIG_CGROUP_DEVICE=y`
-  - `CONFIG_CPUSETS=y`
-  - `CONFIG_CGROUP_CPUACCT=y`
-  - `CONFIG_SECCOMP=y`
-  - `CONFIG_SECCOMP_FILTER=y`
+    - `CONFIG_NAMESPACES=y`
+    - `CONFIG_UTS_NS=y`
+    - `CONFIG_IPC_NS=y`
+    - `CONFIG_PID_NS=y`
+    - `CONFIG_NET_NS=y`
+    - `CONFIG_USER_NS=y`
+    - `CONFIG_CGROUPS=y`
+    - `CONFIG_MEMCG=y`
+    - `CONFIG_BLK_CGROUP=y`
+    - `CONFIG_CGROUP_PIDS=y`
+    - `CONFIG_CGROUP_DEVICE=y`
+    - `CONFIG_CPUSETS=y`
+    - `CONFIG_CGROUP_CPUACCT=y`
+    - `CONFIG_SECCOMP=y`
+    - `CONFIG_SECCOMP_FILTER=y`
 - Docker bridge networking and packet path:
-  - `CONFIG_BRIDGE=y`
-  - `CONFIG_BRIDGE_NETFILTER=y`
-  - `CONFIG_VETH=y`
-  - `CONFIG_INET=y`
-  - `CONFIG_IPV6=y`
-  - `CONFIG_NETFILTER=y`
-  - `CONFIG_NF_CONNTRACK=y`
-  - `CONFIG_NETFILTER_XTABLES=y`
-  - `CONFIG_NETFILTER_XTABLES_LEGACY=y`
-  - `CONFIG_NETFILTER_XTABLES_COMPAT=y`
-  - `CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y`
-  - `CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y`
-  - `CONFIG_NETFILTER_XT_NAT=y`
-  - `CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y`
+    - `CONFIG_BRIDGE=y`
+    - `CONFIG_BRIDGE_NETFILTER=y`
+    - `CONFIG_VETH=y`
+    - `CONFIG_INET=y`
+    - `CONFIG_IPV6=y`
+    - `CONFIG_NETFILTER=y`
+    - `CONFIG_NF_CONNTRACK=y`
+    - `CONFIG_NETFILTER_XTABLES=y`
+    - `CONFIG_NETFILTER_XTABLES_LEGACY=y`
+    - `CONFIG_NETFILTER_XTABLES_COMPAT=y`
+    - `CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y`
+    - `CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y`
+    - `CONFIG_NETFILTER_XT_NAT=y`
+    - `CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y`
 - Legacy `iptables` and `ip6tables` tables used by current rootful Docker userspace:
-  - `CONFIG_IP_NF_IPTABLES=y`
-  - `CONFIG_IP_NF_FILTER=y`
-  - `CONFIG_IP_NF_MANGLE=y`
-  - `CONFIG_IP_NF_NAT=y`
-  - `CONFIG_IP_NF_RAW=y`
-  - `CONFIG_IP_NF_TARGET_MASQUERADE=y`
-  - `CONFIG_IP6_NF_IPTABLES=y`
-  - `CONFIG_IP6_NF_FILTER=y`
-  - `CONFIG_IP6_NF_MANGLE=y`
-  - `CONFIG_IP6_NF_NAT=y`
-  - `CONFIG_IP6_NF_RAW=y`
-  - `CONFIG_IP6_NF_TARGET_MASQUERADE=y`
+    - `CONFIG_IP_NF_IPTABLES=y`
+    - `CONFIG_IP_NF_FILTER=y`
+    - `CONFIG_IP_NF_MANGLE=y`
+    - `CONFIG_IP_NF_NAT=y`
+    - `CONFIG_IP_NF_RAW=y`
+    - `CONFIG_IP_NF_TARGET_MASQUERADE=y`
+    - `CONFIG_IP6_NF_IPTABLES=y`
+    - `CONFIG_IP6_NF_FILTER=y`
+    - `CONFIG_IP6_NF_MANGLE=y`
+    - `CONFIG_IP6_NF_NAT=y`
+    - `CONFIG_IP6_NF_RAW=y`
+    - `CONFIG_IP6_NF_TARGET_MASQUERADE=y`
 - Storage and runtime basics:
-  - `CONFIG_OVERLAY_FS=y`
-  - `CONFIG_UNIX=y`
-  - `CONFIG_PACKET=y`
-  - `CONFIG_POSIX_MQUEUE=y`
+    - `CONFIG_OVERLAY_FS=y`
+    - `CONFIG_UNIX=y`
+    - `CONFIG_PACKET=y`
+    - `CONFIG_POSIX_MQUEUE=y`
 
 ### What this enables
 
@@ -311,10 +311,10 @@ This file tracks kernel-side config changes identified while debugging package u
 ### Why this is needed
 
 - Fixes Docker daemon startup failures such as:
-  - `iptables ... can't initialize iptables table 'nat': Table does not exist`
-  - `iptables ... can't initialize iptables table 'raw': Table does not exist`
-  - `ip6tables ... can't initialize ip6tables table 'nat'` or `filter`
-  - `Extension conntrack revision 0 not supported, missing kernel module?`
+    - `iptables ... can't initialize iptables table 'nat': Table does not exist`
+    - `iptables ... can't initialize iptables table 'raw': Table does not exist`
+    - `ip6tables ... can't initialize ip6tables table 'nat'` or `filter`
+    - `Extension conntrack revision 0 not supported, missing kernel module?`
 - Prevents `olddefconfig` on newer kernels from silently dropping legacy `IP*_NF_*` and `IP6*_NF_*` table support when `CONFIG_NETFILTER_XTABLES_LEGACY=y` is missing.
 - Lets Docker create the `DOCKER` NAT chain and MASQUERADE rules when using `iptables-legacy`.
 - Lets Docker install direct access filtering rules in `raw/PREROUTING`, which it uses to drop non-bridge traffic headed at container addresses.
@@ -357,6 +357,27 @@ This file tracks kernel-side config changes identified while debugging package u
 - Without this option, the kernel may still emit some early console output, but `/init`, shell fallback paths, and other userspace console interaction can fail or behave inconsistently.
 - `CONFIG_SERIAL_8250_CONSOLE` and `CONFIG_SERIAL_CORE_CONSOLE` provide the actual serial console plumbing, while `CONFIG_PRINTK` keeps kernel logs visible during bring-up.
 - `CONFIG_DEVTMPFS` and `CONFIG_DEVTMPFS_MOUNT` ensure `/dev/console` and related device nodes exist in minimal initramfs boots without requiring a full userspace device manager.
+
+## 15) VZ requestSTop
+
+- `CONFIG_GPIO_PL061`
+- `CONFIG_INPUT_EVDEV`
+- `CONFIG_KEYBOARD_GPIO`
+
+## What this enables
+
+These are the important guest kernel bits for Apple Silicon requestStop() support.
+Userspace side
+You need something in userspace to react to the power-button event and actually call shutdown.
+The wiki specifically suggests:
+
+- acpid
+  with a handler like:
+  mkdir -p /etc/acpi/PWRF
+  echo '#!/bin/sh' > /etc/acpi/PWRF/00000080
+  echo 'poweroff' >> /etc/acpi/PWRF/00000080
+  chmod +x /etc/acpi/PWRF/00000080
+  acpid
 
 ### Notes
 

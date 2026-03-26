@@ -1,5 +1,5 @@
 [package]
-name = "bento-machine"
+name = "bento-vmm"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,7 +9,7 @@ bento-protocol = { path = "../bento-protocol" }
 crossbeam = "0.8.4"
 nix = { version = "0.31.1", features = ["fs", "process", "signal", "socket"] }
 thiserror = "2.0.18"
-tokio = { version = "1.48.0", features = ["rt", "io-util", "net", "sync"] }
+tokio = { version = "1.48.0", features = ["rt", "fs", "io-util", "net", "sync"] }
 tracing = "0.1.41"
 
 [target.'cfg(target_os = "macos")'.dependencies]

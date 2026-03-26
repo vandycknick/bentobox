@@ -1,4 +1,4 @@
-use bento_machine::VsockStream;
+use bento_vmm::VsockStream;
 use std::io;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -50,7 +50,7 @@ mod tests {
     use std::os::unix::net::UnixStream as StdUnixStream;
     use std::time::Duration;
 
-    use bento_machine::VsockStream;
+    use bento_vmm::VsockStream;
     use tokio::net::UnixStream;
 
     use crate::tunnel::proxy_streams;

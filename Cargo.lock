@@ -301,9 +301,9 @@ dependencies = [
 name = "bento-instanced"
 version = "0.1.0"
 dependencies = [
- "bento-machine",
  "bento-protocol",
  "bento-runtime",
+ "bento-vmm",
  "eyre",
  "fatfs",
  "futures",
@@ -319,24 +319,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "bento-machine"
-version = "0.1.0"
-dependencies = [
- "bento-fc",
- "bento-protocol",
- "bento-vz",
- "block2",
- "crossbeam",
- "nix 0.31.1",
- "objc2",
- "objc2-foundation",
- "objc2-virtualization",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -379,6 +361,24 @@ dependencies = [
  "tokio",
  "vsock",
  "zstd",
+]
+
+[[package]]
+name = "bento-vmm"
+version = "0.1.0"
+dependencies = [
+ "bento-fc",
+ "bento-protocol",
+ "bento-vz",
+ "block2",
+ "crossbeam",
+ "nix 0.31.1",
+ "objc2",
+ "objc2-foundation",
+ "objc2-virtualization",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

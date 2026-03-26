@@ -177,15 +177,15 @@ Outcome:
 
 ### Host-side files
 
-- `crates/bento-machine/src/backend/vz.rs`
-- `crates/bento-machine/src/backend/vz/utils.rs`
+- `crates/bento-vmm/src/backend/vz.rs`
+- `crates/bento-vmm/src/backend/vz/utils.rs`
 
 ### Config plumbing
 
 - `crates/bentoctl/src/commands/create.rs`
 - `crates/bento-runtime/src/instance.rs`
 - `crates/bento-runtime/src/instance_store.rs`
-- `crates/bento-machine/src/types.rs`
+- `crates/bento-vmm/src/types.rs`
 - `crates/bento-instanced/src/machine.rs`
 
 ### Guest bootstrap

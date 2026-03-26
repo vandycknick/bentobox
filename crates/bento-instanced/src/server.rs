@@ -2,16 +2,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_machine::MachineInstance;
 use bento_runtime::negotiate::{
     Accept, Negotiate, ProxyMode, Reject, RejectCode, Response, Upgrade, NEGOTIATE_PROTOCOL_VERSION,
 };
 use bento_runtime::services::SERVICE_SERIAL;
+use bento_vmm::{spawn_serial_tunnel, SerialAccess, SerialConsole, VirtualMachine};
 use eyre::Context;
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::discovery::{ServiceRegistry, ServiceTarget};
-use crate::serial::{spawn_serial_tunnel, SerialAccess, SerialConsole};
 use crate::services;
 use crate::state::InstanceStore;
 use crate::tunnel::spawn_tunnel;
@@ -21,14 +20,14 @@ const RETRY_AFTER_STARTING_MS: u32 = 1000;
 
 #[derive(Clone)]
 pub(crate) struct InstanceServer {
-    machine: MachineInstance,
+    machine: VirtualMachine,
     serial_console: Arc<SerialConsole>,
     store: Arc<InstanceStore>,
 }
 
 impl InstanceServer {
     pub(crate) fn new(
-        machine: MachineInstance,
+        machine: VirtualMachine,
         serial_console: Arc<SerialConsole>,
         store: Arc<InstanceStore>,
     ) -> Self {
@@ -123,24 +122,26 @@ impl InstanceServer {
                 };
 
                 match target {
-                    ServiceTarget::VsockPort(port) => match self.machine.open_vsock(port).await {
-                        Ok(vsock_stream) => {
-                            accept(&mut stream, request.request_id, None).await?;
-                            spawn_tunnel(stream, vsock_stream);
-                            Ok(())
+                    ServiceTarget::VsockPort(port) => {
+                        match self.machine.connect_vsock(port).await {
+                            Ok(vsock_stream) => {
+                                accept(&mut stream, request.request_id, None).await?;
+                                spawn_tunnel(stream, vsock_stream);
+                                Ok(())
+                            }
+                            Err(err) => {
+                                tracing::info!(error = %err, service = %service, "proxy service still starting");
+                                reject(
+                                    &mut stream,
+                                    request.request_id,
+                                    RejectCode::ServiceStarting,
+                                    "service is starting",
+                                    Some(RETRY_AFTER_STARTING_MS),
+                                )
+                                .await
+                            }
                         }
-                        Err(err) => {
-                            tracing::info!(error = %err, service = %service, "proxy service still starting");
-                            reject(
-                                &mut stream,
-                                request.request_id,
-                                RejectCode::ServiceStarting,
-                                "service is starting",
-                                Some(RETRY_AFTER_STARTING_MS),
-                            )
-                            .await
-                        }
-                    },
+                    }
                     ServiceTarget::Serial => {
                         let access = match mode {
                             ProxyMode::ReadOnly => SerialAccess::Watch,

@@ -2,14 +2,15 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use bento_machine::{MachineInstance, SerialStream as MachineSerialStream};
-use eyre::Context;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
 
+use crate::backend::VmBackend;
+use crate::stream::MachineSerialStream;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SerialAccess {
+pub enum SerialAccess {
     Interactive,
     Watch,
 }
@@ -28,9 +29,11 @@ impl SerialHub {
         }
     }
 
-    fn attach(&mut self, access: SerialAccess) -> eyre::Result<u64> {
+    fn attach(&mut self, access: SerialAccess) -> Result<u64, crate::types::VmmError> {
         if access == SerialAccess::Interactive && self.interactive_owner.is_some() {
-            eyre::bail!("interactive serial client is already attached");
+            return Err(crate::types::VmmError::Backend(
+                "interactive serial client is already attached".to_string(),
+            ));
         }
 
         let id = self.next_id;
@@ -61,8 +64,8 @@ struct SerialAttachment {
 }
 
 #[derive(Debug)]
-pub(crate) struct SerialConsole {
-    machine: MachineInstance,
+pub struct SerialConsole {
+    backend: Arc<VmBackend>,
     hub: Arc<Mutex<SerialHub>>,
     attachment: Arc<Mutex<Option<SerialAttachment>>>,
     file_sinks: Arc<Mutex<Vec<tokio::fs::File>>>,
@@ -71,7 +74,7 @@ pub(crate) struct SerialConsole {
 }
 
 #[derive(Debug)]
-pub(crate) struct SerialStream {
+pub struct SerialStream {
     console: Arc<SerialConsole>,
     client_id: u64,
     access: SerialAccess,
@@ -79,19 +82,19 @@ pub(crate) struct SerialStream {
 }
 
 impl SerialConsole {
-    pub(crate) fn new(machine: MachineInstance) -> Arc<Self> {
+    pub(crate) fn new(backend: Arc<VmBackend>) -> Self {
         let (output_tx, _) = broadcast::channel(256);
-        Arc::new(Self {
-            machine,
+        Self {
+            backend,
             hub: Arc::new(Mutex::new(SerialHub::new())),
             attachment: Arc::new(Mutex::new(None)),
             file_sinks: Arc::new(Mutex::new(Vec::new())),
             output_tx,
             attach_lock: Arc::new(Mutex::new(())),
-        })
+        }
     }
 
-    pub(crate) async fn stream_to_file(&self, path: &Path) -> eyre::Result<()> {
+    pub async fn stream_to_file(&self, path: &Path) -> Result<(), crate::types::VmmError> {
         self.ensure_attached().await?;
 
         let file = tokio::fs::OpenOptions::new()
@@ -99,16 +102,16 @@ impl SerialConsole {
             .append(true)
             .open(path)
             .await
-            .with_context(|| format!("open {}", path.display()))?;
+            .map_err(crate::types::VmmError::from)?;
 
         self.file_sinks.lock().await.push(file);
         Ok(())
     }
 
-    pub(crate) async fn open_stream(
+    pub async fn open_stream(
         self: &Arc<Self>,
         access: SerialAccess,
-    ) -> eyre::Result<SerialStream> {
+    ) -> Result<SerialStream, crate::types::VmmError> {
         self.ensure_attached().await?;
 
         let client_id = {
@@ -124,7 +127,7 @@ impl SerialConsole {
         })
     }
 
-    async fn ensure_attached(&self) -> eyre::Result<()> {
+    async fn ensure_attached(&self) -> Result<(), crate::types::VmmError> {
         if self.attachment.lock().await.is_some() {
             return Ok(());
         }
@@ -151,11 +154,8 @@ impl SerialConsole {
         Ok(())
     }
 
-    async fn open_serial_device(&self) -> eyre::Result<MachineSerialStream> {
-        self.machine
-            .open_serial()
-            .await
-            .context("open serial device")
+    async fn open_serial_device(&self) -> Result<MachineSerialStream, crate::types::VmmError> {
+        self.backend.open_serial().await
     }
 
     async fn write_input(&self, client_id: u64, chunk: &[u8]) -> io::Result<()> {
@@ -250,7 +250,7 @@ async fn run_serial_reader(
     }
 }
 
-pub(crate) fn spawn_serial_tunnel(stream: UnixStream, serial_stream: SerialStream) {
+pub fn spawn_serial_tunnel(stream: UnixStream, serial_stream: SerialStream) {
     tokio::spawn(async move {
         if let Err(err) = proxy_serial_stream(stream, serial_stream).await {
             if is_expected_disconnect(&err) {

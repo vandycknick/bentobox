@@ -1,6 +1,5 @@
-use bento_machine::{
-    DiskImage, Machine, MachineConfig, MachineError, MachineId, MachineKind, MachineSpec,
-    NetworkMode, SharedDirectory,
+use bento_vmm::{
+    Backend, DiskImage, MachineIdentifier, NetworkMode, SharedDirectory, VmConfig, VmmError,
 };
 use thiserror::Error;
 
@@ -11,7 +10,7 @@ use bento_runtime::instance::{
 #[derive(Debug, Error)]
 pub enum MachineSpecError {
     #[error(transparent)]
-    Machine(#[from] MachineError),
+    Machine(#[from] VmmError),
 
     #[error(transparent)]
     InstanceDisk(#[from] bento_runtime::instance::InstanceDiskError),
@@ -19,80 +18,104 @@ pub enum MachineSpecError {
     #[error(transparent)]
     InstanceBoot(#[from] bento_runtime::instance::InstanceBootError),
 
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
     #[error("invalid mount location: {0}")]
     InvalidMountLocation(String),
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct InstanceVmConfig {
+    pub config: VmConfig,
+    pub machine_identifier: Option<MachineIdentifier>,
+}
+
 pub fn prepare_instance(inst: &Instance) -> Result<(), MachineSpecError> {
-    let spec = machine_spec_for_instance(inst)?;
-    Machine::validate(&spec)?;
-    Machine::prepare(&spec)?;
+    let _ = instance_machine_config(inst)?;
     Ok(())
 }
 
-pub(crate) fn machine_spec_for_instance(inst: &Instance) -> Result<MachineSpec, MachineSpecError> {
-    Ok(MachineSpec {
-        id: MachineId::from(inst.name.as_str()),
-        kind: Some(machine_kind(inst.engine())?),
-        config: machine_config_for_instance(inst)?,
+pub(crate) fn instance_machine_config(
+    inst: &Instance,
+) -> Result<InstanceVmConfig, MachineSpecError> {
+    let engine = inst.engine();
+    let boot_assets = inst.boot_assets()?;
+    let machine_identifier = match engine {
+        EngineType::VZ => Some(load_machine_identifier(inst)?),
+        EngineType::Firecracker => None,
+    };
+
+    let mut builder = VmConfig::builder(inst.name.as_str())
+        .base_directory(inst.dir().to_path_buf())
+        .network(map_network_mode(inst.resolved_network_mode()))
+        .nested_virtualization(inst.config.nested_virtualization.unwrap_or(false))
+        .rosetta(inst.config.rosetta.unwrap_or(false));
+
+    if let Some(machine_identifier) = machine_identifier.clone() {
+        builder = builder.machine_identifier(machine_identifier);
+    }
+
+    if let Some(cpus) = inst.config.cpus {
+        builder = builder.cpus(cpus as usize);
+    }
+
+    if let Some(memory) = inst.config.memory {
+        builder = builder.memory(memory as u64);
+    }
+
+    builder = builder
+        .kernel(boot_assets.kernel)
+        .initramfs(boot_assets.initramfs);
+
+    if let Some(disk) = inst.root_disk()? {
+        builder = builder.root_disk(DiskImage {
+            path: disk.path,
+            read_only: disk.read_only,
+        });
+    }
+
+    for disk in inst.data_disks()? {
+        builder = builder.disk(DiskImage {
+            path: disk.path,
+            read_only: disk.read_only,
+        });
+    }
+
+    for (index, mount) in inst.config.mounts.iter().enumerate() {
+        let host_path = resolve_mount_location(&mount.location)
+            .map_err(MachineSpecError::InvalidMountLocation)?;
+        builder = builder.mount(SharedDirectory {
+            host_path,
+            tag: format!("mount{index}"),
+            read_only: !mount.writable,
+        });
+    }
+
+    Ok(InstanceVmConfig {
+        config: builder.build(),
+        machine_identifier,
     })
 }
 
-fn machine_kind(engine: EngineType) -> Result<MachineKind, MachineError> {
+pub(crate) fn machine_backend(engine: EngineType) -> Result<Backend, VmmError> {
     match engine {
-        EngineType::VZ => Ok(MachineKind::Vz),
-        EngineType::Firecracker => Ok(MachineKind::Firecracker),
+        EngineType::VZ => Ok(Backend::Vz),
+        EngineType::Firecracker => Ok(Backend::Firecracker),
     }
 }
 
-fn machine_config_for_instance(inst: &Instance) -> Result<MachineConfig, MachineSpecError> {
-    let engine = inst.engine();
-    let boot_assets = inst.boot_assets()?;
-    let root_disk = inst.root_disk()?.map(|disk| DiskImage {
-        path: disk.path,
-        read_only: disk.read_only,
-    });
-    let data_disks = inst
-        .data_disks()?
-        .into_iter()
-        .map(|disk| DiskImage {
-            path: disk.path,
-            read_only: disk.read_only,
-        })
-        .collect();
-    let mounts = inst
-        .config
-        .mounts
-        .iter()
-        .enumerate()
-        .map(|(index, mount)| {
-            resolve_mount_location(&mount.location)
-                .map_err(MachineSpecError::InvalidMountLocation)
-                .map(|host_path| SharedDirectory {
-                    host_path,
-                    tag: format!("mount{index}"),
-                    read_only: !mount.writable,
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+pub(crate) fn machine_identifier_path(inst: &Instance) -> std::path::PathBuf {
+    inst.file(InstanceFile::AppleMachineIdentifier)
+}
 
-    Ok(MachineConfig {
-        cpus: inst.config.cpus.map(|cpus| cpus as usize),
-        memory_mib: inst.config.memory.map(|memory| memory as u64),
-        machine_directory: inst.dir().to_path_buf(),
-        kernel_path: Some(boot_assets.kernel),
-        initramfs_path: Some(boot_assets.initramfs),
-        machine_identifier_path: match engine {
-            EngineType::VZ => Some(inst.file(InstanceFile::AppleMachineIdentifier)),
-            EngineType::Firecracker => None,
-        },
-        nested_virtualization: inst.config.nested_virtualization.unwrap_or(false),
-        rosetta: inst.config.rosetta.unwrap_or(false),
-        network: map_network_mode(inst.resolved_network_mode()),
-        root_disk,
-        data_disks,
-        mounts,
-    })
+fn load_machine_identifier(inst: &Instance) -> Result<MachineIdentifier, MachineSpecError> {
+    let path = machine_identifier_path(inst);
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(MachineIdentifier::from_bytes(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(MachineIdentifier::new()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn map_network_mode(mode: InstanceNetworkMode) -> NetworkMode {

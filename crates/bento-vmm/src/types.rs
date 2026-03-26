@@ -1,0 +1,284 @@
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Backend {
+    Auto,
+    Vz,
+    Firecracker,
+}
+
+#[derive(Debug, Default)]
+struct MachineIdentifierState {
+    bytes: Vec<u8>,
+    generated: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MachineIdentifier {
+    inner: Arc<Mutex<MachineIdentifierState>>,
+}
+
+impl PartialEq for MachineIdentifier {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes() == other.bytes()
+    }
+}
+
+impl Eq for MachineIdentifier {}
+
+impl MachineIdentifier {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(MachineIdentifierState {
+                bytes,
+                generated: false,
+            })),
+        }
+    }
+
+    pub fn bytes(&self) -> Vec<u8> {
+        self.inner
+            .lock()
+            .map(|state| state.bytes.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|state| state.bytes.is_empty())
+            .unwrap_or(true)
+    }
+
+    pub fn was_generated(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|state| state.generated)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn set_generated_bytes(&self, bytes: Vec<u8>) -> Result<(), VmmError> {
+        let mut state = self.inner.lock().map_err(|_| VmmError::RegistryPoisoned)?;
+        state.bytes = bytes;
+        state.generated = true;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmConfig {
+    pub(crate) name: String,
+    pub cpus: Option<usize>,
+    pub memory_mib: Option<u64>,
+    pub base_directory: PathBuf,
+    pub kernel_path: Option<PathBuf>,
+    pub initramfs_path: Option<PathBuf>,
+    pub machine_identifier: Option<MachineIdentifier>,
+    pub nested_virtualization: bool,
+    pub rosetta: bool,
+    pub network: NetworkMode,
+    pub root_disk: Option<DiskImage>,
+    pub data_disks: Vec<DiskImage>,
+    pub mounts: Vec<SharedDirectory>,
+}
+
+impl VmConfig {
+    pub fn new() -> Self {
+        Self {
+            name: String::new(),
+            cpus: None,
+            memory_mib: None,
+            base_directory: PathBuf::new(),
+            kernel_path: None,
+            initramfs_path: None,
+            machine_identifier: None,
+            nested_virtualization: false,
+            rosetta: false,
+            network: NetworkMode::None,
+            root_disk: None,
+            data_disks: Vec::new(),
+            mounts: Vec::new(),
+        }
+    }
+
+    pub fn builder(name: impl Into<String>) -> VmConfigBuilder {
+        VmConfigBuilder {
+            config: Self {
+                name: name.into(),
+                ..Self::new()
+            },
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn base_directory(&self) -> &PathBuf {
+        &self.base_directory
+    }
+}
+
+impl Default for VmConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VmConfigBuilder {
+    config: VmConfig,
+}
+
+impl VmConfigBuilder {
+    pub fn cpus(mut self, cpus: usize) -> Self {
+        self.config.cpus = Some(cpus);
+        self
+    }
+
+    pub fn memory(mut self, memory: u64) -> Self {
+        self.config.memory_mib = Some(memory);
+        self
+    }
+
+    pub fn base_directory(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.base_directory = path.into();
+        self
+    }
+
+    pub fn kernel(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.kernel_path = Some(path.into());
+        self
+    }
+
+    pub fn initramfs(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.initramfs_path = Some(path.into());
+        self
+    }
+
+    pub fn machine_identifier(mut self, machine_identifier: MachineIdentifier) -> Self {
+        self.config.machine_identifier = Some(machine_identifier);
+        self
+    }
+
+    pub fn nested_virtualization(mut self, enabled: bool) -> Self {
+        self.config.nested_virtualization = enabled;
+        self
+    }
+
+    pub fn rosetta(mut self, enabled: bool) -> Self {
+        self.config.rosetta = enabled;
+        self
+    }
+
+    pub fn network(mut self, network: NetworkMode) -> Self {
+        self.config.network = network;
+        self
+    }
+
+    pub fn root_disk(mut self, disk: DiskImage) -> Self {
+        self.config.root_disk = Some(disk);
+        self
+    }
+
+    pub fn disk(mut self, disk: DiskImage) -> Self {
+        self.config.data_disks.push(disk);
+        self
+    }
+
+    pub fn mount(mut self, mount: SharedDirectory) -> Self {
+        self.config.mounts.push(mount);
+        self
+    }
+
+    pub fn build(self) -> VmConfig {
+        self.config
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskImage {
+    pub path: PathBuf,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedDirectory {
+    pub host_path: PathBuf,
+    pub tag: String,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkMode {
+    VzNat,
+    None,
+    Bridged,
+    Cni,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VmExit {
+    Stopped,
+    StoppedWithError(String),
+}
+
+#[derive(Debug, Error)]
+pub enum VmmError {
+    #[error("machine {name} is already running")]
+    AlreadyRunning { name: String },
+
+    #[error("machine backend {kind:?} is unsupported on this host: {reason}")]
+    UnsupportedBackend { kind: Backend, reason: String },
+
+    #[error("machine backend {kind:?} does not implement {operation} yet")]
+    Unimplemented {
+        kind: Backend,
+        operation: &'static str,
+    },
+
+    #[error("machine {name} is invalid: {reason}")]
+    InvalidConfig { name: String, reason: String },
+
+    #[error("backend error: {0}")]
+    Backend(String),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error("machine registry lock was poisoned")]
+    RegistryPoisoned,
+}
+
+pub(crate) fn resolve_backend(backend: Backend) -> Result<Backend, VmmError> {
+    match backend {
+        Backend::Auto => auto_backend(),
+        Backend::Vz => Ok(Backend::Vz),
+        Backend::Firecracker => Ok(Backend::Firecracker),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn auto_backend() -> Result<Backend, VmmError> {
+    Ok(Backend::Vz)
+}
+
+#[cfg(target_os = "linux")]
+fn auto_backend() -> Result<Backend, VmmError> {
+    Ok(Backend::Firecracker)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn auto_backend() -> Result<Backend, VmmError> {
+    Err(VmmError::UnsupportedBackend {
+        kind: Backend::Vz,
+        reason: "no machine backend is available for this host platform".to_string(),
+    })
+}
