@@ -245,9 +245,14 @@ impl FirecrackerMachineBackend {
                     }
                 }
                 Err(err) => {
+                    let fault_message = err.fault_message();
+                    let status = err.status().map(|s| s.as_u16()).unwrap_or_default();
+                    let operation = err.operation();
                     tracing::warn!(
                         machine_id = self.config.name.as_str(),
-                        error = %err,
+                        status = status,
+                        operation,
+                        message = fault_message,
                         "failed to send Ctrl+Alt+Del, falling back to SIGTERM"
                     );
                     shutdown_process(&self.config, &running.process).await?;

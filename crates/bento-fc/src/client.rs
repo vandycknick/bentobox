@@ -57,7 +57,7 @@ impl FirecrackerClient {
             .describe_instance()
             .send()
             .await
-            .map_err(FirecrackerError::api)?
+            .map_err(|err| FirecrackerError::api("describe_instance", err))?
             .into_inner())
     }
 
@@ -70,7 +70,7 @@ impl FirecrackerClient {
             .body(boot_source)
             .send()
             .await
-            .map_err(FirecrackerError::api)?;
+            .map_err(|err| FirecrackerError::api("put_guest_boot_source", err))?;
         Ok(())
     }
 
@@ -83,7 +83,7 @@ impl FirecrackerClient {
             .body(configuration)
             .send()
             .await
-            .map_err(FirecrackerError::api)?;
+            .map_err(|err| FirecrackerError::api("put_machine_configuration", err))?;
         Ok(())
     }
 
@@ -94,7 +94,7 @@ impl FirecrackerClient {
             .body(drive)
             .send()
             .await
-            .map_err(FirecrackerError::api)?;
+            .map_err(|err| FirecrackerError::api("put_guest_drive_by_id", err))?;
         Ok(())
     }
 
@@ -104,7 +104,7 @@ impl FirecrackerClient {
             .body(vsock)
             .send()
             .await
-            .map_err(FirecrackerError::api)?;
+            .map_err(|err| FirecrackerError::api("put_guest_vsock", err))?;
         Ok(())
     }
 
@@ -116,7 +116,7 @@ impl FirecrackerClient {
             })
             .send()
             .await
-            .map_err(FirecrackerError::api)?;
+            .map_err(|err| FirecrackerError::api("create_sync_action", err))?;
         Ok(())
     }
 
@@ -126,7 +126,7 @@ impl FirecrackerClient {
             .body(serial)
             .send()
             .await
-            .map_err(FirecrackerError::api)?;
+            .map_err(|err| FirecrackerError::api("put_serial_device", err))?;
         Ok(())
     }
 
@@ -136,7 +136,7 @@ impl FirecrackerClient {
             .get_firecracker_version()
             .send()
             .await
-            .map_err(FirecrackerError::api)?
+            .map_err(|err| FirecrackerError::api("get_firecracker_version", err))?
             .into_inner())
     }
 
@@ -146,7 +146,7 @@ impl FirecrackerClient {
             .get_export_vm_config()
             .send()
             .await
-            .map_err(FirecrackerError::api)?
+            .map_err(|err| FirecrackerError::api("get_export_vm_config", err))?
             .into_inner())
     }
 
@@ -156,7 +156,7 @@ impl FirecrackerClient {
             .get_machine_configuration()
             .send()
             .await
-            .map_err(FirecrackerError::api)?
+            .map_err(|err| FirecrackerError::api("get_machine_configuration", err))?
             .into_inner())
     }
 
@@ -166,7 +166,7 @@ impl FirecrackerClient {
             .body(Vm { state })
             .send()
             .await
-            .map_err(FirecrackerError::api)?;
+            .map_err(|err| FirecrackerError::api("patch_vm", err))?;
         Ok(())
     }
 
@@ -179,7 +179,7 @@ impl FirecrackerClient {
             .body(InstanceActionInfo { action_type })
             .send()
             .await
-            .map_err(FirecrackerError::api)?;
+            .map_err(|err| FirecrackerError::api("create_sync_action", err))?;
         Ok(())
     }
 }
