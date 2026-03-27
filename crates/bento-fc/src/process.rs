@@ -1,11 +1,11 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
+use tokio::sync::watch;
 use tokio::time::{sleep, timeout};
 
 use crate::builder::VirtualMachineBuilder;
@@ -15,6 +15,13 @@ use crate::serial::SerialConnection;
 
 const DEFAULT_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+#[derive(Clone, Debug)]
+enum ProcessExit {
+    Running,
+    Exited(ExitStatus),
+    Failed(String),
+}
 
 pub struct FirecrackerProcessBuilder {
     firecracker_bin: PathBuf,
@@ -130,24 +137,33 @@ impl FirecrackerProcessBuilder {
         ));
 
         let pid = child.id();
+        let (exit_tx, exit_rx) = watch::channel(ProcessExit::Running);
+        tokio::task::spawn_blocking(move || {
+            let exit = match child.wait() {
+                Ok(status) => ProcessExit::Exited(status),
+                Err(err) => ProcessExit::Failed(err.to_string()),
+            };
+            let _ = exit_tx.send(exit);
+        });
+
         Ok(FirecrackerProcess {
-            child: Arc::new(Mutex::new(child)),
             pid,
             socket_path: self.socket_path,
             serial_read,
             serial_write,
             cleanup_socket_on_drop: self.cleanup_socket,
+            exit: exit_rx,
         })
     }
 }
 
 pub struct FirecrackerProcess {
-    child: Arc<Mutex<Child>>,
     pid: u32,
     socket_path: PathBuf,
     serial_read: File,
     serial_write: File,
     cleanup_socket_on_drop: bool,
+    exit: watch::Receiver<ProcessExit>,
 }
 
 impl FirecrackerProcess {
@@ -182,33 +198,39 @@ impl FirecrackerProcess {
     }
 
     pub async fn wait(&self) -> Result<ExitStatus, FirecrackerError> {
-        let child = self.child.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut child = child
-                .lock()
-                .map_err(|_| FirecrackerError::ChildHandlePoisoned)?;
-            child.wait().map_err(FirecrackerError::Io)
-        })
-        .await
-        .map_err(|err| FirecrackerError::Io(std::io::Error::other(err.to_string())))?
+        let mut exit = self.exit.clone();
+        loop {
+            if let Some(result) = process_exit_result(&exit.borrow()) {
+                return result;
+            }
+
+            match exit.changed().await {
+                Ok(()) => {}
+                Err(_) => {
+                    if let Some(result) = process_exit_result(&exit.borrow()) {
+                        return result;
+                    }
+                    return Err(FirecrackerError::Io(std::io::Error::other(
+                        "firecracker process reaper exited before reporting status",
+                    )));
+                }
+            }
+        }
     }
 
     pub fn try_wait(&self) -> Result<Option<ExitStatus>, FirecrackerError> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|_| FirecrackerError::ChildHandlePoisoned)?;
-        child.try_wait().map_err(FirecrackerError::Io)
+        match process_exit_result(&self.exit.borrow()) {
+            Some(Ok(status)) => Ok(Some(status)),
+            Some(Err(err)) => Err(err),
+            None => Ok(None),
+        }
     }
 }
 
 impl Drop for FirecrackerProcess {
     fn drop(&mut self) {
-        if let Ok(mut child) = self.child.lock() {
-            if let Ok(None) = child.try_wait() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+        if matches!(*self.exit.borrow(), ProcessExit::Running) {
+            let _ = signal_child(self.pid, Signal::SIGKILL);
         }
 
         if self.cleanup_socket_on_drop {
@@ -243,6 +265,16 @@ async fn wait_for_socket(
 
 fn signal_child(pid: u32, signal: Signal) -> Result<(), FirecrackerError> {
     kill(Pid::from_raw(pid as i32), signal).map_err(FirecrackerError::Signal)
+}
+
+fn process_exit_result(exit: &ProcessExit) -> Option<Result<ExitStatus, FirecrackerError>> {
+    match exit {
+        ProcessExit::Running => None,
+        ProcessExit::Exited(status) => Some(Ok(*status)),
+        ProcessExit::Failed(err) => Some(Err(FirecrackerError::Io(std::io::Error::other(
+            err.clone(),
+        )))),
+    }
 }
 
 #[cfg(test)]
