@@ -111,7 +111,6 @@ impl Cmd {
                     bootstrap: ImageMetadataBootstrap {
                         cidata_cloud_init: inst.uses_bootstrap(),
                     },
-                    extensions: inst.config.extensions.clone(),
                 };
 
                 let mut annotations = std::collections::BTreeMap::new();

@@ -7,8 +7,8 @@ use std::{
 use thiserror::Error;
 
 use crate::{
+    capabilities::CapabilitiesConfig,
     directories::Directory,
-    extensions::ExtensionsConfig,
     instance::{
         resolve_mount_location, validate_network_mode, BootstrapConfig, DiskConfig, DiskRole,
         Instance, InstanceConfig, InstanceFile, InstanceStatus, MountConfig, NetworkConfig,
@@ -294,7 +294,8 @@ pub struct InstanceCreateOptions {
     pub mounts: Vec<MountConfig>,
     pub network: Option<NetworkConfig>,
     pub bootstrap: Option<BootstrapConfig>,
-    pub extensions: ExtensionsConfig,
+    pub profiles: Vec<String>,
+    pub capabilities: CapabilitiesConfig,
     pub userdata_path: Option<PathBuf>,
 }
 
@@ -312,7 +313,8 @@ impl Default for InstanceCreateOptions {
             mounts: Vec::new(),
             network: None,
             bootstrap: None,
-            extensions: ExtensionsConfig::default(),
+            profiles: Vec::new(),
+            capabilities: CapabilitiesConfig::default(),
             userdata_path: None,
         }
     }
@@ -374,8 +376,13 @@ impl InstanceCreateOptions {
         self
     }
 
-    pub fn with_extensions(mut self, extensions: ExtensionsConfig) -> Self {
-        self.extensions = extensions;
+    pub fn with_profiles(mut self, profiles: Vec<String>) -> Self {
+        self.profiles = profiles;
+        self
+    }
+
+    pub fn with_capabilities(mut self, capabilities: CapabilitiesConfig) -> Self {
+        self.capabilities = capabilities;
         self
     }
 
@@ -401,7 +408,8 @@ fn apply_create_options(
         mounts,
         network,
         bootstrap,
-        extensions,
+        profiles,
+        capabilities,
         userdata_path,
     } = options;
 
@@ -427,7 +435,8 @@ fn apply_create_options(
     config.mounts = normalize_mounts(&mounts)?;
     config.network = network;
     config.bootstrap = bootstrap;
-    config.extensions = extensions;
+    config.profiles = profiles;
+    config.capabilities = capabilities;
     config.userdata_path = userdata_path;
 
     Ok(())

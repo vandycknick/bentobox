@@ -1,8 +1,8 @@
 use std::sync::Mutex;
 
-use bento_protocol::instance::v1::{
-    ExtensionStatus, GetStatusResponse, HealthResponse, HostSocket, LifecycleState,
-    PortForwardStatus, StatusSource, StatusUpdate,
+use bento_protocol::v1::{
+    CapabilityStatus, EndpointStatus, GetStatusResponse, InstanceControlHealthResponse,
+    LifecycleState, StatusSource, StatusUpdate,
 };
 use tokio::sync::broadcast;
 
@@ -89,9 +89,9 @@ pub(crate) struct InstanceState {
     vm: LifecycleState,
     guest: LifecycleState,
     guest_message: String,
-    extensions: Vec<ExtensionStatus>,
-    host_sockets: Vec<HostSocket>,
-    port_forwards: Vec<PortForwardStatus>,
+    capabilities: Vec<CapabilityStatus>,
+    static_endpoints: Vec<EndpointStatus>,
+    dynamic_endpoints: Vec<EndpointStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,14 +104,14 @@ pub(crate) enum Action {
         state: LifecycleState,
         message: String,
     },
-    SetExtensions {
-        extensions: Vec<ExtensionStatus>,
+    SetCapabilities {
+        capabilities: Vec<CapabilityStatus>,
     },
-    SetHostSockets {
-        host_sockets: Vec<HostSocket>,
+    SetStaticEndpoints {
+        endpoints: Vec<EndpointStatus>,
     },
-    SetPortForwards {
-        port_forwards: Vec<PortForwardStatus>,
+    SetDynamicEndpoints {
+        endpoints: Vec<EndpointStatus>,
     },
 }
 
@@ -133,14 +133,14 @@ impl Action {
     pub(crate) fn guest_starting() -> Self {
         Self::GuestTransition {
             state: LifecycleState::Starting,
-            message: String::from("waiting for guest extensions"),
+            message: String::from("waiting for guest capabilities"),
         }
     }
 
     pub(crate) fn guest_running() -> Self {
         Self::GuestTransition {
             state: LifecycleState::Running,
-            message: String::from("startup-required guest extensions ready"),
+            message: String::from("startup-required guest capabilities ready"),
         }
     }
 
@@ -151,16 +151,16 @@ impl Action {
         }
     }
 
-    pub(crate) fn set_extensions(extensions: Vec<ExtensionStatus>) -> Self {
-        Self::SetExtensions { extensions }
+    pub(crate) fn set_capabilities(capabilities: Vec<CapabilityStatus>) -> Self {
+        Self::SetCapabilities { capabilities }
     }
 
-    pub(crate) fn set_host_sockets(host_sockets: Vec<HostSocket>) -> Self {
-        Self::SetHostSockets { host_sockets }
+    pub(crate) fn set_static_endpoints(endpoints: Vec<EndpointStatus>) -> Self {
+        Self::SetStaticEndpoints { endpoints }
     }
 
-    pub(crate) fn set_port_forwards(port_forwards: Vec<PortForwardStatus>) -> Self {
-        Self::SetPortForwards { port_forwards }
+    pub(crate) fn set_dynamic_endpoints(endpoints: Vec<EndpointStatus>) -> Self {
+        Self::SetDynamicEndpoints { endpoints }
     }
 }
 
@@ -175,9 +175,9 @@ pub(crate) fn new_instance_store() -> InstanceStore {
     )
 }
 
-pub(crate) fn select_current_health(state: &InstanceState) -> HealthResponse {
+pub(crate) fn select_current_health(state: &InstanceState) -> InstanceControlHealthResponse {
     let ok = state.vm == LifecycleState::Running && state.guest == LifecycleState::Running;
-    HealthResponse {
+    InstanceControlHealthResponse {
         ok,
         message: status_summary(state),
     }
@@ -189,9 +189,13 @@ pub(crate) fn select_current_status(state: &InstanceState) -> GetStatusResponse 
         guest_state: state.guest as i32,
         ready: state.vm == LifecycleState::Running && state.guest == LifecycleState::Running,
         summary: status_summary(state),
-        extensions: state.extensions.clone(),
-        host_sockets: state.host_sockets.clone(),
-        port_forwards: state.port_forwards.clone(),
+        capabilities: state.capabilities.clone(),
+        endpoints: state
+            .static_endpoints
+            .iter()
+            .cloned()
+            .chain(state.dynamic_endpoints.iter().cloned())
+            .collect(),
     }
 }
 
@@ -224,14 +228,14 @@ fn reduce_instance_state(current: &InstanceState, action: &Action) -> InstanceSt
             next.guest = *state;
             next.guest_message = message.clone();
         }
-        Action::SetExtensions { extensions } => {
-            next.extensions = extensions.clone();
+        Action::SetCapabilities { capabilities } => {
+            next.capabilities = capabilities.clone();
         }
-        Action::SetHostSockets { host_sockets } => {
-            next.host_sockets = host_sockets.clone();
+        Action::SetStaticEndpoints { endpoints } => {
+            next.static_endpoints = endpoints.clone();
         }
-        Action::SetPortForwards { port_forwards } => {
-            next.port_forwards = port_forwards.clone();
+        Action::SetDynamicEndpoints { endpoints } => {
+            next.dynamic_endpoints = endpoints.clone();
         }
     }
 
@@ -248,9 +252,9 @@ fn project_status_update(action: &Action) -> Option<StatusUpdate> {
             *state,
             message.clone(),
         )),
-        Action::SetExtensions { .. }
-        | Action::SetHostSockets { .. }
-        | Action::SetPortForwards { .. } => None,
+        Action::SetCapabilities { .. }
+        | Action::SetStaticEndpoints { .. }
+        | Action::SetDynamicEndpoints { .. } => None,
     }
 }
 
@@ -264,16 +268,16 @@ fn status_summary(state: &InstanceState) -> String {
     }
 
     let problems = state
-        .extensions
+        .capabilities
         .iter()
-        .filter(|extension| extension.enabled && extension.startup_required)
-        .flat_map(|extension| {
-            if extension.configured && extension.running {
+        .filter(|capability| capability.enabled && capability.startup_required)
+        .flat_map(|capability| {
+            if capability.configured && capability.running {
                 Vec::new()
-            } else if extension.problems.is_empty() {
-                vec![extension.summary.clone()]
+            } else if capability.problems.is_empty() {
+                vec![capability.summary.clone()]
             } else {
-                extension.problems.clone()
+                capability.problems.clone()
             }
         })
         .collect::<Vec<_>>();
@@ -282,7 +286,7 @@ fn status_summary(state: &InstanceState) -> String {
         state.guest_message.clone()
     } else {
         format!(
-            "startup-required extensions not ready: {}",
+            "startup-required capabilities not ready: {}",
             problems.join("; ")
         )
     }

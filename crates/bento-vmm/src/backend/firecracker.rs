@@ -6,9 +6,11 @@ use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bento_fc::types::{BootSource, Drive, DriveCacheType, DriveIoEngine, VmConfiguration, Vsock};
+use bento_fc::types::{
+    BootSource, Drive, DriveCacheType, DriveIoEngine, MachineConfiguration, Vsock,
+};
 use bento_fc::FirecrackerProcessBuilder;
-use bento_protocol::{DEFAULT_AGENT_PORT, KERNEL_PARAM_AGENT_PORT};
+use bento_protocol::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 
@@ -215,7 +217,7 @@ impl FirecrackerMachineBackend {
             runtime.take()
         };
 
-        let Some(mut running) = running else {
+        let Some(running) = running else {
             self.cache_exit(VmExit::Stopped)?;
             return Ok(());
         };
@@ -465,7 +467,7 @@ fn build_boot_args(config: &crate::types::VmConfig) -> String {
     }
     args.push(format!(
         "{}={}",
-        KERNEL_PARAM_AGENT_PORT, DEFAULT_AGENT_PORT
+        KERNEL_PARAM_DISCOVERY_PORT, DEFAULT_DISCOVERY_PORT
     ));
     args.join(" ")
 }
@@ -495,7 +497,7 @@ fn build_boot_source(spec: &VmConfig) -> Result<BootSource, VmmError> {
     })
 }
 
-fn build_machine_configuration(spec: &VmConfig) -> Result<VmConfiguration, VmmError> {
+fn build_machine_configuration(spec: &VmConfig) -> Result<MachineConfiguration, VmmError> {
     let vcpu_count = u64::try_from(spec.cpus.expect("validated cpus missing")).map_err(|_| {
         VmmError::InvalidConfig {
             name: spec.name.clone(),
@@ -507,7 +509,7 @@ fn build_machine_configuration(spec: &VmConfig) -> Result<VmConfiguration, VmmEr
         reason: "firecracker requires at least one vCPU".to_string(),
     })?;
 
-    Ok(VmConfiguration {
+    Ok(MachineConfiguration {
         vcpu_count,
         mem_size_mib: i64::try_from(spec.memory_mib.expect("validated memory missing")).map_err(
             |_| VmmError::InvalidConfig {

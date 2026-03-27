@@ -7,6 +7,9 @@ use crate::daemon_control::{launch_instance, InstancedLauncher};
 #[derive(Args, Debug)]
 pub struct Cmd {
     pub name: String,
+
+    #[arg(long = "profile", value_name = "PROFILE")]
+    pub profiles: Vec<String>,
 }
 
 impl Display for Cmd {
@@ -22,7 +25,7 @@ impl Cmd {
         mut launcher: InstancedLauncher,
     ) -> eyre::Result<()> {
         let inst = store.inspect(&self.name)?;
-        launch_instance(&mut launcher, &inst).await?;
+        launch_instance(&mut launcher, &inst, &self.profiles).await?;
         Ok(())
     }
 }

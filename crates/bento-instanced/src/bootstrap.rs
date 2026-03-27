@@ -4,6 +4,7 @@ use std::io::{self, Seek, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bento_runtime::capabilities::CapabilitiesConfig;
 use bento_runtime::global_config::{ensure_guest_agent_binary, GlobalConfig};
 use bento_runtime::host_user::{self, HostUser};
 use bento_runtime::instance::{resolve_mount_location, Instance, InstanceFile, NetworkMode};
@@ -31,8 +32,8 @@ struct CidataEntry {
     contents: Vec<u8>,
 }
 
-pub fn rebuild_bootstrap(inst: &Instance) -> eyre::Result<()> {
-    if !inst.uses_bootstrap() {
+pub fn rebuild_bootstrap(inst: &Instance, capabilities: &CapabilitiesConfig) -> eyre::Result<()> {
+    if !inst.requires_bootstrap_for(capabilities) {
         let iso_path = inst.file(InstanceFile::CidataDisk);
         if iso_path.exists() {
             std::fs::remove_file(&iso_path)
@@ -44,20 +45,26 @@ pub fn rebuild_bootstrap(inst: &Instance) -> eyre::Result<()> {
     let host_user = host_user::current_host_user().context("resolve current host user")?;
     let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure user SSH keys")?;
 
-    build_cidata_disk(inst, &host_user, &user_keys.public_key_openssh)
+    build_cidata_disk(
+        inst,
+        &host_user,
+        &user_keys.public_key_openssh,
+        capabilities,
+    )
 }
 
 fn build_cidata_disk(
     inst: &Instance,
     host_user: &HostUser,
     ssh_public_key: &str,
+    capabilities: &CapabilitiesConfig,
 ) -> eyre::Result<()> {
     let global_config = GlobalConfig::load()?;
     let agent_binary_path = ensure_guest_agent_binary(&global_config)?;
     let guest_agent_binary = std::fs::read(agent_binary_path)
         .with_context(|| format!("read guest agent binary {}", agent_binary_path.display()))?;
 
-    let desired_state = desired_guestd_state(inst)?;
+    let desired_state = desired_guestd_state(capabilities)?;
     let user_data = render_user_data(inst, host_user, ssh_public_key, &desired_state)?;
     let meta_data = render_meta_data(inst)?;
     let network_config = render_network_config_for_instance(inst)?;
@@ -258,47 +265,15 @@ struct EthernetConfigV2 {
     dhcp6: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct GuestDesiredState {
-    extensions: bento_runtime::extensions::ExtensionsConfig,
-    mounts: Vec<MountDesiredState>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct MountDesiredState {
-    tag: String,
-    path: String,
-    writable: bool,
-}
-
-fn desired_guestd_state(inst: &Instance) -> eyre::Result<GuestDesiredState> {
-    let mounts = inst
-        .config
-        .mounts
-        .iter()
-        .enumerate()
-        .map(|(index, mount)| {
-            let location = resolve_mount_location(&mount.location)
-                .map_err(|reason| eyre::eyre!("resolve mount location failed: {reason}"))?;
-            Ok(MountDesiredState {
-                tag: format!("mount{index}"),
-                path: location.to_string_lossy().to_string(),
-                writable: mount.writable,
-            })
-        })
-        .collect::<eyre::Result<Vec<_>>>()?;
-
-    Ok(GuestDesiredState {
-        extensions: inst.extensions().clone(),
-        mounts,
-    })
+fn desired_guestd_state(capabilities: &CapabilitiesConfig) -> eyre::Result<CapabilitiesConfig> {
+    Ok(capabilities.clone())
 }
 
 fn render_user_data(
     inst: &Instance,
     host_user: &HostUser,
     ssh_public_key: &str,
-    desired_state: &GuestDesiredState,
+    _capabilities: &CapabilitiesConfig,
 ) -> eyre::Result<String> {
     let timezone = resolve_host_timezone();
     let locale = resolve_host_locale();
@@ -330,7 +305,7 @@ fn render_user_data(
         resize_rootfs: true,
         timezone,
         locale,
-        mounts: cloud_mount_entries(desired_state),
+        mounts: cloud_mount_entries(inst),
         write_files,
     };
     let mut bento_yaml = String::from("#cloud-config\n");
@@ -413,14 +388,20 @@ fn render_meta_data(inst: &Instance) -> eyre::Result<String> {
     serde_yaml_ng::to_string(&metadata).context("serialize cloud-init meta-data")
 }
 
-fn cloud_mount_entries(state: &GuestDesiredState) -> Vec<[String; 6]> {
-    state
+fn cloud_mount_entries(inst: &Instance) -> Vec<[String; 6]> {
+    inst.config
         .mounts
         .iter()
+        .enumerate()
         .map(|mount| {
+            let (index, mount) = mount;
+            let path = resolve_mount_location(&mount.location)
+                .unwrap_or_else(|_| mount.location.clone())
+                .to_string_lossy()
+                .to_string();
             [
-                mount.tag.clone(),
-                mount.path.clone(),
+                format!("mount{index}"),
+                path,
                 "virtiofs".to_string(),
                 if mount.writable {
                     "rw,nofail".to_string()
@@ -434,11 +415,17 @@ fn cloud_mount_entries(state: &GuestDesiredState) -> Vec<[String; 6]> {
         .collect()
 }
 
-fn render_guestd_config(state: &GuestDesiredState) -> eyre::Result<String> {
-    serde_yaml_ng::to_string(state).context("serialize guestd config")
+#[derive(Serialize)]
+struct GuestdDesiredConfig<'a> {
+    capabilities: &'a CapabilitiesConfig,
 }
 
-fn render_config_env(inst: &Instance, state: &GuestDesiredState) -> eyre::Result<String> {
+fn render_guestd_config(capabilities: &CapabilitiesConfig) -> eyre::Result<String> {
+    serde_yaml_ng::to_string(&GuestdDesiredConfig { capabilities })
+        .context("serialize guestd config")
+}
+
+fn render_config_env(inst: &Instance, _capabilities: &CapabilitiesConfig) -> eyre::Result<String> {
     let mut env = String::new();
 
     env.push_str(&format!(
@@ -447,31 +434,6 @@ fn render_config_env(inst: &Instance, state: &GuestDesiredState) -> eyre::Result
     ));
     env.push_str("BENTO_GUESTD_BINARY_PATH=/usr/local/bin/bento-guestd\n");
     env.push_str("BENTO_GUESTD_CONFIG_PATH=/etc/bento/guestd.yaml\n");
-
-    env.push_str(&format!(
-        "BENTO_EXT_SSH={}\n",
-        if state.extensions.ssh {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    env.push_str(&format!(
-        "BENTO_EXT_DOCKER={}\n",
-        if state.extensions.docker {
-            "true"
-        } else {
-            "false"
-        }
-    ));
-    env.push_str(&format!(
-        "BENTO_EXT_PORT_FORWARD={}\n",
-        if state.extensions.port_forward {
-            "true"
-        } else {
-            "false"
-        }
-    ));
     env.push_str(&format!(
         "BENTO_ROSETTA={}\n",
         if inst.config.rosetta.unwrap_or(false) {

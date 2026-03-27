@@ -8,6 +8,7 @@ bento-protocol = { path = "../bento-protocol" }
 bento-runtime = { path = "../bento-runtime" }
 eyre = "0.6.12"
 futures = "0.3.31"
+nix = { version = "0.31.1", features = ["feature", "hostname", "net"] }
 rand = "0.9.2"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_yaml_ng = "0.10.0"

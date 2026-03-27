@@ -5,6 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use bento_runtime::instance::{Instance, InstanceFile, InstanceStatus};
+use bento_runtime::profiles::{resolve_profiles, validate_capabilities};
 use eyre::Context;
 use nix::{
     sys::signal::{self, Signal},
@@ -32,6 +33,13 @@ impl InstancedLauncher {
         Self { command }
     }
 
+    pub fn with_profiles(&mut self, profiles: &[String]) -> &mut Self {
+        for profile in profiles {
+            self.command.arg("--profile").arg(profile);
+        }
+        self
+    }
+
     pub fn spawn(&mut self) -> io::Result<Child> {
         self.command
             .stdin(Stdio::null())
@@ -44,12 +52,16 @@ impl InstancedLauncher {
 pub async fn launch_instance(
     launcher: &mut InstancedLauncher,
     inst: &Instance,
+    profiles: &[String],
 ) -> eyre::Result<()> {
     if inst.status() == InstanceStatus::Running {
         eyre::bail!("instance {:?} is already running", inst.name);
     }
 
-    launcher.spawn().context("spawn instanced process")?;
+    launcher
+        .with_profiles(profiles)
+        .spawn()
+        .context("spawn instanced process")?;
     wait_for_instanced_start(
         &inst.file(InstanceFile::InstancedPid),
         &inst.file(InstanceFile::InstancedTraceLog),
@@ -57,13 +69,18 @@ pub async fn launch_instance(
     .await
     .context("wait for instanced start")?;
 
-    if inst.uses_bootstrap() {
+    let mut all_profiles = inst.profiles().to_vec();
+    all_profiles.extend(profiles.iter().cloned());
+    let capabilities = resolve_profiles(inst.capabilities(), &all_profiles)?;
+    validate_capabilities(&capabilities)?;
+
+    if inst.requires_bootstrap_for(&capabilities) {
         service_readiness::wait_for_guest_running(
             &inst.file(InstanceFile::InstancedSocket),
             Duration::from_secs(60 * 10),
         )
         .await
-        .map_err(|err| eyre::eyre!("guest service discovery readiness check failed: {err}"))?;
+        .map_err(|err| eyre::eyre!("guest capability readiness check failed: {err}"))?;
     }
 
     Ok(())

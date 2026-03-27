@@ -1,11 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_protocol::instance::v1::{ExtensionStatus, HostSocket, LifecycleState};
-use bento_runtime::extensions::{BuiltinExtension, EXTENSION_DOCKER, EXTENSION_PORT_FORWARD};
+use bento_protocol::v1::{CapabilityStatus, EndpointKind, EndpointStatus, LifecycleState};
+use bento_runtime::capabilities::CapabilitiesConfig;
 use bento_runtime::instance::{Instance, InstanceFile};
 use bento_runtime::instance_store::InstanceStore;
-use bento_runtime::services::SERVICE_DOCKER;
+use bento_runtime::profiles::{resolve_profiles, validate_capabilities};
 use bento_vmm::{VmExit, Vmm};
 use eyre::Context;
 use tokio::signal::unix::signal;
@@ -35,22 +35,25 @@ struct VmStopInfo {
 pub struct InstanceDaemon {
     name: String,
     store: InstanceStore,
+    profiles: Vec<String>,
 }
 
 impl InstanceDaemon {
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: &str, profiles: Vec<String>) -> Self {
         Self {
             name: String::from(name),
             store: InstanceStore::new(),
+            profiles,
         }
     }
 
     pub async fn run(&self) -> eyre::Result<()> {
         let inst = self.store.inspect(&self.name)?;
+        let resolved_capabilities = resolve_startup_capabilities(&inst, &self.profiles)?;
         let _trace_guard = init_tracing(&inst.file(InstanceFile::InstancedTraceLog))?;
         tracing::info!(instance = %self.name, "instanced starting");
 
-        rebuild_bootstrap(&inst)?;
+        rebuild_bootstrap(&inst, &resolved_capabilities)?;
 
         remove_stale_socket(&inst.file(InstanceFile::InstancedSocket))?;
 
@@ -64,38 +67,42 @@ impl InstanceDaemon {
         }
         let serial_console = machine.serial();
         let store = Arc::new(new_instance_store());
-        let expects_guest_agent = inst.uses_bootstrap();
+        let expects_guest_agent = inst.requires_bootstrap_for(&resolved_capabilities);
 
         let server = InstanceServer::new(machine.clone(), serial_console.clone(), store.clone());
         let server_task = server.listen(&inst.file(InstanceFile::InstancedSocket))?;
 
-        let docker_socket_path = docker_host_socket_path(&inst);
-        remove_stale_socket(&docker_socket_path)?;
-        let docker_export_task = if inst.extensions().is_enabled(BuiltinExtension::Docker) {
-            store.dispatch(Action::set_host_sockets(vec![HostSocket {
-                name: String::from(SERVICE_DOCKER),
-                path: docker_socket_path.display().to_string(),
-            }]));
+        let host_socket_exports = configured_host_socket_exports(&inst, &resolved_capabilities);
+        for export in &host_socket_exports {
+            let path = &export.host_path;
+            remove_stale_socket(path)?;
+        }
+        store.dispatch(Action::set_static_endpoints(
+            configured_static_endpoint_statuses(&resolved_capabilities, &host_socket_exports),
+        ));
 
-            Some(listen_host_service(
-                machine.clone(),
-                &docker_socket_path,
-                String::from(SERVICE_DOCKER),
-            )?)
-        } else {
-            store.dispatch(Action::set_host_sockets(Vec::new()));
-            None
-        };
+        let endpoint_export_tasks = host_socket_exports
+            .iter()
+            .map(|export| {
+                listen_host_service(machine.clone(), &export.host_path, export.name.clone())
+            })
+            .collect::<eyre::Result<Vec<_>>>()?;
+        let mut endpoint_export_join_set = tokio::task::JoinSet::new();
+        for task in endpoint_export_tasks {
+            endpoint_export_join_set.spawn(task);
+        }
 
         let _pid_guard = PidGuard::create(&inst.file(InstanceFile::InstancedPid)).await?;
 
-        let _port_forward_task = if inst.extensions().is_enabled(BuiltinExtension::PortForward) {
+        let _port_forward_task = if resolved_capabilities.forward.enabled
+            && resolved_capabilities.forward.tcp.auto_discover
+        {
             Some(spawn_port_forward_manager_when_guest_ready(
                 machine.clone(),
                 store.clone(),
             ))
         } else {
-            store.dispatch(Action::set_port_forwards(Vec::new()));
+            store.dispatch(Action::set_dynamic_endpoints(Vec::new()));
             None
         };
 
@@ -118,15 +125,16 @@ impl InstanceDaemon {
         let mut sigint = signal(SignalKind::interrupt()).context("register SIGINT handler")?;
         let mut sigterm = signal(SignalKind::terminate()).context("register SIGTERM handler")?;
 
-        let mut guest_extension_monitor_task = if expects_guest_agent {
+        let mut guest_capability_monitor_task = if expects_guest_agent {
             store.dispatch(Action::guest_starting());
-            Some(spawn_guest_extension_monitor(
+            Some(spawn_guest_capability_monitor(
                 inst.clone(),
+                resolved_capabilities.clone(),
                 machine.clone(),
                 store.clone(),
             ))
         } else {
-            store.dispatch(Action::set_extensions(Vec::new()));
+            store.dispatch(Action::set_capabilities(Vec::new()));
             store.dispatch(Action::guest_running());
             None
         };
@@ -135,7 +143,7 @@ impl InstanceDaemon {
             _ = sigint.recv() => {
                 tracing::info!(instance = %self.name, "received SIGINT, shutting down instanced");
                 store.dispatch(Action::VmTransition {
-                    state: bento_protocol::instance::v1::LifecycleState::Stopping,
+                    state: bento_protocol::v1::LifecycleState::Stopping,
                     message: String::from("received SIGINT"),
                 });
                 LoopExit::Signal("SIGINT")
@@ -143,7 +151,7 @@ impl InstanceDaemon {
             _ = sigterm.recv() => {
                 tracing::info!(instance = %self.name, "received SIGTERM, shutting down instanced");
                 store.dispatch(Action::VmTransition {
-                    state: bento_protocol::instance::v1::LifecycleState::Stopping,
+                    state: bento_protocol::v1::LifecycleState::Stopping,
                     message: String::from("received SIGTERM"),
                 });
                 LoopExit::Signal("SIGTERM")
@@ -175,22 +183,23 @@ impl InstanceDaemon {
                 LoopExit::InternalExit("instance server exited")
             }
             result = async {
-                if let Some(task) = docker_export_task {
-                    task.await
-                } else {
+                if endpoint_export_join_set.is_empty() {
                     std::future::pending().await
+                } else {
+                    endpoint_export_join_set.join_next().await.expect("join set not empty")
                 }
             } => {
                 match result {
-                    Ok(Ok(())) => tracing::warn!(instance = %self.name, "docker host export exited"),
-                    Ok(Err(err)) => return Err(err),
-                    Err(err) => return Err(eyre::eyre!("docker host export task failed: {err}")),
+                    Ok(Ok(Ok(()))) => tracing::warn!(instance = %self.name, "host endpoint export exited"),
+                    Ok(Ok(Err(err))) => return Err(err),
+                    Ok(Err(err)) => return Err(eyre::eyre!("host endpoint export join failed: {err}")),
+                    Err(err) => return Err(eyre::eyre!("host endpoint export task failed: {err}")),
                 }
-                LoopExit::InternalExit("docker host export exited")
+                LoopExit::InternalExit("host endpoint export exited")
             }
         };
 
-        if let Some(task) = guest_extension_monitor_task.take() {
+        if let Some(task) = guest_capability_monitor_task.take() {
             task.abort();
         }
 
@@ -222,7 +231,9 @@ impl InstanceDaemon {
             message: String::from("vm stopped"),
         });
 
-        let _ = std::fs::remove_file(&docker_socket_path);
+        for export in host_socket_exports {
+            let _ = std::fs::remove_file(&export.host_path);
+        }
 
         tracing::info!(instance = %self.name, "instance stopped");
 
@@ -230,8 +241,9 @@ impl InstanceDaemon {
     }
 }
 
-fn spawn_guest_extension_monitor(
+fn spawn_guest_capability_monitor(
     inst: Instance,
+    resolved_capabilities: CapabilitiesConfig,
     machine: bento_vmm::VirtualMachine,
     store: Arc<crate::state::InstanceStore>,
 ) -> tokio::task::JoinHandle<()> {
@@ -244,20 +256,24 @@ fn spawn_guest_extension_monitor(
 
             match ServiceRegistry::discover(&machine).await {
                 Ok(registry) => {
-                    let extensions = project_extension_statuses(&inst, &registry);
-                    let ready = startup_required_extensions_ready(&extensions);
-                    let waiting_summary = startup_required_wait_summary(&extensions);
-                    store.dispatch(Action::set_extensions(extensions));
+                    let capabilities =
+                        project_capability_statuses(&resolved_capabilities, &registry);
+                    let endpoints =
+                        project_static_endpoint_statuses(&inst, &resolved_capabilities, &registry);
+                    let ready = startup_required_capabilities_ready(&capabilities);
+                    let waiting_summary = startup_required_wait_summary(&capabilities);
+                    store.dispatch(Action::set_capabilities(capabilities));
+                    store.dispatch(Action::set_static_endpoints(endpoints));
 
                     if ready {
                         store.dispatch(Action::guest_running());
                     } else {
                         store.dispatch(Action::guest_starting());
-                        tracing::info!(reason = %waiting_summary, "startup-required extensions not ready yet");
+                        tracing::info!(reason = %waiting_summary, "startup-required capabilities not ready yet");
                     }
                 }
                 Err(err) if tokio::time::Instant::now() >= deadline => {
-                    tracing::warn!(error = %err, timeout = ?GUEST_DISCOVERY_TIMEOUT, "guest extensions did not become ready before timeout");
+                    tracing::warn!(error = %err, timeout = ?GUEST_DISCOVERY_TIMEOUT, "guest capabilities did not become ready before timeout");
                     store.dispatch(Action::guest_error(format!(
                         "guest discovery failed: {err}"
                     )));
@@ -283,14 +299,16 @@ async fn wait_for_machine_stop(
     Ok(VmStopInfo { message })
 }
 
-fn project_extension_statuses(inst: &Instance, registry: &ServiceRegistry) -> Vec<ExtensionStatus> {
-    inst.extensions()
-        .enabled_extensions()
+fn project_capability_statuses(
+    capabilities: &CapabilitiesConfig,
+    registry: &ServiceRegistry,
+) -> Vec<CapabilityStatus> {
+    enabled_capability_ids(capabilities)
         .into_iter()
-        .map(|extension| {
+        .map(|capability_name| {
             let reported = registry
-                .extensions()
-                .find(|status| status.name == extension.id());
+                .capabilities()
+                .find(|status| status.name == capability_name);
             let (configured, running, summary, problems) = match reported {
                 Some(status) => (
                     status.configured,
@@ -301,15 +319,17 @@ fn project_extension_statuses(inst: &Instance, registry: &ServiceRegistry) -> Ve
                 None => (
                     false,
                     false,
-                    format!("{} was not reported by guestd", extension.id()),
-                    vec![format!("guestd did not report {}", extension.id())],
+                    format!("{capability_name} was not reported by guestd"),
+                    vec![format!("guestd did not report {capability_name}")],
                 ),
             };
 
-            ExtensionStatus {
-                name: extension.id().to_string(),
+            CapabilityStatus {
+                name: capability_name.to_string(),
                 enabled: true,
-                startup_required: extension.startup_required(),
+                startup_required: capabilities
+                    .startup_required_capabilities()
+                    .contains(&capability_name),
                 configured,
                 running,
                 summary,
@@ -319,31 +339,51 @@ fn project_extension_statuses(inst: &Instance, registry: &ServiceRegistry) -> Ve
         .collect()
 }
 
-fn startup_required_extensions_ready(extensions: &[ExtensionStatus]) -> bool {
-    extensions
-        .iter()
-        .filter(|extension| extension.startup_required)
-        .all(|extension| extension.configured && extension.running)
+fn project_static_endpoint_statuses(
+    inst: &Instance,
+    capabilities: &CapabilitiesConfig,
+    registry: &ServiceRegistry,
+) -> Vec<EndpointStatus> {
+    registry
+        .endpoints()
+        .map(|endpoint| EndpointStatus {
+            name: endpoint.name.clone(),
+            kind: endpoint.kind,
+            guest_address: endpoint.guest_address.clone(),
+            host_address: host_address_for_endpoint(inst, capabilities, &endpoint.name)
+                .unwrap_or_default(),
+            active: true,
+            summary: format!("guest endpoint {} is available", endpoint.name),
+            problems: Vec::new(),
+        })
+        .collect()
 }
 
-fn startup_required_wait_summary(extensions: &[ExtensionStatus]) -> String {
-    let reasons = extensions
+fn startup_required_capabilities_ready(capabilities: &[CapabilityStatus]) -> bool {
+    capabilities
         .iter()
-        .filter(|extension| extension.startup_required)
-        .filter(|extension| !(extension.configured && extension.running))
-        .map(|extension| {
-            let detail = extension
+        .filter(|capability| capability.startup_required)
+        .all(|capability| capability.configured && capability.running)
+}
+
+fn startup_required_wait_summary(capabilities: &[CapabilityStatus]) -> String {
+    let reasons = capabilities
+        .iter()
+        .filter(|capability| capability.startup_required)
+        .filter(|capability| !(capability.configured && capability.running))
+        .map(|capability| {
+            let detail = capability
                 .problems
                 .first()
                 .cloned()
                 .filter(|problem| !problem.is_empty())
-                .unwrap_or_else(|| extension.summary.clone());
-            format!("{}: {}", extension.name, detail)
+                .unwrap_or_else(|| capability.summary.clone());
+            format!("{}: {}", capability.name, detail)
         })
         .collect::<Vec<_>>();
 
     if reasons.is_empty() {
-        String::from("waiting for startup-required extensions")
+        String::from("waiting for startup-required capabilities")
     } else {
         reasons.join("; ")
     }
@@ -383,21 +423,21 @@ fn spawn_port_forward_manager_when_guest_ready(
             match ServiceRegistry::discover(&machine).await {
                 Ok(_) => {
                     tracing::info!(
-                        extension = EXTENSION_PORT_FORWARD,
-                        "guest discovery is ready, starting port-forward manager"
+                        capability = "forward",
+                        "guest discovery is ready, starting tcp forward manager"
                     );
                     break;
                 }
                 Err(err) => {
                     tracing::info!(
-                        extension = EXTENSION_PORT_FORWARD,
+                        capability = "forward",
                         reason = %classify_guest_discovery_retry(&err),
-                        "port-forward waiting for guest discovery"
+                        "tcp forward waiting for guest discovery"
                     );
                     tracing::debug!(
-                        extension = EXTENSION_PORT_FORWARD,
+                        capability = "forward",
                         error = %err,
-                        "port-forward guest discovery retry detail"
+                        "tcp forward guest discovery retry detail"
                     );
                 }
             }
@@ -407,22 +447,22 @@ fn spawn_port_forward_manager_when_guest_ready(
             match spawn_port_forward_manager(machine.clone(), store.clone()).await {
                 Ok(Ok(())) => {
                     tracing::warn!(
-                        extension = EXTENSION_PORT_FORWARD,
-                        "port-forward manager exited unexpectedly, restarting"
+                        capability = "forward",
+                        "tcp forward manager exited unexpectedly, restarting"
                     );
                 }
                 Ok(Err(err)) => {
                     tracing::warn!(
-                        extension = EXTENSION_PORT_FORWARD,
+                        capability = "forward",
                         error = %err,
-                        "port-forward manager failed, restarting"
+                        "tcp forward manager failed, restarting"
                     );
                 }
                 Err(err) => {
                     tracing::warn!(
-                        extension = EXTENSION_PORT_FORWARD,
+                        capability = "forward",
                         error = %err,
-                        "port-forward manager join failed, restarting"
+                        "tcp forward manager join failed, restarting"
                     );
                 }
             }
@@ -432,10 +472,100 @@ fn spawn_port_forward_manager_when_guest_ready(
     })
 }
 
-fn docker_host_socket_path(inst: &Instance) -> std::path::PathBuf {
-    inst.dir()
-        .join("sock")
-        .join(format!("{}.sock", EXTENSION_DOCKER))
+fn enabled_capability_ids(capabilities: &CapabilitiesConfig) -> Vec<&'static str> {
+    let mut ids = Vec::new();
+    if capabilities.ssh.enabled {
+        ids.push("ssh");
+    }
+    if capabilities.dns.enabled {
+        ids.push("dns");
+    }
+    if capabilities.forward.enabled {
+        ids.push("forward");
+    }
+    ids
+}
+
+struct HostSocketExport {
+    name: String,
+    guest_path: String,
+    host_path: std::path::PathBuf,
+}
+
+fn configured_host_socket_exports(
+    inst: &Instance,
+    capabilities: &CapabilitiesConfig,
+) -> Vec<HostSocketExport> {
+    capabilities
+        .forward
+        .uds
+        .iter()
+        .map(|forward| HostSocketExport {
+            name: forward.name.clone(),
+            guest_path: forward.guest_path.clone(),
+            host_path: inst.dir().join("sock").join(&forward.host_path),
+        })
+        .collect()
+}
+
+fn configured_static_endpoint_statuses(
+    capabilities: &CapabilitiesConfig,
+    host_socket_exports: &[HostSocketExport],
+) -> Vec<EndpointStatus> {
+    let mut endpoints = Vec::new();
+    if capabilities.ssh.enabled {
+        endpoints.push(EndpointStatus {
+            name: String::from("ssh"),
+            kind: EndpointKind::Ssh as i32,
+            guest_address: String::from("127.0.0.1:22"),
+            host_address: String::new(),
+            active: false,
+            summary: String::from("waiting for guest ssh endpoint"),
+            problems: Vec::new(),
+        });
+    }
+
+    endpoints.extend(host_socket_exports.iter().map(|export| EndpointStatus {
+        name: export.name.clone(),
+        kind: EndpointKind::UnixSocket as i32,
+        guest_address: export.guest_path.clone(),
+        host_address: export.host_path.display().to_string(),
+        active: false,
+        summary: format!("host socket {} is configured", export.host_path.display()),
+        problems: Vec::new(),
+    }));
+
+    endpoints
+}
+
+fn host_address_for_endpoint(
+    inst: &Instance,
+    capabilities: &CapabilitiesConfig,
+    endpoint_name: &str,
+) -> Option<String> {
+    capabilities
+        .forward
+        .uds
+        .iter()
+        .find(|forward| forward.name == endpoint_name)
+        .map(|forward| {
+            inst.dir()
+                .join("sock")
+                .join(&forward.host_path)
+                .display()
+                .to_string()
+        })
+}
+
+fn resolve_startup_capabilities(
+    inst: &Instance,
+    start_profiles: &[String],
+) -> eyre::Result<CapabilitiesConfig> {
+    let mut profiles = inst.profiles().to_vec();
+    profiles.extend(start_profiles.iter().cloned());
+    let capabilities = resolve_profiles(inst.capabilities(), &profiles)?;
+    validate_capabilities(&capabilities)?;
+    Ok(capabilities)
 }
 
 fn remove_stale_socket(path: &std::path::Path) -> eyre::Result<()> {

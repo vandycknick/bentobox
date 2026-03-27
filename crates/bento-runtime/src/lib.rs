@@ -1,11 +1,12 @@
+pub mod capabilities;
 pub mod directories;
-pub mod extensions;
 pub mod global_config;
 pub mod host_user;
 pub mod images;
 pub mod instance;
 pub mod instance_store;
 pub mod negotiate;
+pub mod profiles;
 pub mod services;
 pub mod ssh_keys;
 pub mod utils;

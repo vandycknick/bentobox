@@ -1,4 +1,5 @@
 use bento_instanced::machine::prepare_instance;
+use bento_runtime::capabilities::CapabilitiesConfig;
 use bento_runtime::images::store::ImageStore;
 use bento_runtime::instance::{
     BootstrapConfig, InstanceFile, MountConfig, NetworkConfig, NetworkMode,
@@ -54,8 +55,8 @@ pub struct Cmd {
     pub mounts: Vec<MountConfig>,
     #[arg(long, value_name = "MODE", value_parser = parse_network_mode)]
     pub network: Option<NetworkMode>,
-    #[arg(long = "enable", value_name = "EXTENSION")]
-    pub enabled_extensions: Vec<String>,
+    #[arg(long = "profile", value_name = "PROFILE")]
+    pub profiles: Vec<String>,
 }
 
 impl Display for Cmd {
@@ -82,27 +83,15 @@ impl Cmd {
             None => image_store.pull(&self.image_ref, None)?,
         };
 
-        let mut extensions = selected_image.metadata.extensions.clone();
-        for extension in &self.enabled_extensions {
-            match extension.as_str() {
-                "docker" => extensions.docker = true,
-                "ssh" => extensions.ssh = true,
-                "port-forward" => extensions.port_forward = true,
-                other => {
-                    eyre::bail!(
-                        "unsupported extension '{other}', expected one of: ssh, docker, port-forward"
-                    )
-                }
-            }
-        }
+        let capabilities = CapabilitiesConfig::default();
 
         let bootstrap =
-            (userdata_path.is_some() || extensions.requires_bootstrap() || self.rosetta)
+            (userdata_path.is_some() || capabilities.requires_bootstrap() || self.rosetta)
                 .then(BootstrapConfig::cidata_cloud_init);
 
         if bootstrap.is_some() && !selected_image.metadata.bootstrap.cidata_cloud_init {
             eyre::bail!(
-                "instance requires bootstrap for userdata or enabled extensions, but the selected image does not advertise bootstrap support"
+                "instance requires bootstrap for userdata or resolved capabilities, but the selected image does not advertise bootstrap support"
             );
         }
 
@@ -126,7 +115,8 @@ impl Cmd {
             .with_mounts(self.mounts.clone())
             .with_network(self.network.map(|mode| NetworkConfig { mode }))
             .with_bootstrap(bootstrap)
-            .with_extensions(extensions)
+            .with_profiles(self.profiles.clone())
+            .with_capabilities(capabilities)
             .with_userdata(userdata_path);
 
         let pending = store.create_pending(&self.name, options)?;

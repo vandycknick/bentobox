@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package bento.v1;
+
+message Empty {}
+
+enum EndpointKind {
+  ENDPOINT_KIND_UNSPECIFIED = 0;
+  ENDPOINT_KIND_TCP = 1;
+  ENDPOINT_KIND_UNIX_SOCKET = 2;
+  ENDPOINT_KIND_SSH = 3;
+  ENDPOINT_KIND_SERIAL = 4;
+}
+
+message CapabilityStatus {
+  string name = 1;
+  bool enabled = 2;
+  bool startup_required = 3;
+  bool configured = 4;
+  bool running = 5;
+  string summary = 6;
+  repeated string problems = 7;
+}
+
+message EndpointDescriptor {
+  string name = 1;
+  EndpointKind kind = 2;
+  uint32 port = 3;
+  string guest_address = 4;
+}
+
+message EndpointStatus {
+  string name = 1;
+  EndpointKind kind = 2;
+  string guest_address = 3;
+  string host_address = 4;
+  bool active = 5;
+  string summary = 6;
+  repeated string problems = 7;
+}

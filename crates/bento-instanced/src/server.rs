@@ -5,7 +5,7 @@ use std::time::Duration;
 use bento_runtime::negotiate::{
     Accept, Negotiate, ProxyMode, Reject, RejectCode, Response, Upgrade, NEGOTIATE_PROTOCOL_VERSION,
 };
-use bento_runtime::services::SERVICE_SERIAL;
+use bento_runtime::profiles::ENDPOINT_SERIAL;
 use bento_vmm::{spawn_serial_tunnel, SerialAccess, SerialConsole, VirtualMachine};
 use eyre::Context;
 use tokio::net::{UnixListener, UnixStream};
@@ -163,7 +163,7 @@ impl InstanceServer {
     }
 
     async fn resolve_proxy_target(&self, service: &str) -> Option<ServiceTarget> {
-        if service == SERVICE_SERIAL {
+        if service == ENDPOINT_SERIAL {
             return Some(ServiceTarget::Serial);
         }
 

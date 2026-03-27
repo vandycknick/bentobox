@@ -1,5 +1,8 @@
 use bento_instanced::machine::prepare_instance;
-use bento_runtime::instance::{InstanceFile, MountConfig, NetworkConfig, NetworkMode};
+use bento_runtime::capabilities::CapabilitiesConfig;
+use bento_runtime::instance::{
+    BootstrapConfig, InstanceFile, MountConfig, NetworkConfig, NetworkMode,
+};
 use bento_runtime::instance_store::{InstanceCreateOptions, InstanceStore};
 use clap::Args;
 use eyre::Context;
@@ -52,8 +55,8 @@ pub struct Cmd {
     pub mounts: Vec<MountConfig>,
     #[arg(long, value_name = "MODE", value_parser = crate::commands::create::parse_network_mode)]
     pub network: Option<NetworkMode>,
-    #[arg(long = "enable", value_name = "EXTENSION")]
-    pub enabled_extensions: Vec<String>,
+    #[arg(long = "profile", value_name = "PROFILE")]
+    pub profiles: Vec<String>,
 }
 
 impl Display for Cmd {
@@ -76,19 +79,9 @@ impl Cmd {
         let rootfs_path = resolve_optional_path(self.rootfs.as_deref(), "rootfs")?;
         let disk_paths = resolve_existing_paths(&self.disks, "disk")?;
 
-        let mut extensions = bento_runtime::extensions::ExtensionsConfig::default();
-        for extension in &self.enabled_extensions {
-            match extension.as_str() {
-                "docker" => extensions.docker = true,
-                "ssh" => extensions.ssh = true,
-                "port-forward" => extensions.port_forward = true,
-                other => {
-                    eyre::bail!(
-                        "unsupported extension '{other}', expected one of: ssh, docker, port-forward"
-                    )
-                }
-            }
-        }
+        let capabilities = CapabilitiesConfig::default();
+        let bootstrap = (capabilities.requires_bootstrap() || self.rosetta)
+            .then(BootstrapConfig::cidata_cloud_init);
 
         let options = InstanceCreateOptions::default()
             .with_cpus(self.cpus)
@@ -101,7 +94,9 @@ impl Cmd {
             .with_disks(disk_paths)
             .with_mounts(self.mounts.clone())
             .with_network(self.network.map(|mode| NetworkConfig { mode }))
-            .with_extensions(extensions);
+            .with_bootstrap(bootstrap)
+            .with_profiles(self.profiles.clone())
+            .with_capabilities(capabilities);
 
         let pending = store.create_pending(&self.name, options)?;
         let inst = pending.instance();

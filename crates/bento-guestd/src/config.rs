@@ -1,4 +1,4 @@
-use bento_runtime::extensions::ExtensionsConfig;
+use bento_runtime::capabilities::CapabilitiesConfig;
 use serde::Deserialize;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/bento/guestd.yaml";
@@ -6,9 +6,7 @@ const DEFAULT_CONFIG_PATH: &str = "/etc/bento/guestd.yaml";
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct GuestdConfig {
     #[serde(default)]
-    pub extensions: ExtensionsConfig,
-    #[serde(default)]
-    pub mounts: Vec<MountConfig>,
+    pub capabilities: CapabilitiesConfig,
 }
 
 impl GuestdConfig {
@@ -23,12 +21,4 @@ impl GuestdConfig {
 
         Ok(config)
     }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
-pub struct MountConfig {
-    pub tag: String,
-    pub path: String,
-    pub writable: bool,
 }

@@ -1,169 +1,85 @@
-# Extensions
+# Capabilities And Profiles
 
-Bento extensions are optional guest features that Bento can enable and monitor for a VM.
+Bento now models guest features as capabilities, with profiles as convenience bundles that expand
+into resolved capability config at startup time.
 
-Today, Bento supports these extensions:
+## Core Ideas
 
-- `ssh`
-- `docker`
-- `port-forward`
+- instance configs persist profile references
+- guestd only sees capabilities, not profile names
+- endpoints are the concrete things Bento exposes, like `ssh`, `docker.sock`, or a forwarded TCP port
 
-Extensions are guest-facing features. They are different from core VM functionality like the serial console or Bento's control API, which are always available.
+## Profile Files
 
-## What Extensions Do
+Profiles are YAML files loaded from `~/.config/bento/profiles/<name>.yaml`.
 
-An extension lets Bento do three things for a VM:
+Repo-provided starter profiles live under `config/profiles/` and can be copied into your Bento
+config directory. You can sync them with `make sync-profiles`.
 
-- enable a guest feature for that VM
-- check whether that feature is configured correctly
-- report whether that feature is actually running
+## Current Capabilities
 
-This means Bento can tell the difference between:
+- `ssh`, enabled by default, startup-required
+- `dns`, enabled by default
+- `forward`, disabled by default unless a profile enables it
 
-- a feature that is enabled but not installed correctly
-- a feature that is installed but not started yet
-- a feature that is fully ready
-
-## Bootstrap And Userdata
-
-Some Bento features require guest bootstrap. Bootstrap is how Bento injects cloud-init data into the guest.
-
-Bootstrap is used automatically when needed. You do not need to enable it manually.
-
-Bento enables bootstrap when:
-
-- you provide `--userdata`
-- you enable any extension that requires guest bootstrap
-
-Your `userdata` remains regular cloud-init compatible user-data. Bento merges its own bootstrap content with your user-data automatically.
-
-Current behavior note: Bento rotates cloud-init `instance-id` during bootstrap rebuild. That means cloud-init reruns on each boot for bootstrap-enabled VMs, including merged user `userdata`.
-
-If an image does not support bootstrap, Bento will reject instance creation when bootstrap is required.
-
-## Available Extensions
-
-### `ssh`
-
-The `ssh` extension enables Bento-managed SSH access to the guest.
-
-What it means:
-
-- Bento waits for SSH to become ready during `bentoctl start`
-- `bentoctl shell <vm>` uses SSH by default when the `ssh` extension is enabled
-- if SSH is not healthy yet, Bento keeps reporting the VM as not fully ready
-
-This is a startup-required extension.
+## Current Profiles
 
 ### `docker`
 
-The `docker` extension enables Docker API access from the host to the guest.
+The `docker` profile enables:
 
-What it means:
+- the `forward` capability with dynamic TCP port discovery
+- a configured UDS forward for `/var/run/docker.sock`
+- the DNS alias `host.docker.internal`
 
-- Bento checks whether Docker is configured in the guest
-- Bento checks whether Docker is actually running
-- Bento exposes a per-instance host socket while the VM is running
+## Bootstrap
 
-This is not a startup-required extension.
+Bootstrap is enabled automatically when needed.
 
-That means:
+Today that means Bento enables bootstrap when:
 
-- `bentoctl start` does not wait for Docker to become healthy
-- Docker can still be reported as misconfigured or not running in `bentoctl status`
+- you provide `--userdata`
+- the resolved capability set requires guest bootstrap
+- you enable `--rosetta`
 
-Current scope:
+Current behavior note: Bento rotates cloud-init `instance-id` during bootstrap rebuild, so cloud-init
+reruns on each boot for bootstrap-enabled VMs.
 
-- rootful Docker only
-- Docker must already be installed and configured in the guest image
-- Bento does not install Docker for you yet
-- for `linux/amd64` containers in an `arm64` guest on Apple silicon, create the VM with `--rosetta`
+## Creating A VM
 
-## Enabling Extensions
+Profiles are selected during create time.
 
-You enable extensions when creating a VM.
-
-Example, enable Docker explicitly:
+Example:
 
 ```bash
-bentoctl create dev --image <image> --enable docker
+bentoctl create dev --image <image> --profile docker
 ```
 
-You can enable more than one extension by repeating the flag:
+## One-Off Start Profiles
+
+You can also apply profiles only for a single boot:
 
 ```bash
-bentoctl create dev --image <image> --enable ssh --enable docker
+bentoctl start dev --profile docker
 ```
 
-Notes:
+These extra profile references are resolved at startup and are not written back into the instance
+config.
 
-- images may enable some extensions by default
-- `ssh` may already be enabled depending on the image
-- `docker` usually needs to be enabled explicitly unless the image defaults it on
+## Readiness
 
-## Starting A VM
-
-Start the VM normally:
-
-```bash
-bentoctl start dev
-```
-
-Bento waits until the VM is considered ready.
-
-Ready means:
-
-- the VM itself is running
-- the Bento guest agent is reachable
-- all startup-required extensions are healthy
+`bentoctl start` waits for the VM and guest agent, then waits for all startup-required capabilities.
 
 Today that mainly affects `ssh`.
 
-So if `ssh` is enabled, `bentoctl start` waits for SSH to be ready before reporting success.
+## Status
 
-If `docker` is enabled but not healthy yet, startup can still succeed because Docker is not currently a startup-required extension.
+`bentoctl status <vm>` reports:
 
-## Using Docker
-
-If the `docker` extension is enabled and healthy, Bento exposes a Docker-compatible Unix socket on the host for that VM.
-
-You can inspect the socket path with:
-
-```bash
-bentoctl status dev
-```
-
-Example status output includes a `host sockets:` section like:
-
-```text
-host sockets:
-  - docker => /path/to/instance/sock/docker.sock
-```
-
-You can use that socket with Docker clients by setting `DOCKER_HOST`:
-
-```bash
-export DOCKER_HOST=unix:///path/to/instance/sock/docker.sock
-docker ps
-```
-
-The Docker socket only exists while the VM is running.
-
-## Checking Status
-
-Use:
-
-```bash
-bentoctl status dev
-```
-
-This shows:
-
-- VM process state
-- guest state
-- overall readiness
-- extension health
-- exported host sockets
+- VM lifecycle state
+- guest lifecycle state
+- capability health
+- resolved endpoints
 
 Example shape:
 
@@ -173,112 +89,17 @@ process: Running
 vm: running
 guest: running
 ready: yes
-extensions:
+capabilities:
   - ssh enabled=true startup_required=true configured=true running=true
-    summary: OpenSSH is configured and running
-  - docker enabled=true startup_required=false configured=true running=false
-    summary: Docker is configured but not running
-    problem: Docker service is not reachable
-host sockets:
-  - docker => /.../sock/docker.sock
+  - dns enabled=true startup_required=false configured=true running=true
+  - forward enabled=true startup_required=false configured=true running=true
+endpoints:
+  - ssh guest=127.0.0.1:22 host= active=true
+  - docker guest=/var/run/docker.sock host=/.../sock/docker.sock active=true
 ```
 
-## What The Status Fields Mean
+## Notes
 
-### `enabled`
-
-Whether the extension is turned on for this VM.
-
-### `startup_required`
-
-Whether Bento waits for the extension during startup.
-
-If this is `true`, `bentoctl start` does not report the VM healthy until the extension is ready.
-
-If this is `false`, the extension is still checked and reported, but it does not block startup.
-
-### `configured`
-
-Whether the guest appears to be set up correctly for this extension.
-
-Examples:
-
-- `ssh` may be configured if OpenSSH is installed and expected config exists
-- `docker` may be configured if Docker is installed in the guest
-
-If `configured=false`, the guest is usually missing required software or setup.
-
-### `running`
-
-Whether the extension is currently reachable and working.
-
-Examples:
-
-- `ssh` is running when Bento can reach the SSH service in the guest
-- `docker` is running when `/var/run/docker.sock` in the guest is responding
-
-### `summary`
-
-A short human-readable explanation of the current state.
-
-### `problem`
-
-Specific issues Bento detected for that extension.
-
-## Common Scenarios
-
-### Docker enabled, but not installed in the guest
-
-`bentoctl status` may show:
-
-- `enabled=true`
-- `configured=false`
-- `running=false`
-
-This means Bento knows you want Docker, but the guest image does not currently satisfy the Docker requirements.
-
-### Docker installed, but daemon not started
-
-`bentoctl status` may show:
-
-- `configured=true`
-- `running=false`
-
-This means Docker is present, but the daemon or socket is not ready yet.
-
-### SSH enabled, startup still waiting
-
-If `ssh` is enabled, Bento keeps startup in a not-ready state until SSH is healthy.
-
-This is expected behavior.
-
-## Choosing Images
-
-Extensions depend on what the guest image supports.
-
-A good image for extensions should:
-
-- support Bento guest bootstrap
-- support cloud-init compatible user-data
-- already include the software needed by the extension, if required
-
-For Docker specifically, the best current experience is an image that already has rootful Docker installed and configured.
-
-## Current Limits
-
-Current extension support is intentionally narrow:
-
-- only built-in extensions are supported
-- rootful Docker only
-- Bento reports guest health, but does not provision Docker yet
-- serial is not an extension and is always available separately
-
-## Summary
-
-Use extensions when you want Bento to manage and observe guest features.
-
-In practice:
-
-- use `ssh` for shell access and startup readiness
-- use `docker` for per-VM Docker socket access
-- use `bentoctl status` to understand what is enabled, configured, running, and exported
+- `ssh` remains the default shell/exec path when enabled
+- `forward` owns both dynamic TCP forwarding and configured UDS forwarding
+- `serial` is still a core runtime endpoint, not a capability

@@ -1,6 +1,5 @@
 use std::fmt::{Display, Formatter};
 
-use bento_runtime::extensions::BuiltinExtension;
 use bento_runtime::instance::InstanceStatus;
 use bento_runtime::instance_store::{InstanceError, InstanceStore};
 use clap::Args;
@@ -45,8 +44,8 @@ impl Cmd {
             .into());
         }
 
-        if !inst.extensions().is_enabled(BuiltinExtension::Ssh) {
-            bail!("instance has no ssh extension, cannot run remote commands")
+        if !inst.capabilities().ssh.enabled {
+            bail!("instance has no ssh capability, cannot run remote commands")
         }
 
         let status = ssh::run_remote_command(&self.name, self.user.as_deref(), &self.command)?;

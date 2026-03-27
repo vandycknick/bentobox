@@ -1,7 +1,7 @@
 use clap::Args;
 use std::fmt::{Display, Formatter};
 
-use bento_protocol::instance::v1::LifecycleState;
+use bento_protocol::v1::LifecycleState;
 use bento_runtime::instance::{InstanceFile, InstanceStatus};
 use bento_runtime::instance_store::InstanceStore;
 
@@ -41,42 +41,38 @@ impl Cmd {
             println!("summary: {}", status.summary);
         }
 
-        if !status.extensions.is_empty() {
-            println!("extensions:");
-            for extension in status.extensions {
+        if !status.capabilities.is_empty() {
+            println!("capabilities:");
+            for capability in status.capabilities {
                 println!(
                     "  - {} enabled={} startup_required={} configured={} running={}",
-                    extension.name,
-                    extension.enabled,
-                    extension.startup_required,
-                    extension.configured,
-                    extension.running,
+                    capability.name,
+                    capability.enabled,
+                    capability.startup_required,
+                    capability.configured,
+                    capability.running,
                 );
-                if !extension.summary.is_empty() {
-                    println!("    summary: {}", extension.summary);
+                if !capability.summary.is_empty() {
+                    println!("    summary: {}", capability.summary);
                 }
-                for problem in extension.problems {
+                for problem in capability.problems {
                     println!("    problem: {}", problem);
                 }
             }
         }
 
-        if !status.host_sockets.is_empty() {
-            println!("host sockets:");
-            for socket in status.host_sockets {
-                println!("  - {} => {}", socket.name, socket.path);
-            }
-        }
-
-        if !status.port_forwards.is_empty() {
-            println!("port forwards:");
-            for forward in status.port_forwards {
+        if !status.endpoints.is_empty() {
+            println!("endpoints:");
+            for endpoint in status.endpoints {
                 println!(
-                    "  - guest:{} host:{} active={}",
-                    forward.guest_port, forward.host_port, forward.active
+                    "  - {} guest={} host={} active={}",
+                    endpoint.name, endpoint.guest_address, endpoint.host_address, endpoint.active
                 );
-                if !forward.message.is_empty() {
-                    println!("    message: {}", forward.message);
+                if !endpoint.summary.is_empty() {
+                    println!("    summary: {}", endpoint.summary);
+                }
+                for problem in endpoint.problems {
+                    println!("    problem: {}", problem);
                 }
             }
         }

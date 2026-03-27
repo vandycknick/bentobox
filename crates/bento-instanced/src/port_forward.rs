@@ -3,9 +3,10 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_protocol::guest::v1::guest_discovery_service_client::GuestDiscoveryServiceClient;
-use bento_protocol::guest::v1::{PortForwardEvent, PortForwardEventType, WatchPortForwardsRequest};
-use bento_protocol::instance::v1::PortForwardStatus;
+use bento_protocol::v1::agent_service_client::AgentServiceClient;
+use bento_protocol::v1::{
+    EndpointKind, EndpointStatus, PortEvent, PortEventType, WatchPortsRequest,
+};
 use bento_protocol::DEFAULT_DISCOVERY_PORT;
 use bento_vmm::VirtualMachine;
 use eyre::Context;
@@ -96,8 +97,8 @@ pub(crate) fn spawn_port_forward_manager(
 ) -> tokio::task::JoinHandle<eyre::Result<()>> {
     tokio::spawn(async move {
         let mut active_forwards = BTreeMap::<u32, RunningHostForward>::new();
-        let mut statuses = BTreeMap::<u32, PortForwardStatus>::new();
-        store.dispatch(Action::set_port_forwards(Vec::new()));
+        let mut statuses = BTreeMap::<u32, EndpointStatus>::new();
+        store.dispatch(Action::set_dynamic_endpoints(Vec::new()));
 
         loop {
             let mut client = match connect_guest_client(&machine).await {
@@ -109,13 +110,10 @@ pub(crate) fn spawn_port_forward_manager(
                 }
             };
 
-            let mut updates = match client
-                .watch_port_forwards(WatchPortForwardsRequest {})
-                .await
-            {
+            let mut updates = match client.watch_ports(WatchPortsRequest {}).await {
                 Ok(response) => response.into_inner(),
                 Err(err) => {
-                    tracing::warn!(error = %err, "watch_port_forwards rpc failed");
+                    tracing::warn!(error = %err, "watch_ports rpc failed");
                     tokio::time::sleep(RECONNECT_DELAY).await;
                     continue;
                 }
@@ -134,11 +132,11 @@ pub(crate) fn spawn_port_forward_manager(
                         .await;
                     }
                     Ok(None) => {
-                        tracing::warn!("watch_port_forwards stream closed, reconnecting");
+                        tracing::warn!("watch_ports stream closed, reconnecting");
                         break;
                     }
                     Err(err) => {
-                        tracing::warn!(error = %err, "watch_port_forwards stream error, reconnecting");
+                        tracing::warn!(error = %err, "watch_ports stream error, reconnecting");
                         break;
                     }
                 }
@@ -157,7 +155,7 @@ pub(crate) fn spawn_port_forward_manager(
             }
             active_forwards.clear();
             statuses.clear();
-            store.dispatch(Action::set_port_forwards(Vec::new()));
+            store.dispatch(Action::set_dynamic_endpoints(Vec::new()));
             tokio::time::sleep(RECONNECT_DELAY).await;
         }
     })
@@ -166,9 +164,9 @@ pub(crate) fn spawn_port_forward_manager(
 async fn apply_event(
     machine: &VirtualMachine,
     active_forwards: &mut BTreeMap<u32, RunningHostForward>,
-    statuses: &mut BTreeMap<u32, PortForwardStatus>,
+    statuses: &mut BTreeMap<u32, EndpointStatus>,
     store: &InstanceStore,
-    event: PortForwardEvent,
+    event: PortEvent,
 ) {
     let Some(forward) = event.forward else {
         tracing::warn!("ignoring port-forward event without payload");
@@ -177,11 +175,11 @@ async fn apply_event(
 
     let guest_port = forward.guest_port;
     let vsock_port = forward.vsock_port;
-    let event_type = PortForwardEventType::try_from(event.event_type)
-        .unwrap_or(PortForwardEventType::Unspecified);
+    let event_type =
+        PortEventType::try_from(event.event_type).unwrap_or(PortEventType::Unspecified);
 
     match event_type {
-        PortForwardEventType::Added => {
+        PortEventType::Added => {
             tracing::info!(
                 guest_port,
                 vsock_port,
@@ -200,13 +198,16 @@ async fn apply_event(
                     active_forwards.insert(guest_port, host_forward);
                     statuses.insert(
                         guest_port,
-                        PortForwardStatus {
-                            guest_port,
-                            host_port: guest_port,
+                        EndpointStatus {
+                            name: format!("tcp:{guest_port}"),
+                            kind: EndpointKind::Tcp as i32,
+                            guest_address: format!("127.0.0.1:{guest_port}"),
+                            host_address: format!("127.0.0.1:{guest_port}"),
                             active: true,
-                            message: format!(
+                            summary: format!(
                                 "forwarding localhost:{guest_port} to guest port {guest_port}"
                             ),
+                            problems: Vec::new(),
                         },
                     );
                     publish_status_snapshot(statuses, store);
@@ -220,11 +221,14 @@ async fn apply_event(
                 Err(err) => {
                     statuses.insert(
                         guest_port,
-                        PortForwardStatus {
-                            guest_port,
-                            host_port: guest_port,
+                        EndpointStatus {
+                            name: format!("tcp:{guest_port}"),
+                            kind: EndpointKind::Tcp as i32,
+                            guest_address: format!("127.0.0.1:{guest_port}"),
+                            host_address: format!("127.0.0.1:{guest_port}"),
                             active: false,
-                            message: err.to_string(),
+                            summary: String::from("host port is unavailable"),
+                            problems: vec![err.to_string()],
                         },
                     );
                     publish_status_snapshot(statuses, store);
@@ -237,7 +241,7 @@ async fn apply_event(
                 }
             }
         }
-        PortForwardEventType::Removed => {
+        PortEventType::Removed => {
             tracing::info!(
                 guest_port,
                 vsock_port,
@@ -250,21 +254,21 @@ async fn apply_event(
             statuses.remove(&guest_port);
             publish_status_snapshot(statuses, store);
         }
-        PortForwardEventType::Unspecified => {
+        PortEventType::Unspecified => {
             tracing::warn!(guest_port, "ignoring unspecified port-forward event");
         }
     }
 }
 
-fn publish_status_snapshot(statuses: &BTreeMap<u32, PortForwardStatus>, store: &InstanceStore) {
-    store.dispatch(Action::set_port_forwards(
+fn publish_status_snapshot(statuses: &BTreeMap<u32, EndpointStatus>, store: &InstanceStore) {
+    store.dispatch(Action::set_dynamic_endpoints(
         statuses.values().cloned().collect(),
     ));
 }
 
 async fn connect_guest_client(
     machine: &VirtualMachine,
-) -> eyre::Result<GuestDiscoveryServiceClient<tonic::transport::Channel>> {
+) -> eyre::Result<AgentServiceClient<tonic::transport::Channel>> {
     let stream = machine.connect_vsock(DEFAULT_DISCOVERY_PORT).await?;
     let stream_slot = Arc::new(Mutex::new(Some(stream)));
     let connector = service_fn(move |_| {
@@ -288,7 +292,7 @@ async fn connect_guest_client(
         .await
         .context("connect guest discovery rpc client")?;
 
-    Ok(GuestDiscoveryServiceClient::new(channel))
+    Ok(AgentServiceClient::new(channel))
 }
 
 async fn handle_host_connection(

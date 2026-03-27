@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::extensions::ExtensionsConfig;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageMetadata {
     pub schema_version: u32,
@@ -10,8 +8,6 @@ pub struct ImageMetadata {
     pub defaults: ImageMetadataDefaults,
     #[serde(default)]
     pub bootstrap: ImageMetadataBootstrap,
-    #[serde(default)]
-    pub extensions: ExtensionsConfig,
 }
 
 impl Default for ImageMetadata {
@@ -22,7 +18,6 @@ impl Default for ImageMetadata {
             arch: host_arch().to_string(),
             defaults: ImageMetadataDefaults::default(),
             bootstrap: ImageMetadataBootstrap::default(),
-            extensions: ExtensionsConfig::default(),
         }
     }
 }

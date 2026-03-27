@@ -3,12 +3,10 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_protocol::guest::v1::guest_discovery_service_client::GuestDiscoveryServiceClient;
-use bento_protocol::guest::v1::{
-    ExtensionStatus, HealthRequest, ListExtensionsRequest, ListServicesRequest, ServiceStatus,
-};
+use bento_protocol::v1::agent_service_client::AgentServiceClient;
+use bento_protocol::v1::{AgentPingRequest, CapabilityStatus, Empty, EndpointDescriptor};
 use bento_protocol::DEFAULT_DISCOVERY_PORT;
-use bento_runtime::services::SERVICE_SERIAL;
+use bento_runtime::profiles::ENDPOINT_SERIAL;
 use bento_vmm::VirtualMachine;
 use eyre::Context;
 use hyper_util::rt::TokioIo;
@@ -25,49 +23,54 @@ pub(crate) enum ServiceTarget {
 #[derive(Debug)]
 pub(crate) struct ServiceRegistry {
     by_name: BTreeMap<String, ServiceTarget>,
-    extensions: BTreeMap<String, ExtensionStatus>,
+    capabilities: BTreeMap<String, CapabilityStatus>,
+    endpoints: BTreeMap<String, EndpointDescriptor>,
 }
 
 impl ServiceRegistry {
     pub(crate) async fn discover(machine: &VirtualMachine) -> eyre::Result<Self> {
         let mut by_name = BTreeMap::new();
-        by_name.insert(SERVICE_SERIAL.to_string(), ServiceTarget::Serial);
+        by_name.insert(ENDPOINT_SERIAL.to_string(), ServiceTarget::Serial);
 
         let mut client = connect_guest_client(machine).await?;
-        verify_guest_health(&mut client).await?;
+        verify_guest_liveness(&mut client).await?;
 
-        let endpoints = tokio::time::timeout(
-            Duration::from_secs(3),
-            client.list_services(ListServicesRequest {}),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("guest discovery list_services request timed out"))?
-        .map_err(|err| eyre::eyre!("query guest service list failed: {err}"))?
-        .into_inner()
-        .services;
+        let endpoints =
+            tokio::time::timeout(Duration::from_secs(3), client.list_endpoints(Empty {}))
+                .await
+                .map_err(|_| eyre::eyre!("guest agent list_endpoints request timed out"))?
+                .map_err(|err| eyre::eyre!("query guest endpoint list failed: {err}"))?
+                .into_inner()
+                .endpoints;
 
-        for endpoint in endpoints {
-            by_name.insert(endpoint.name, ServiceTarget::VsockPort(endpoint.port));
-        }
-
-        let extensions = tokio::time::timeout(
-            Duration::from_secs(3),
-            client.list_extensions(ListExtensionsRequest {}),
-        )
-        .await
-        .map_err(|_| eyre::eyre!("guest discovery list_extensions request timed out"))?
-        .map_err(|err| eyre::eyre!("query guest extension list failed: {err}"))?
-        .into_inner();
-
-        let extensions = extensions
-            .extensions
+        let endpoint_map = endpoints
             .into_iter()
-            .map(|extension| (extension.name.clone(), extension))
+            .map(|endpoint| {
+                by_name.insert(
+                    endpoint.name.clone(),
+                    ServiceTarget::VsockPort(endpoint.port),
+                );
+                (endpoint.name.clone(), endpoint)
+            })
+            .collect();
+
+        let capabilities =
+            tokio::time::timeout(Duration::from_secs(3), client.list_capabilities(Empty {}))
+                .await
+                .map_err(|_| eyre::eyre!("guest agent list_capabilities request timed out"))?
+                .map_err(|err| eyre::eyre!("query guest capability list failed: {err}"))?
+                .into_inner();
+
+        let capabilities = capabilities
+            .capabilities
+            .into_iter()
+            .map(|capability| (capability.name.clone(), capability))
             .collect();
 
         Ok(Self {
             by_name,
-            extensions,
+            capabilities,
+            endpoints: endpoint_map,
         })
     }
 
@@ -75,14 +78,18 @@ impl ServiceRegistry {
         self.by_name.get(name).copied()
     }
 
-    pub(crate) fn extensions(&self) -> impl Iterator<Item = &ExtensionStatus> {
-        self.extensions.values()
+    pub(crate) fn capabilities(&self) -> impl Iterator<Item = &CapabilityStatus> {
+        self.capabilities.values()
+    }
+
+    pub(crate) fn endpoints(&self) -> impl Iterator<Item = &EndpointDescriptor> {
+        self.endpoints.values()
     }
 }
 
 async fn connect_guest_client(
     machine: &VirtualMachine,
-) -> eyre::Result<GuestDiscoveryServiceClient<tonic::transport::Channel>> {
+) -> eyre::Result<AgentServiceClient<tonic::transport::Channel>> {
     let stream = machine.connect_vsock(DEFAULT_DISCOVERY_PORT).await?;
     let stream_slot = Arc::new(Mutex::new(Some(stream)));
     let connector = service_fn(move |_| {
@@ -106,31 +113,27 @@ async fn connect_guest_client(
         .await
         .context("connect guest discovery rpc client")?;
 
-    Ok(GuestDiscoveryServiceClient::new(channel))
+    Ok(AgentServiceClient::new(channel))
 }
 
-async fn verify_guest_health(
-    client: &mut GuestDiscoveryServiceClient<tonic::transport::Channel>,
+async fn verify_guest_liveness(
+    client: &mut AgentServiceClient<tonic::transport::Channel>,
 ) -> eyre::Result<()> {
-    let health = tokio::time::timeout(Duration::from_secs(3), client.health(HealthRequest {}))
-        .await
-        .map_err(|_| eyre::eyre!("guest discovery health request timed out"))?
-        .map_err(|err| eyre::eyre!("query guest discovery health failed: {err}"))?
-        .into_inner();
+    let pong = tokio::time::timeout(
+        Duration::from_secs(3),
+        client.ping(AgentPingRequest {
+            message: String::from("ping"),
+        }),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("guest agent ping request timed out"))?
+    .map_err(|err| eyre::eyre!("query guest agent ping failed: {err}"))?
+    .into_inner();
 
-    if !health.ok {
-        eyre::bail!("guest discovery service reported unhealthy");
-    }
-
-    if let Some(unhealthy) = health
-        .services
-        .iter()
-        .find(|service| service.status != ServiceStatus::Running as i32)
-    {
+    if pong.message != "pong" {
         eyre::bail!(
-            "guest discovery service {} is unhealthy: {}",
-            unhealthy.name,
-            unhealthy.message
+            "guest agent returned unexpected ping response: {}",
+            pong.message
         );
     }
 

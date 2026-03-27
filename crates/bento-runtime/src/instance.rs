@@ -7,8 +7,8 @@ use std::{
 };
 use thiserror::Error;
 
+use crate::capabilities::CapabilitiesConfig;
 use crate::directories::Directory;
-use crate::extensions::{BuiltinExtension, ExtensionsConfig};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -131,8 +131,11 @@ pub struct InstanceConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap: Option<BootstrapConfig>,
 
-    #[serde(default, skip_serializing_if = "ExtensionsConfig::is_empty")]
-    pub extensions: ExtensionsConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
+
+    #[serde(default)]
+    pub capabilities: CapabilitiesConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -305,8 +308,12 @@ impl Instance {
         validate_network_mode(self.engine(), self.config.network.as_ref())
     }
 
-    pub fn extensions(&self) -> &ExtensionsConfig {
-        &self.config.extensions
+    pub fn capabilities(&self) -> &CapabilitiesConfig {
+        &self.config.capabilities
+    }
+
+    pub fn profiles(&self) -> &[String] {
+        &self.config.profiles
     }
 
     pub fn bootstrap(&self) -> Option<&BootstrapConfig> {
@@ -314,8 +321,12 @@ impl Instance {
     }
 
     pub fn requires_bootstrap(&self) -> bool {
+        self.requires_bootstrap_for(self.capabilities())
+    }
+
+    pub fn requires_bootstrap_for(&self, capabilities: &CapabilitiesConfig) -> bool {
         self.config.userdata_path.is_some()
-            || self.config.extensions.requires_bootstrap()
+            || capabilities.requires_bootstrap()
             || self.config.rosetta.unwrap_or(false)
     }
 
@@ -323,22 +334,8 @@ impl Instance {
         self.bootstrap().is_some()
     }
 
-    pub fn enabled_extension_ids(&self) -> Vec<&'static str> {
-        self.config
-            .extensions
-            .enabled_extensions()
-            .into_iter()
-            .map(|extension| extension.id())
-            .collect()
-    }
-
-    pub fn startup_required_extensions(&self) -> Vec<BuiltinExtension> {
-        self.config
-            .extensions
-            .enabled_extensions()
-            .into_iter()
-            .filter(|extension| extension.startup_required())
-            .collect()
+    pub fn startup_required_capabilities(&self) -> Vec<&'static str> {
+        self.config.capabilities.startup_required_capabilities()
     }
 
     pub fn root_disk(&self) -> Result<Option<InstanceDisk>, InstanceDiskError> {

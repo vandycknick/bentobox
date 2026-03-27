@@ -1,4 +1,3 @@
-use bento_runtime::extensions::BuiltinExtension;
 use bento_runtime::instance::{InstanceFile, InstanceStatus};
 use bento_runtime::instance_store::{InstanceError, InstanceStore};
 use clap::{Args, ValueEnum};
@@ -71,11 +70,11 @@ impl Cmd {
             None => {}
         }
 
-        if !inst.extensions().is_enabled(BuiltinExtension::Ssh) {
+        if !inst.capabilities().ssh.enabled {
             if self.user.is_some() {
                 eprintln!("[bentoctl] --user is ignored for serial attach");
             }
-            eprintln!("[bentoctl] instance has no ssh extension, using serial attach");
+            eprintln!("[bentoctl] instance has no ssh capability, using serial attach");
             let socket_path = inst.file(InstanceFile::InstancedSocket);
             return terminal::attach_serial(&socket_path.to_string_lossy()).await;
         }

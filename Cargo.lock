@@ -287,6 +287,7 @@ dependencies = [
  "bento-runtime",
  "eyre",
  "futures",
+ "nix 0.31.1",
  "rand 0.9.2",
  "serde",
  "serde_yaml_ng",

@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package bento.v1;
+
+import "common.proto";
+
+service AgentService {
+  rpc Ping(AgentPingRequest) returns (AgentPingResponse);
+  rpc GetSystemInfo(Empty) returns (SystemInfo);
+  rpc ListCapabilities(Empty) returns (ListCapabilitiesResponse);
+  rpc ListEndpoints(Empty) returns (ListEndpointsResponse);
+  rpc WatchPorts(WatchPortsRequest) returns (stream PortEvent);
+}
+
+message AgentPingRequest {
+  string message = 1;
+}
+
+message AgentPingResponse {
+  string message = 1;
+  string version = 2;
+}
+
+message ListCapabilitiesResponse {
+  repeated CapabilityStatus capabilities = 1;
+}
+
+message ListEndpointsResponse {
+  repeated EndpointDescriptor endpoints = 1;
+}
+
+message WatchPortsRequest {}
+
+message Port {
+  uint32 guest_port = 1;
+  uint32 vsock_port = 2;
+}
+
+enum PortEventType {
+  PORT_EVENT_TYPE_UNSPECIFIED = 0;
+  PORT_EVENT_TYPE_ADDED = 1;
+  PORT_EVENT_TYPE_REMOVED = 2;
+}
+
+message PortEvent {
+  PortEventType event_type = 1;
+  Port forward = 2;
+}
+
+message SystemInfo {
+  string kernel_version = 1;
+  string os_name = 2;
+  string os_version = 3;
+  string arch = 4;
+  uint64 total_memory = 5;
+  uint64 available_memory = 6;
+  uint32 cpu_count = 7;
+  repeated double load_average = 8;
+  string hostname = 9;
+  uint64 uptime = 10;
+  repeated string ip_addresses = 11;
+}

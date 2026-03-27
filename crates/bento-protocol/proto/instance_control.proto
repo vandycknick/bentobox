@@ -1,52 +1,31 @@
 syntax = "proto3";
 
-package instance.v1;
+package bento.v1;
+
+import "common.proto";
 
 service InstanceControlService {
-  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Health(InstanceControlHealthRequest) returns (InstanceControlHealthResponse);
   rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
   rpc WatchStatus(WatchStatusRequest) returns (stream StatusUpdate);
 }
 
-message HealthRequest {}
+message InstanceControlHealthRequest {}
 
-message HealthResponse {
+message InstanceControlHealthResponse {
   bool ok = 1;
   string message = 2;
 }
 
 message GetStatusRequest {}
 
-message ExtensionStatus {
-  string name = 1;
-  bool enabled = 2;
-  bool startup_required = 3;
-  bool configured = 4;
-  bool running = 5;
-  string summary = 6;
-  repeated string problems = 7;
-}
-
-message HostSocket {
-  string name = 1;
-  string path = 2;
-}
-
-message PortForwardStatus {
-  uint32 guest_port = 1;
-  uint32 host_port = 2;
-  bool active = 3;
-  string message = 4;
-}
-
 message GetStatusResponse {
   LifecycleState vm_state = 1;
   LifecycleState guest_state = 2;
   bool ready = 3;
   string summary = 4;
-  repeated ExtensionStatus extensions = 5;
-  repeated HostSocket host_sockets = 6;
-  repeated PortForwardStatus port_forwards = 7;
+  repeated CapabilityStatus capabilities = 5;
+  repeated EndpointStatus endpoints = 6;
 }
 
 message WatchStatusRequest {}

@@ -7,7 +7,7 @@ use bento_runtime::instance_store::InstanceStore;
 use bento_runtime::negotiate::{
     ClientUpgradeStreamError, Negotiate, ProxyMode, RejectCode, Upgrade,
 };
-use bento_runtime::services::SERVICE_SSH;
+use bento_runtime::profiles::ENDPOINT_SSH;
 use clap::Args;
 use eyre::{bail, Context};
 use tokio::io::AsyncWriteExt;
@@ -20,7 +20,7 @@ pub struct Cmd {
     #[arg(long)]
     pub name: String,
 
-    #[arg(long, default_value = SERVICE_SSH)]
+    #[arg(long, default_value = ENDPOINT_SSH)]
     pub service: String,
 }
 
@@ -61,10 +61,10 @@ impl Cmd {
                         Duration::from_secs(1),
                     )
                     .await
-                    .context("wait for guest service discovery readiness")?;
+                    .context("wait for guest endpoint discovery readiness")?;
 
-                    if self.service == SERVICE_SSH
-                        && services.iter().all(|service| service.name != SERVICE_SSH)
+                    if self.service == ENDPOINT_SSH
+                        && services.iter().all(|service| service.name != ENDPOINT_SSH)
                     {
                         let available = if services.is_empty() {
                             "none".to_string()
@@ -77,7 +77,7 @@ impl Cmd {
                         };
 
                         bail!(
-                            "unsupported_service: guest discovery is ready but ssh is not supported (available services: {available})"
+                            "unsupported_service: guest discovery is ready but ssh is not supported (available endpoints: {available})"
                         );
                     }
                 }

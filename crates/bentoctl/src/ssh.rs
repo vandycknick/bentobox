@@ -2,6 +2,7 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus};
 
+use bento_runtime::profiles::ENDPOINT_SSH;
 use bento_runtime::{host_user, ssh_keys};
 use eyre::{bail, Context};
 
@@ -44,9 +45,10 @@ fn ssh_command(
     let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
 
     let proxy_command = format!(
-        "{} shell-proxy --name {} --service ssh",
+        "{} shell-proxy --name {} --service {}",
         shell_quote(&exe.to_string_lossy()),
-        shell_quote(name)
+        shell_quote(name),
+        ENDPOINT_SSH
     );
     let host_user = host_user::current_host_user().context("resolve current host user")?;
     let ssh_user = user.unwrap_or(host_user.name.as_str());

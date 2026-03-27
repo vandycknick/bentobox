@@ -3,13 +3,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bento_protocol::instance::v1::instance_control_service_client::InstanceControlServiceClient;
-use bento_protocol::instance::v1::{
-    GetStatusRequest, GetStatusResponse, HealthRequest, LifecycleState, StatusSource,
-    WatchStatusRequest,
+use bento_protocol::v1::instance_control_service_client::InstanceControlServiceClient;
+use bento_protocol::v1::{
+    GetStatusRequest, GetStatusResponse, InstanceControlHealthRequest,
+    InstanceControlHealthResponse, LifecycleState, StatusSource, WatchStatusRequest,
 };
 use bento_runtime::negotiate::{ClientUpgradeStreamError, Negotiate, RejectCode, Upgrade};
-use bento_runtime::services::{ServiceDescriptor, SERVICE_DOCKER, SERVICE_SERIAL, SERVICE_SSH};
+use bento_runtime::profiles::{ENDPOINT_DOCKER, ENDPOINT_SERIAL, ENDPOINT_SSH};
+use bento_runtime::services::ServiceDescriptor;
 use eyre::bail;
 use hyper_util::rt::TokioIo;
 use tokio::sync::Mutex;
@@ -179,14 +180,17 @@ async fn probe_instance_control_once(
 
 async fn call_instance_control_health(
     stream: tokio::net::UnixStream,
-) -> Result<bento_protocol::instance::v1::HealthResponse, ProbeError> {
+) -> Result<InstanceControlHealthResponse, ProbeError> {
     let mut client = instance_control_client(stream).await.map_err(|err| {
         ProbeError::Retryable(format!("connect instance control rpc client: {err}"))
     })?;
 
-    let response = client.health(HealthRequest {}).await.map_err(|err| {
-        ProbeError::Retryable(format!("instance control health rpc failed: {err}"))
-    })?;
+    let response = client
+        .health(InstanceControlHealthRequest {})
+        .await
+        .map_err(|err| {
+            ProbeError::Retryable(format!("instance control health rpc failed: {err}"))
+        })?;
 
     Ok(response.into_inner())
 }
@@ -239,20 +243,20 @@ async fn instance_control_client(
 
 fn services_from_status(status: &GetStatusResponse) -> Vec<ServiceDescriptor> {
     let mut services = vec![ServiceDescriptor {
-        name: SERVICE_SERIAL.to_string(),
+        name: ENDPOINT_SERIAL.to_string(),
     }];
 
-    for extension in &status.extensions {
-        if !extension.enabled {
+    for endpoint in &status.endpoints {
+        if !endpoint.active {
             continue;
         }
 
-        match extension.name.as_str() {
-            SERVICE_SSH => services.push(ServiceDescriptor {
-                name: SERVICE_SSH.to_string(),
+        match endpoint.name.as_str() {
+            ENDPOINT_SSH => services.push(ServiceDescriptor {
+                name: ENDPOINT_SSH.to_string(),
             }),
-            SERVICE_DOCKER => services.push(ServiceDescriptor {
-                name: SERVICE_DOCKER.to_string(),
+            ENDPOINT_DOCKER => services.push(ServiceDescriptor {
+                name: ENDPOINT_DOCKER.to_string(),
             }),
             _ => {}
         }

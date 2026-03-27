@@ -6,6 +6,9 @@ use std::fmt::{Display, Formatter};
 pub struct Cmd {
     #[arg(long)]
     pub name: String,
+
+    #[arg(long = "profile", value_name = "PROFILE")]
+    pub profiles: Vec<String>,
 }
 
 impl Display for Cmd {
@@ -16,6 +19,8 @@ impl Display for Cmd {
 
 impl Cmd {
     pub async fn run(&self) -> eyre::Result<()> {
-        InstanceDaemon::new(&self.name).run().await
+        InstanceDaemon::new(&self.name, self.profiles.clone())
+            .run()
+            .await
     }
 }

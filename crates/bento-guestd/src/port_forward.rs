@@ -4,9 +4,10 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_protocol::guest::v1::{PortForward, PortForwardEvent, PortForwardEventType};
+use bento_protocol::v1::{EndpointDescriptor, EndpointKind, Port, PortEvent, PortEventType};
+use bento_runtime::capabilities::{ForwardCapabilityConfig, UdsForwardConfig};
 use tokio::io::copy_bidirectional;
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::{broadcast, Mutex};
 
 use crate::server::{RunningServer, VsockServer};
@@ -15,9 +16,69 @@ const PORT_FORWARD_RANGE_MIN: u32 = 1000;
 const PORT_FORWARD_RANGE_MAX: u32 = 9999;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+pub struct ForwardRuntime {
+    endpoints: Vec<EndpointDescriptor>,
+    port_manager: Option<PortForwardManager>,
+    _port_task: Option<tokio::task::JoinHandle<()>>,
+    _uds_servers: Vec<RunningServer>,
+}
+
+impl ForwardRuntime {
+    pub fn disabled() -> Self {
+        Self {
+            endpoints: Vec::new(),
+            port_manager: None,
+            _port_task: None,
+            _uds_servers: Vec::new(),
+        }
+    }
+
+    pub fn start(config: &ForwardCapabilityConfig) -> eyre::Result<Self> {
+        if !config.enabled {
+            return Ok(Self::disabled());
+        }
+
+        let mut endpoints = Vec::new();
+        let mut uds_servers = Vec::new();
+
+        for forward in &config.uds {
+            let server = start_guest_uds_forwarder(forward.clone())?;
+            endpoints.push(EndpointDescriptor {
+                name: forward.name.clone(),
+                kind: EndpointKind::UnixSocket as i32,
+                port: server.port,
+                guest_address: forward.guest_path.clone(),
+            });
+            uds_servers.push(server);
+        }
+
+        let (port_manager, port_task) = if config.tcp.auto_discover {
+            let (manager, task) = PortForwardManager::spawn();
+            (Some(manager), Some(task))
+        } else {
+            (None, None)
+        };
+
+        Ok(Self {
+            endpoints,
+            port_manager,
+            _port_task: port_task,
+            _uds_servers: uds_servers,
+        })
+    }
+
+    pub fn endpoints(&self) -> &[EndpointDescriptor] {
+        &self.endpoints
+    }
+
+    pub fn port_manager(&self) -> Option<&PortForwardManager> {
+        self.port_manager.as_ref()
+    }
+}
+
 #[derive(Clone)]
 pub struct PortForwardManager {
-    tx: broadcast::Sender<PortForwardEvent>,
+    tx: broadcast::Sender<PortEvent>,
     snapshot: Arc<Mutex<BTreeMap<u32, u32>>>,
 }
 
@@ -37,17 +98,17 @@ impl PortForwardManager {
         (manager, task)
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<PortForwardEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<PortEvent> {
         self.tx.subscribe()
     }
 
-    pub async fn snapshot_events(&self) -> Vec<PortForwardEvent> {
+    pub async fn snapshot_events(&self) -> Vec<PortEvent> {
         let snapshot = self.snapshot.lock().await;
         snapshot
             .iter()
-            .map(|(guest_port, vsock_port)| PortForwardEvent {
-                event_type: PortForwardEventType::Added as i32,
-                forward: Some(PortForward {
+            .map(|(guest_port, vsock_port)| PortEvent {
+                event_type: PortEventType::Added as i32,
+                forward: Some(Port {
                     guest_port: *guest_port,
                     vsock_port: *vsock_port,
                 }),
@@ -68,7 +129,7 @@ impl PortForwardManager {
             excluded_baseline_ports = baseline_ports.len(),
             range_start = PORT_FORWARD_RANGE_MIN,
             range_end = PORT_FORWARD_RANGE_MAX,
-            "port-forward polling initialized"
+            "tcp forward polling initialized"
         );
 
         let mut known_dynamic_ports = BTreeSet::new();
@@ -101,33 +162,22 @@ impl PortForwardManager {
                 .collect::<Vec<_>>();
 
             for guest_port in added {
-                tracing::info!(guest_port, "detected newly listening guest tcp port");
-                match start_guest_port_forwarder(guest_port) {
+                match start_guest_tcp_forwarder(guest_port) {
                     Ok(server) => {
                         let vsock_port = server.port;
                         running.insert(guest_port, server);
                         known_dynamic_ports.insert(guest_port);
                         self.snapshot.lock().await.insert(guest_port, vsock_port);
-                        tracing::info!(guest_port, vsock_port, "started guest port forwarder");
-                        self.publish(PortForwardEvent {
-                            event_type: PortForwardEventType::Added as i32,
-                            forward: Some(PortForward {
+                        self.publish(PortEvent {
+                            event_type: PortEventType::Added as i32,
+                            forward: Some(Port {
                                 guest_port,
                                 vsock_port,
                             }),
                         });
-                        tracing::info!(
-                            guest_port,
-                            vsock_port,
-                            "published port-forward added event"
-                        );
                     }
                     Err(err) => {
-                        tracing::error!(
-                            error = %err,
-                            guest_port,
-                            "failed to start guest port forwarder"
-                        );
+                        tracing::error!(error = %err, guest_port, "failed to start tcp forwarder");
                     }
                 }
             }
@@ -135,36 +185,29 @@ impl PortForwardManager {
             for guest_port in removed {
                 if let Some(mut server) = running.remove(&guest_port) {
                     let vsock_port = server.port;
-                    tracing::info!(guest_port, vsock_port, "detected guest tcp port closed");
                     server.shutdown_and_wait().await;
-                    tracing::info!(guest_port, vsock_port, "guest port forwarder shut down");
                     known_dynamic_ports.remove(&guest_port);
                     self.snapshot.lock().await.remove(&guest_port);
-                    self.publish(PortForwardEvent {
-                        event_type: PortForwardEventType::Removed as i32,
-                        forward: Some(PortForward {
+                    self.publish(PortEvent {
+                        event_type: PortEventType::Removed as i32,
+                        forward: Some(Port {
                             guest_port,
                             vsock_port,
                         }),
                     });
-                    tracing::info!(
-                        guest_port,
-                        vsock_port,
-                        "published port-forward removed event"
-                    );
                 }
             }
         }
     }
 
-    fn publish(&self, event: PortForwardEvent) {
+    fn publish(&self, event: PortEvent) {
         if let Err(err) = self.tx.send(event) {
-            tracing::debug!(error = %err, "no active port-forward subscribers for event");
+            tracing::debug!(error = %err, "no active tcp forward subscribers for event");
         }
     }
 }
 
-fn start_guest_port_forwarder(guest_port: u32) -> eyre::Result<RunningServer> {
+fn start_guest_tcp_forwarder(guest_port: u32) -> eyre::Result<RunningServer> {
     VsockServer::create(move |mut stream| async move {
         let mut target = TcpStream::connect(("127.0.0.1", guest_port as u16)).await?;
         let _ = copy_bidirectional(&mut stream, &mut target).await?;
@@ -173,9 +216,26 @@ fn start_guest_port_forwarder(guest_port: u32) -> eyre::Result<RunningServer> {
     .with_concurrency(256)
     .with_tracing(tracing::info_span!(
         "vsock_server",
-        service = "port-forward",
+        capability = "forward",
         guest_port
     ))
+    .listen(None)
+}
+
+fn start_guest_uds_forwarder(forward: UdsForwardConfig) -> eyre::Result<RunningServer> {
+    let guest_path = forward.guest_path.clone();
+    let name = forward.name.clone();
+
+    VsockServer::create(move |mut stream| {
+        let guest_path = guest_path.clone();
+        async move {
+            let mut target = UnixStream::connect(&guest_path).await?;
+            let _ = copy_bidirectional(&mut stream, &mut target).await?;
+            Ok(())
+        }
+    })
+    .with_concurrency(256)
+    .with_tracing(tracing::info_span!("vsock_server", capability = "forward", endpoint = %name))
     .listen(None)
 }
 

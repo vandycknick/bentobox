@@ -1,12 +1,12 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use bento_protocol::instance::v1::instance_control_service_server::{
+use bento_protocol::v1::instance_control_service_server::{
     InstanceControlService, InstanceControlServiceServer,
 };
-use bento_protocol::instance::v1::{
-    GetStatusRequest, GetStatusResponse, HealthRequest, HealthResponse, StatusUpdate,
-    WatchStatusRequest,
+use bento_protocol::v1::{
+    GetStatusRequest, GetStatusResponse, InstanceControlHealthRequest,
+    InstanceControlHealthResponse, StatusUpdate, WatchStatusRequest,
 };
 use futures::stream::{self, Stream, StreamExt};
 use tokio::net::UnixStream;
@@ -30,8 +30,8 @@ impl InstanceControlService for InstanceControlSvc {
 
     async fn health(
         &self,
-        _request: Request<HealthRequest>,
-    ) -> Result<Response<HealthResponse>, Status> {
+        _request: Request<InstanceControlHealthRequest>,
+    ) -> Result<Response<InstanceControlHealthResponse>, Status> {
         let snapshot = self.store.snapshot().unwrap_or_default();
         let response = select_current_health(&snapshot);
 
