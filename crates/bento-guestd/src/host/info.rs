@@ -4,7 +4,15 @@ use std::fs;
 use bento_protocol::v1::SystemInfo;
 use nix::ifaddrs::getifaddrs;
 
-pub fn collect_system_info() -> eyre::Result<SystemInfo> {
+/// Reads host information for the running guest instance.
+///
+/// This aggregates kernel, OS, memory, uptime, hostname, CPU, and non-loopback
+/// IP address data from the local Linux system and returns it in Bento's
+/// `SystemInfo` wire format.
+///
+/// Field collection is best-effort. If one source is unavailable, the function
+/// still returns the remaining data it can gather.
+pub fn get_system_info() -> eyre::Result<SystemInfo> {
     let uname = nix::sys::utsname::uname().map_err(|err| eyre::eyre!("uname failed: {err}"))?;
     let (os_name, os_version) = read_os_release();
     let (total_memory, available_memory) = read_memory_info();

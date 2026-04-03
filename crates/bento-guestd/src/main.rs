@@ -1,10 +1,19 @@
+#![cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
+
+#[cfg(not(target_os = "linux"))]
+compile_error!("bento-guestd only supports Linux guests");
+
 mod config;
+mod dns;
+mod host;
 mod init;
 mod port;
 mod port_forward;
 mod rpc;
 mod server;
-mod system_info;
 
 use std::io;
 
@@ -14,14 +23,14 @@ use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
 
 use crate::config::GuestdConfig;
-use crate::init::ensure_supported_runtime_mode;
+use crate::dns::DnsServer;
 use crate::port_forward::ForwardRuntime;
 use crate::rpc::{serve_agent_connection, AgentContext};
 use crate::server::VsockServer;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> eyre::Result<()> {
-    ensure_supported_runtime_mode();
+    let is_pid1 = std::process::id() == 1;
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -33,12 +42,23 @@ async fn main() -> eyre::Result<()> {
         .with_writer(std::io::stderr)
         .try_init();
 
-    tracing::info!("starting");
+    if is_pid1 {
+        tracing::info!("Running as PID 1, configuring system");
+    }
+
+    tracing::info!("agent starting");
 
     let guestd_config = GuestdConfig::load()?;
     let discovery_port = crate::port::from_kernel_cmdline();
     let mut endpoints = Vec::<EndpointDescriptor>::new();
     let mut running_servers = Vec::new();
+    let dns_server = if guestd_config.capabilities.dns.enabled {
+        let dns_server = DnsServer::new(&guestd_config.capabilities.dns).await?;
+        DnsServer::write_resolv_conf(Some(guestd_config.capabilities.dns.listen_address))?;
+        Some(dns_server)
+    } else {
+        None
+    };
 
     if guestd_config.capabilities.ssh.enabled {
         let ssh_server = VsockServer::create(|mut stream| async move {
@@ -84,9 +104,25 @@ async fn main() -> eyre::Result<()> {
     for server in running_servers {
         join_set.spawn(server.wait());
     }
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    let dns_handle = dns_server.map(|dns_server| {
+        let token = cancel.clone();
+        tokio::spawn(async move {
+            if let Err(err) = dns_server.run(token).await {
+                tracing::error!(error = %err, "dns server exited unexpectedly");
+            }
+        })
+    });
 
     while let Some(result) = join_set.join_next().await {
         result??;
+    }
+
+    // Shut down background tasks.
+    cancel.cancel();
+    if let Some(dns_handle) = dns_handle {
+        let _ = tokio::join!(dns_handle);
     }
 
     Ok(())

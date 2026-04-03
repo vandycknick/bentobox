@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use eyre::Context;
 use serde::Deserialize;
 
-use crate::capabilities::{CapabilitiesConfig, UdsForwardConfig};
+use crate::capabilities::{CapabilitiesConfig, DnsZone, UdsForwardConfig};
 use crate::directories::Directory;
 
 pub const ENDPOINT_DOCKER: &str = "docker";
@@ -58,7 +58,9 @@ impl CapabilitiesOverlay {
     pub fn is_empty(&self) -> bool {
         self.ssh.enabled.is_none()
             && self.dns.enabled.is_none()
-            && self.dns.aliases.is_empty()
+            && self.dns.listen_address.is_none()
+            && self.dns.upstream_servers.is_empty()
+            && self.dns.zones.is_empty()
             && self.forward.enabled.is_none()
             && self.forward.tcp.auto_discover.is_none()
             && self.forward.uds.is_empty()
@@ -71,10 +73,14 @@ pub struct SshCapabilityOverlay {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DnsCapabilityOverlay {
     pub enabled: Option<bool>,
+    pub listen_address: Option<std::net::IpAddr>,
     #[serde(default)]
-    pub aliases: Vec<String>,
+    pub upstream_servers: Vec<std::net::SocketAddr>,
+    #[serde(default)]
+    pub zones: Vec<DnsZone>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -100,9 +106,29 @@ impl CapabilitiesConfig {
         if let Some(enabled) = overlay.dns.enabled {
             self.dns.enabled = enabled;
         }
-        for alias in overlay.dns.aliases {
-            if !self.dns.aliases.iter().any(|existing| existing == &alias) {
-                self.dns.aliases.push(alias);
+        if let Some(listen_address) = overlay.dns.listen_address {
+            self.dns.listen_address = listen_address;
+        }
+        for upstream in overlay.dns.upstream_servers {
+            if !self
+                .dns
+                .upstream_servers
+                .iter()
+                .any(|existing| existing == &upstream)
+            {
+                self.dns.upstream_servers.push(upstream);
+            }
+        }
+        for zone in overlay.dns.zones {
+            if let Some(existing) = self
+                .dns
+                .zones
+                .iter_mut()
+                .find(|existing| existing.domain == zone.domain)
+            {
+                *existing = zone;
+            } else {
+                self.dns.zones.push(zone);
             }
         }
 
@@ -128,6 +154,27 @@ impl CapabilitiesConfig {
 }
 
 pub fn validate_capabilities(capabilities: &CapabilitiesConfig) -> eyre::Result<()> {
+    for zone in &capabilities.dns.zones {
+        if zone.domain.trim().is_empty() {
+            eyre::bail!("dns zone domain cannot be empty");
+        }
+
+        for record in &zone.records {
+            if record.name.trim().is_empty() {
+                eyre::bail!("dns record name in zone '{}' cannot be empty", zone.domain);
+            }
+
+            if matches!(&record.value, crate::capabilities::DnsRecordValue::Cname(target) if target.trim().is_empty())
+            {
+                eyre::bail!(
+                    "dns CNAME record '{}' in zone '{}' cannot have an empty target",
+                    record.name,
+                    zone.domain
+                );
+            }
+        }
+    }
+
     for forward in &capabilities.forward.uds {
         if forward.name.trim().is_empty() {
             eyre::bail!("forward uds entry name cannot be empty");
@@ -152,7 +199,9 @@ pub fn validate_capabilities(capabilities: &CapabilitiesConfig) -> eyre::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capabilities::{ForwardCapabilityConfig, TcpForwardConfig};
+    use crate::capabilities::{
+        DnsRecord, DnsRecordValue, ForwardCapabilityConfig, TcpForwardConfig,
+    };
 
     #[test]
     fn merge_overlay_updates_scalars_and_appends_lists() {
@@ -163,7 +212,16 @@ mod tests {
             },
             dns: DnsCapabilityOverlay {
                 enabled: None,
-                aliases: vec![String::from("host.docker.internal")],
+                listen_address: None,
+                upstream_servers: vec!["1.1.1.1:53".parse().expect("valid socket addr")],
+                zones: vec![DnsZone {
+                    domain: String::from("docker.internal"),
+                    authoritative: false,
+                    records: vec![DnsRecord {
+                        name: String::from("host"),
+                        value: DnsRecordValue::Cname(String::from("host.bento.internal")),
+                    }],
+                }],
             },
             forward: ForwardCapabilityOverlay {
                 enabled: Some(true),
@@ -179,14 +237,18 @@ mod tests {
         });
 
         assert!(!capabilities.ssh.enabled);
-        assert!(capabilities
-            .dns
-            .aliases
-            .iter()
-            .any(|alias| alias == "host.docker.internal"));
+        assert_eq!(capabilities.dns.upstream_servers.len(), 1);
+        assert_eq!(capabilities.dns.zones.len(), 1);
+        assert_eq!(capabilities.dns.zones[0].domain, "docker.internal");
         assert!(capabilities.forward.enabled);
         assert!(capabilities.forward.tcp.auto_discover);
         assert_eq!(capabilities.forward.uds.len(), 1);
+    }
+
+    #[test]
+    fn validate_capabilities_allows_dns_without_upstreams() {
+        let capabilities = CapabilitiesConfig::default();
+        assert!(validate_capabilities(&capabilities).is_ok());
     }
 
     #[test]

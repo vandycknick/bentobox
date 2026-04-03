@@ -20,8 +20,9 @@ use tokio_vsock::VsockStream;
 use tonic::transport::server::Connected;
 use tonic::{Request, Response, Status};
 
+use crate::dns;
+use crate::host::info::get_system_info;
 use crate::port_forward::ForwardRuntime;
-use crate::system_info::collect_system_info;
 
 #[derive(Debug)]
 struct ConnectedVsock(VsockStream);
@@ -104,7 +105,7 @@ impl AgentService for AgentContext {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<SystemInfo>, Status> {
-        let info = collect_system_info().map_err(|err| Status::internal(err.to_string()))?;
+        let info = get_system_info().map_err(|err| Status::internal(err.to_string()))?;
         Ok(Response::new(info))
     }
 
@@ -166,14 +167,16 @@ async fn capability_statuses(capabilities: &CapabilitiesConfig) -> Vec<Capabilit
     }
 
     if capabilities.dns.enabled {
+        let (configured, running, summary, problems) =
+            dns::capability_status(&capabilities.dns).await;
         statuses.push(CapabilityStatus {
             name: String::from(CAPABILITY_DNS),
             enabled: true,
             startup_required: false,
-            configured: true,
-            running: true,
-            summary: String::from("DNS capability configured"),
-            problems: Vec::new(),
+            configured,
+            running,
+            summary,
+            problems,
         });
     }
 

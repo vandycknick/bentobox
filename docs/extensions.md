@@ -22,6 +22,9 @@ config directory. You can sync them with `make sync-profiles`.
 - `dns`, enabled by default
 - `forward`, disabled by default unless a profile enables it
 
+DNS discovers the host-facing resolver from the guest default gateway. Any configured
+`upstream_servers` are appended as fallback resolvers.
+
 ## Current Profiles
 
 ### `docker`
@@ -30,7 +33,7 @@ The `docker` profile enables:
 
 - the `forward` capability with dynamic TCP port discovery
 - a configured UDS forward for `/var/run/docker.sock`
-- the DNS alias `host.docker.internal`
+- a DNS CNAME record for `host.docker.internal`
 
 ## Bootstrap
 
@@ -71,6 +74,13 @@ config.
 `bentoctl start` waits for the VM and guest agent, then waits for all startup-required capabilities.
 
 Today that mainly affects `ssh`.
+
+## Guest DNS
+
+When the DNS capability is enabled, `guestd` manages guest resolver configuration by writing
+`/etc/bento/resolv.conf` and replacing `/etc/resolv.conf` with a symlink to that managed file.
+It also injects `host.bento.internal` to point back at the discovered host gateway address. The
+`docker` profile adds `host.docker.internal` as a CNAME in the `docker.internal` zone.
 
 ## Status
 

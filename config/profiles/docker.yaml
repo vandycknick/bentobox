@@ -1,7 +1,12 @@
 capabilities:
   dns:
-    aliases:
-      - host.docker.internal
+    zones:
+      - domain: docker.internal
+        authoritative: true
+        records:
+          - name: host
+            type: CNAME
+            value: host.bento.internal
   forward:
     enabled: true
     tcp:

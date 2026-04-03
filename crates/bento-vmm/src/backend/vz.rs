@@ -370,7 +370,7 @@ fn build_boot_loader(spec: &VmConfig) -> Result<LinuxBootLoader, VmmError> {
         .map(|_| " root=/dev/vda")
         .unwrap_or("");
     let command_line = format!(
-        "console=hvc0 rd.break=initqueue{} {}={}",
+        "console=hvc0 rd.break=initqueue{} {}={} selinux=1 enforcing=0",
         root_arg, KERNEL_PARAM_DISCOVERY_PORT, DEFAULT_DISCOVERY_PORT,
     );
     boot_loader.set_command_line(&command_line);
