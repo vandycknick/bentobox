@@ -26,6 +26,7 @@ enum ProcessExit {
 pub struct FirecrackerProcessBuilder {
     firecracker_bin: PathBuf,
     socket_path: PathBuf,
+    enable_pci: bool,
     id: Option<String>,
     log_path: Option<PathBuf>,
     log_level: Option<String>,
@@ -39,6 +40,7 @@ impl FirecrackerProcessBuilder {
         Self {
             firecracker_bin: firecracker_bin.into(),
             socket_path: socket_path.into(),
+            enable_pci: false,
             id: None,
             log_path: None,
             log_level: None,
@@ -50,6 +52,11 @@ impl FirecrackerProcessBuilder {
 
     pub fn id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    pub fn enable_pci(mut self, enable: bool) -> Self {
+        self.enable_pci = enable;
         self
     }
 
@@ -83,6 +90,10 @@ impl FirecrackerProcessBuilder {
             "--api-sock".to_string(),
             self.socket_path.display().to_string(),
         ];
+
+        if self.enable_pci {
+            args.push("--enable-pci".to_string());
+        }
 
         if let Some(id) = &self.id {
             args.push("--id".to_string());

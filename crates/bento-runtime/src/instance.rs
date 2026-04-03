@@ -22,6 +22,7 @@ pub enum GuestOs {
 pub enum EngineType {
     VZ,
     Firecracker,
+    CloudHypervisor,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -227,6 +228,7 @@ pub fn default_network_mode_for_engine(engine: EngineType) -> NetworkMode {
     match engine {
         EngineType::VZ => NetworkMode::VzNat,
         EngineType::Firecracker => NetworkMode::None,
+        EngineType::CloudHypervisor => NetworkMode::None,
     }
 }
 
@@ -689,6 +691,12 @@ mod tests {
     }
 
     #[test]
+    fn resolve_network_mode_defaults_to_none_for_cloud_hypervisor_engine() {
+        let mode = resolve_network_mode(EngineType::CloudHypervisor, None);
+        assert_eq!(mode, NetworkMode::None);
+    }
+
+    #[test]
     fn validate_network_mode_rejects_vznat_for_firecracker_engine() {
         let err = validate_network_mode(
             EngineType::Firecracker,
@@ -697,6 +705,19 @@ mod tests {
             }),
         )
         .expect_err("vznat should be rejected for firecracker");
+
+        assert!(err.contains("only supported with the VZ driver"));
+    }
+
+    #[test]
+    fn validate_network_mode_rejects_vznat_for_cloud_hypervisor_engine() {
+        let err = validate_network_mode(
+            EngineType::CloudHypervisor,
+            Some(&NetworkConfig {
+                mode: NetworkMode::VzNat,
+            }),
+        )
+        .expect_err("vznat should be rejected for cloud hypervisor");
 
         assert!(err.contains("only supported with the VZ driver"));
     }

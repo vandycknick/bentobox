@@ -8,6 +8,7 @@ pub enum Backend {
     Auto,
     Vz,
     Firecracker,
+    CloudHypervisor,
 }
 
 #[derive(Debug, Default)]
@@ -64,6 +65,7 @@ impl MachineIdentifier {
             .unwrap_or(false)
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn set_generated_bytes(&self, bytes: Vec<u8>) -> Result<(), VmmError> {
         let mut state = self.inner.lock().map_err(|_| VmmError::RegistryPoisoned)?;
         state.bytes = bytes;
@@ -262,6 +264,7 @@ pub(crate) fn resolve_backend(backend: Backend) -> Result<Backend, VmmError> {
         Backend::Auto => auto_backend(),
         Backend::Vz => Ok(Backend::Vz),
         Backend::Firecracker => Ok(Backend::Firecracker),
+        Backend::CloudHypervisor => Ok(Backend::CloudHypervisor),
     }
 }
 
@@ -281,4 +284,22 @@ fn auto_backend() -> Result<Backend, VmmError> {
         kind: Backend::Vz,
         reason: "no machine backend is available for this host platform".to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_backend, Backend};
+
+    #[test]
+    fn resolve_backend_preserves_explicit_cloud_hypervisor() {
+        let backend = resolve_backend(Backend::CloudHypervisor).expect("backend should resolve");
+        assert_eq!(backend, Backend::CloudHypervisor);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn auto_backend_still_defaults_to_firecracker_on_linux() {
+        let backend = resolve_backend(Backend::Auto).expect("backend should resolve");
+        assert_eq!(backend, Backend::Firecracker);
+    }
 }

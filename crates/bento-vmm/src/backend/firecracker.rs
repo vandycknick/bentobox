@@ -285,29 +285,27 @@ impl FirecrackerMachineBackend {
     }
 
     pub(crate) async fn wait(&self) -> Result<VmExit, VmmError> {
-        loop {
-            if let Some(exit) = self.cached_exit()? {
-                return Ok(exit);
-            }
-
-            let process = {
-                let runtime = self.runtime.lock().await;
-                let Some(running) = runtime.as_ref() else {
-                    return Err(VmmError::Backend(
-                        "cannot wait for a virtual machine that has not been started".to_string(),
-                    ));
-                };
-                Arc::clone(&running.process)
-            };
-
-            let status = process.wait().await.map_err(fc_error)?;
-            let exit = vm_exit_from_status(status);
-            self.cache_exit(exit.clone())?;
-            let mut runtime = self.runtime.lock().await;
-            *runtime = None;
-            self.cleanup_runtime_files();
+        if let Some(exit) = self.cached_exit()? {
             return Ok(exit);
         }
+
+        let process = {
+            let runtime = self.runtime.lock().await;
+            let Some(running) = runtime.as_ref() else {
+                return Err(VmmError::Backend(
+                    "cannot wait for a virtual machine that has not been started".to_string(),
+                ));
+            };
+            Arc::clone(&running.process)
+        };
+
+        let status = process.wait().await.map_err(fc_error)?;
+        let exit = vm_exit_from_status(status);
+        self.cache_exit(exit.clone())?;
+        let mut runtime = self.runtime.lock().await;
+        *runtime = None;
+        self.cleanup_runtime_files();
+        Ok(exit)
     }
 
     pub(crate) async fn try_wait(&self) -> Result<Option<VmExit>, VmmError> {
@@ -562,7 +560,7 @@ fn build_drive(
     })
 }
 
-fn build_vsock(spec: &VmConfig, socket_path: &PathBuf) -> Vsock {
+fn build_vsock(spec: &VmConfig, socket_path: &Path) -> Vsock {
     Vsock {
         guest_cid: guest_cid_for(spec) as i64,
         uds_path: socket_path.display().to_string(),

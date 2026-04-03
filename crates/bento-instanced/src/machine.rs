@@ -44,6 +44,7 @@ pub(crate) fn instance_machine_config(
     let machine_identifier = match engine {
         EngineType::VZ => Some(load_machine_identifier(inst)?),
         EngineType::Firecracker => None,
+        EngineType::CloudHypervisor => None,
     };
 
     let mut builder = VmConfig::builder(inst.name.as_str())
@@ -102,6 +103,7 @@ pub(crate) fn machine_backend(engine: EngineType) -> Result<Backend, VmmError> {
     match engine {
         EngineType::VZ => Ok(Backend::Vz),
         EngineType::Firecracker => Ok(Backend::Firecracker),
+        EngineType::CloudHypervisor => Ok(Backend::CloudHypervisor),
     }
 }
 
@@ -124,5 +126,18 @@ fn map_network_mode(mode: InstanceNetworkMode) -> NetworkMode {
         InstanceNetworkMode::None => NetworkMode::None,
         InstanceNetworkMode::Bridged => NetworkMode::Bridged,
         InstanceNetworkMode::Cni => NetworkMode::Cni,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::machine_backend;
+    use bento_runtime::instance::EngineType;
+    use bento_vmm::Backend;
+
+    #[test]
+    fn machine_backend_maps_cloud_hypervisor_engine() {
+        let backend = machine_backend(EngineType::CloudHypervisor).expect("backend should resolve");
+        assert_eq!(backend, Backend::CloudHypervisor);
     }
 }

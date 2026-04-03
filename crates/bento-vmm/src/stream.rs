@@ -8,6 +8,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 #[cfg(target_os = "linux")]
+use bento_ch::VsockConnection as ChVsockConnection;
+#[cfg(target_os = "linux")]
 use bento_fc::{SerialConnection as FcSerialConnection, VsockConnection as FcVsockConnection};
 #[cfg(target_os = "macos")]
 use bento_vz::device::{
@@ -27,6 +29,8 @@ pub(crate) struct MachineSerialStream {
 
 enum VsockStreamInner {
     #[cfg(target_os = "linux")]
+    CloudHypervisor(ChVsockConnection),
+    #[cfg(target_os = "linux")]
     Firecracker(FcVsockConnection),
     #[cfg(unix)]
     Unix(TokioUnixStream),
@@ -35,6 +39,8 @@ enum VsockStreamInner {
 }
 
 enum MachineSerialStreamInner {
+    #[cfg(unix)]
+    Unix(TokioUnixStream),
     #[cfg(target_os = "linux")]
     Firecracker(FcSerialConnection),
     #[cfg(target_os = "macos")]
@@ -55,6 +61,13 @@ impl fmt::Debug for MachineSerialStream {
 }
 
 impl VsockStream {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_cloud_hypervisor(stream: ChVsockConnection) -> Self {
+        Self {
+            inner: VsockStreamInner::CloudHypervisor(stream),
+        }
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn from_firecracker(stream: FcVsockConnection) -> Self {
         Self {
@@ -83,6 +96,8 @@ impl VsockStream {
     pub fn source_port(&self) -> Option<u32> {
         match &self.inner {
             #[cfg(target_os = "linux")]
+            VsockStreamInner::CloudHypervisor(stream) => stream.source_port(),
+            #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => stream.source_port(),
             #[cfg(unix)]
             VsockStreamInner::Unix(_) => None,
@@ -94,6 +109,8 @@ impl VsockStream {
     pub fn destination_port(&self) -> u32 {
         match &self.inner {
             #[cfg(target_os = "linux")]
+            VsockStreamInner::CloudHypervisor(stream) => stream.destination_port(),
+            #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => stream.destination_port(),
             #[cfg(unix)]
             VsockStreamInner::Unix(_) => 0,
@@ -104,6 +121,13 @@ impl VsockStream {
 }
 
 impl MachineSerialStream {
+    #[cfg(unix)]
+    pub(crate) fn from_unix_stream(stream: TokioUnixStream) -> Self {
+        Self {
+            inner: MachineSerialStreamInner::Unix(stream),
+        }
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn from_firecracker(stream: FcSerialConnection) -> Self {
         Self {
@@ -127,6 +151,8 @@ impl AsyncRead for VsockStream {
     ) -> Poll<io::Result<()>> {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
+            VsockStreamInner::CloudHypervisor(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(unix)]
             VsockStreamInner::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
@@ -144,6 +170,8 @@ impl AsyncWrite for VsockStream {
     ) -> Poll<io::Result<usize>> {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
+            VsockStreamInner::CloudHypervisor(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(unix)]
             VsockStreamInner::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
@@ -155,6 +183,8 @@ impl AsyncWrite for VsockStream {
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
             #[cfg(target_os = "linux")]
+            VsockStreamInner::CloudHypervisor(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(unix)]
             VsockStreamInner::Unix(stream) => Pin::new(stream).poll_flush(cx),
@@ -165,6 +195,8 @@ impl AsyncWrite for VsockStream {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
+            #[cfg(target_os = "linux")]
+            VsockStreamInner::CloudHypervisor(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(target_os = "linux")]
             VsockStreamInner::Firecracker(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(unix)]
@@ -182,6 +214,8 @@ impl AsyncRead for MachineSerialStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         match &mut self.inner {
+            #[cfg(unix)]
+            MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(target_os = "linux")]
             MachineSerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(target_os = "macos")]
@@ -197,6 +231,8 @@ impl AsyncWrite for MachineSerialStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         match &mut self.inner {
+            #[cfg(unix)]
+            MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(target_os = "linux")]
             MachineSerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(target_os = "macos")]
@@ -206,6 +242,8 @@ impl AsyncWrite for MachineSerialStream {
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
+            #[cfg(unix)]
+            MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(target_os = "linux")]
             MachineSerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(target_os = "macos")]
@@ -215,6 +253,8 @@ impl AsyncWrite for MachineSerialStream {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
+            #[cfg(unix)]
+            MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(target_os = "linux")]
             MachineSerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(target_os = "macos")]
