@@ -44,19 +44,19 @@ fi
 mkdir -p /mnt/root
 if ! mount -o subvol=@ "${root}" /mnt/root; then
     echo "mount ${root} -> /mnt/root failed"
-    exec setsid cttyhack sh
+    exec cttyhack sh
 fi
 
 # Must be a mountpoint for switch_root
 if ! mountpoint -q /mnt/root; then
     echo "/mnt/root is not a mountpoint"
-    exec setsid cttyhack sh
+    exec cttyhack sh
 fi
 
 # NEW_INIT must exist in new root
 if [ ! -x "/mnt/root${init}" ]; then
     echo "init not executable: /mnt/root${init}"
-    exec setsid cttyhack sh
+    exec cttyhack sh
 fi
 
 # Unmount all other mounts so that the ram used by
