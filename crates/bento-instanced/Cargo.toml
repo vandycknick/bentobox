@@ -1,12 +1,19 @@
 [package]
-name = "bento-instanced"
+name = "bento-vmmon"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "vmmon"
+path = "src/main.rs"
+
 [dependencies]
+bento-core = { path = "../bento-core" }
+bento-libvm = { path = "../bento-libvm" }
 bento-vmm = { path = "../bento-vmm" }
 bento-protocol = { path = "../bento-protocol" }
 bento-runtime = { path = "../bento-runtime" }
+clap = { version = "4.5.31", features = ["derive"] }
 eyre = "0.6.12"
 fatfs = "0.3.6"
 futures = "0.3.31"

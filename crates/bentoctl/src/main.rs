@@ -1,5 +1,4 @@
 mod commands;
-mod daemon_control;
 mod service_readiness;
 mod ssh;
 mod terminal;

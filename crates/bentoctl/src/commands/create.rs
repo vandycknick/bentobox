@@ -1,10 +1,10 @@
-use bento_instanced::machine::prepare_instance;
 use bento_runtime::capabilities::CapabilitiesConfig;
 use bento_runtime::images::store::ImageStore;
 use bento_runtime::instance::{
     BootstrapConfig, InstanceFile, MountConfig, NetworkConfig, NetworkMode,
 };
 use bento_runtime::instance_store::{InstanceCreateOptions, InstanceStore};
+use bento_vmmon::machine::prepare_instance;
 use clap::Args;
 use eyre::Context;
 use std::{

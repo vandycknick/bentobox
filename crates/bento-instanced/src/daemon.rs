@@ -1,10 +1,11 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bento_core::VmSpec;
 use bento_protocol::v1::{CapabilityStatus, EndpointKind, EndpointStatus, LifecycleState};
 use bento_runtime::capabilities::CapabilitiesConfig;
-use bento_runtime::instance::{Instance, InstanceFile};
-use bento_runtime::instance_store::InstanceStore;
+use bento_runtime::instance::InstanceFile;
 use bento_runtime::profiles::{resolve_profiles, validate_capabilities};
 use bento_vmm::{VmExit, Vmm};
 use eyre::Context;
@@ -14,11 +15,16 @@ use tokio::signal::unix::SignalKind;
 use crate::bootstrap::rebuild_bootstrap;
 use crate::discovery::ServiceRegistry;
 use crate::host_export::listen_host_service;
-use crate::machine::{instance_machine_config, machine_backend, machine_identifier_path};
+use crate::machine::{
+    machine_backend_from_vm_spec, machine_identifier_path_from_dir, vm_spec_machine_config,
+    VmSpecInputs,
+};
+use crate::monitor_config::VmContext;
 use crate::pid_guard::PidGuard;
 use crate::port_forward::spawn_port_forward_manager;
 use crate::server::InstanceServer;
 use crate::state::{new_instance_store, Action};
+use crate::StartupReporter;
 
 const GUEST_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const GUEST_DISCOVERY_RETRY: Duration = Duration::from_secs(1);
@@ -32,47 +38,61 @@ struct VmStopInfo {
     message: String,
 }
 
-pub struct InstanceDaemon {
-    name: String,
-    store: InstanceStore,
+pub struct VmMon {
+    data_dir: PathBuf,
     profiles: Vec<String>,
 }
 
-impl InstanceDaemon {
-    pub fn new(name: &str, profiles: Vec<String>) -> Self {
-        Self {
-            name: String::from(name),
-            store: InstanceStore::new(),
-            profiles,
-        }
+impl VmMon {
+    pub fn new(data_dir: PathBuf, profiles: Vec<String>) -> Self {
+        Self { data_dir, profiles }
     }
 
-    pub async fn run(&self) -> eyre::Result<()> {
-        let inst = self.store.inspect(&self.name)?;
-        let resolved_capabilities = resolve_startup_capabilities(&inst, &self.profiles)?;
-        let _trace_guard = init_tracing(&inst.file(InstanceFile::InstancedTraceLog))?;
-        tracing::info!(instance = %self.name, "instanced starting");
+    pub async fn run(&self, startup_reporter: Option<StartupReporter>) -> eyre::Result<()> {
+        let mut startup_reporter = startup_reporter;
+        let result = self.run_inner(&mut startup_reporter).await;
 
-        rebuild_bootstrap(&inst, &resolved_capabilities)?;
+        if let Err(err) = &result {
+            if let Some(reporter) = startup_reporter.as_mut() {
+                let _ = reporter.report_failed(&err.to_string());
+            }
+        }
 
-        remove_stale_socket(&inst.file(InstanceFile::InstancedSocket))?;
+        result
+    }
 
-        let machine_config = instance_machine_config(&inst)?;
-        let vmm = Vmm::new(machine_backend(inst.engine())?)?;
+    async fn run_inner(&self, startup_reporter: &mut Option<StartupReporter>) -> eyre::Result<()> {
+        let context = self.load_context()?;
+        let instance_name = context.name.clone();
+        let resolved_capabilities = resolve_startup_capabilities(&context, &self.profiles)?;
+        let _trace_guard = init_tracing(&context.file(InstanceFile::InstancedTraceLog))?;
+        tracing::info!(instance = %instance_name, "vmmon starting");
+
+        rebuild_bootstrap(&context, &resolved_capabilities)?;
+
+        remove_stale_socket(&context.file(InstanceFile::InstancedSocket))?;
+
+        let machine_config = vm_spec_machine_config(VmSpecInputs {
+            name: &context.name,
+            data_dir: context.dir(),
+            spec: &context.spec,
+        })?;
+        let vmm = Vmm::new(machine_backend_from_vm_spec(&context.spec)?)?;
         let machine = vmm.create(machine_config.config).await?;
         if let Some(machine_identifier) = machine_config.machine_identifier.as_ref() {
             if machine_identifier.was_generated() {
-                std::fs::write(machine_identifier_path(&inst), machine_identifier.bytes())?;
+                let machine_identifier_path = machine_identifier_path_from_dir(context.dir());
+                std::fs::write(machine_identifier_path, machine_identifier.bytes())?;
             }
         }
         let serial_console = machine.serial();
         let store = Arc::new(new_instance_store());
-        let expects_guest_agent = inst.requires_bootstrap_for(&resolved_capabilities);
+        let expects_guest_agent = context.requires_bootstrap_for(&resolved_capabilities);
 
         let server = InstanceServer::new(machine.clone(), serial_console.clone(), store.clone());
-        let server_task = server.listen(&inst.file(InstanceFile::InstancedSocket))?;
+        let server_task = server.listen(&context.file(InstanceFile::InstancedSocket))?;
 
-        let host_socket_exports = configured_host_socket_exports(&inst, &resolved_capabilities);
+        let host_socket_exports = configured_host_socket_exports(&context, &resolved_capabilities);
         for export in &host_socket_exports {
             let path = &export.host_path;
             remove_stale_socket(path)?;
@@ -92,7 +112,7 @@ impl InstanceDaemon {
             endpoint_export_join_set.spawn(task);
         }
 
-        let _pid_guard = PidGuard::create(&inst.file(InstanceFile::InstancedPid)).await?;
+        let _pid_guard = PidGuard::create(&context.file(InstanceFile::InstancedPid)).await?;
 
         let _port_forward_task = if resolved_capabilities.forward.enabled
             && resolved_capabilities.forward.tcp.auto_discover
@@ -111,7 +131,7 @@ impl InstanceDaemon {
         machine.start().await?;
 
         if let Err(err) = serial_console
-            .stream_to_file(&inst.file(InstanceFile::SerialLog))
+            .stream_to_file(&context.file(InstanceFile::SerialLog))
             .await
         {
             let _ = machine.stop().await;
@@ -120,7 +140,11 @@ impl InstanceDaemon {
 
         store.dispatch(Action::vm_running());
 
-        tracing::info!(instance = %self.name, "instanced running");
+        if let Some(reporter) = startup_reporter.as_mut() {
+            reporter.report_started()?;
+        }
+
+        tracing::info!(instance = %instance_name, "vmmon running");
 
         let mut sigint = signal(SignalKind::interrupt()).context("register SIGINT handler")?;
         let mut sigterm = signal(SignalKind::terminate()).context("register SIGTERM handler")?;
@@ -128,7 +152,7 @@ impl InstanceDaemon {
         let mut guest_capability_monitor_task = if expects_guest_agent {
             store.dispatch(Action::guest_starting());
             Some(spawn_guest_capability_monitor(
-                inst.clone(),
+                context.clone(),
                 resolved_capabilities.clone(),
                 machine.clone(),
                 store.clone(),
@@ -141,7 +165,7 @@ impl InstanceDaemon {
 
         let loop_exit = tokio::select! {
             _ = sigint.recv() => {
-                tracing::info!(instance = %self.name, "received SIGINT, shutting down instanced");
+                tracing::info!(instance = %instance_name, "received SIGINT, shutting down vmmon");
                 store.dispatch(Action::VmTransition {
                     state: bento_protocol::v1::LifecycleState::Stopping,
                     message: String::from("received SIGINT"),
@@ -149,7 +173,7 @@ impl InstanceDaemon {
                 LoopExit::Signal("SIGINT")
             }
             _ = sigterm.recv() => {
-                tracing::info!(instance = %self.name, "received SIGTERM, shutting down instanced");
+                tracing::info!(instance = %instance_name, "received SIGTERM, shutting down vmmon");
                 store.dispatch(Action::VmTransition {
                     state: bento_protocol::v1::LifecycleState::Stopping,
                     message: String::from("received SIGTERM"),
@@ -159,11 +183,11 @@ impl InstanceDaemon {
             result = wait_for_machine_stop(&machine) => {
                 match result {
                     Ok(event) => {
-                        tracing::info!(instance = %self.name, message = %event.message, "machine exited");
+                        tracing::info!(instance = %instance_name, message = %event.message, "machine exited");
                         LoopExit::VmStopped(event)
                     }
                     Err(err) => {
-                        tracing::warn!(instance = %self.name, error = %err, "machine wait failed");
+                        tracing::warn!(instance = %instance_name, error = %err, "machine wait failed");
                         LoopExit::VmStopped(VmStopInfo {
                             message: format!("machine wait failed: {err}"),
                         })
@@ -173,7 +197,7 @@ impl InstanceDaemon {
             result = server_task => {
                 match result {
                     Ok(Ok(())) => {
-                        tracing::warn!(instance = %self.name, "instance server exited");
+                        tracing::warn!(instance = %instance_name, "instance server exited");
                     }
                     Ok(Err(err)) => return Err(err),
                     Err(err) => {
@@ -190,7 +214,7 @@ impl InstanceDaemon {
                 }
             } => {
                 match result {
-                    Ok(Ok(Ok(()))) => tracing::warn!(instance = %self.name, "host endpoint export exited"),
+                    Ok(Ok(Ok(()))) => tracing::warn!(instance = %instance_name, "host endpoint export exited"),
                     Ok(Ok(Err(err))) => return Err(err),
                     Ok(Err(err)) => return Err(eyre::eyre!("host endpoint export join failed: {err}")),
                     Err(err) => return Err(eyre::eyre!("host endpoint export task failed: {err}")),
@@ -206,9 +230,9 @@ impl InstanceDaemon {
         let vm_already_stopped = matches!(loop_exit, LoopExit::VmStopped(_));
 
         if let LoopExit::Signal(reason) = &loop_exit {
-            tracing::info!(instance = %self.name, reason, "beginning shutdown flow");
+            tracing::info!(instance = %instance_name, reason, "beginning shutdown flow");
         } else if let LoopExit::InternalExit(reason) = &loop_exit {
-            tracing::warn!(instance = %self.name, reason, "background task exited, forcing vm stop");
+            tracing::warn!(instance = %instance_name, reason, "background task exited, forcing vm stop");
         }
 
         if let LoopExit::VmStopped(event) = &loop_exit {
@@ -219,9 +243,9 @@ impl InstanceDaemon {
         }
 
         if vm_already_stopped {
-            tracing::info!(instance = %self.name, "vm already stopped, finalizing instance shutdown");
+            tracing::info!(instance = %instance_name, "vm already stopped, finalizing instance shutdown");
         } else {
-            tracing::info!(instance = %self.name, "sending stop signal to vm");
+            tracing::info!(instance = %instance_name, "sending stop signal to vm");
         }
 
         machine.stop().await?;
@@ -235,14 +259,31 @@ impl InstanceDaemon {
             let _ = std::fs::remove_file(&export.host_path);
         }
 
-        tracing::info!(instance = %self.name, "instance stopped");
+        tracing::info!(instance = %instance_name, "instance stopped");
 
         Ok(())
     }
+
+    fn load_context(&self) -> eyre::Result<VmContext> {
+        let spec = read_vm_spec_from_dir(&self.data_dir)?;
+        Ok(VmContext {
+            name: spec.name.clone(),
+            data_dir: self.data_dir.clone(),
+            spec,
+        })
+    }
+}
+
+fn read_vm_spec_from_dir(data_dir: &Path) -> eyre::Result<VmSpec> {
+    let config_path = data_dir.join(InstanceFile::Config.as_str());
+    let raw = std::fs::read_to_string(&config_path)
+        .wrap_err_with(|| format!("read vm spec at {}", config_path.display()))?;
+    serde_yaml_ng::from_str(&raw)
+        .wrap_err_with(|| format!("parse vm spec at {}", config_path.display()))
 }
 
 fn spawn_guest_capability_monitor(
-    inst: Instance,
+    context: VmContext,
     resolved_capabilities: CapabilitiesConfig,
     machine: bento_vmm::VirtualMachine,
     store: Arc<crate::state::InstanceStore>,
@@ -258,8 +299,11 @@ fn spawn_guest_capability_monitor(
                 Ok(registry) => {
                     let capabilities =
                         project_capability_statuses(&resolved_capabilities, &registry);
-                    let endpoints =
-                        project_static_endpoint_statuses(&inst, &resolved_capabilities, &registry);
+                    let endpoints = project_static_endpoint_statuses(
+                        &context,
+                        &resolved_capabilities,
+                        &registry,
+                    );
                     let ready = startup_required_capabilities_ready(&capabilities);
                     let waiting_summary = startup_required_wait_summary(&capabilities);
                     store.dispatch(Action::set_capabilities(capabilities));
@@ -340,7 +384,7 @@ fn project_capability_statuses(
 }
 
 fn project_static_endpoint_statuses(
-    inst: &Instance,
+    context: &VmContext,
     capabilities: &CapabilitiesConfig,
     registry: &ServiceRegistry,
 ) -> Vec<EndpointStatus> {
@@ -350,7 +394,7 @@ fn project_static_endpoint_statuses(
             name: endpoint.name.clone(),
             kind: endpoint.kind,
             guest_address: endpoint.guest_address.clone(),
-            host_address: host_address_for_endpoint(inst, capabilities, &endpoint.name)
+            host_address: host_address_for_endpoint(context, capabilities, &endpoint.name)
                 .unwrap_or_default(),
             active: true,
             summary: format!("guest endpoint {} is available", endpoint.name),
@@ -493,7 +537,7 @@ struct HostSocketExport {
 }
 
 fn configured_host_socket_exports(
-    inst: &Instance,
+    context: &VmContext,
     capabilities: &CapabilitiesConfig,
 ) -> Vec<HostSocketExport> {
     capabilities
@@ -503,7 +547,7 @@ fn configured_host_socket_exports(
         .map(|forward| HostSocketExport {
             name: forward.name.clone(),
             guest_path: forward.guest_path.clone(),
-            host_path: inst.dir().join("sock").join(&forward.host_path),
+            host_path: context.dir().join("sock").join(&forward.host_path),
         })
         .collect()
 }
@@ -539,7 +583,7 @@ fn configured_static_endpoint_statuses(
 }
 
 fn host_address_for_endpoint(
-    inst: &Instance,
+    context: &VmContext,
     capabilities: &CapabilitiesConfig,
     endpoint_name: &str,
 ) -> Option<String> {
@@ -549,7 +593,8 @@ fn host_address_for_endpoint(
         .iter()
         .find(|forward| forward.name == endpoint_name)
         .map(|forward| {
-            inst.dir()
+            context
+                .dir()
                 .join("sock")
                 .join(&forward.host_path)
                 .display()
@@ -558,12 +603,13 @@ fn host_address_for_endpoint(
 }
 
 fn resolve_startup_capabilities(
-    inst: &Instance,
+    context: &VmContext,
     start_profiles: &[String],
 ) -> eyre::Result<CapabilitiesConfig> {
-    let mut profiles = inst.profiles().to_vec();
+    let mut profiles = context.profiles().to_vec();
     profiles.extend(start_profiles.iter().cloned());
-    let capabilities = resolve_profiles(inst.capabilities(), &profiles)?;
+    let base = context.base_capabilities();
+    let capabilities = resolve_profiles(&base, &profiles)?;
     validate_capabilities(&capabilities)?;
     Ok(capabilities)
 }

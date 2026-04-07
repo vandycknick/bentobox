@@ -54,10 +54,12 @@ We will adopt the following architecture:
 - `bento-core` will define the canonical machine `VmSpec` and shared domain types.
 - `bento-libvm` will own machine lifecycle, on-disk layout, inventory, image and profile policy, bootstrap materialization, Negotiate client behavior, and `vmmon` process spawning.
 - `bento-vmmon` will be a refactor and rename of `bento-instanced` into a per-VM runtime supervisor.
+- the monitor package will be `bento-vmmon` and the executable will be `vmmon`.
 - `bento-vmmon` will read the machine `config.yaml` from the instance directory and auto-start the VM on spawn.
 - `bento-vmmon` will daemonize itself by default and support a foreground mode for tests and debugging.
 - `bento-libvm` and `bento-vmmon` will synchronize startup using a dedicated startup pipe, not an RPC `Start` call.
 - `bento-libvm` will stop `bento-vmmon` using signals. `Stop` will not be part of `VmMonitorService`.
+- during migration, `bento-libvm` may temporarily use the monitor pidfile to signal `vmmon` for stop and to observe shutdown completion.
 - The machine stable identity will be a ULID stored in `redb` and used as the per-instance directory name.
 - The canonical per-instance data directory will be `~/.local/share/bento/instances/<ulid>/`.
 - The canonical `redb` database location will be `~/.local/share/bento/state.redb`.
@@ -149,6 +151,8 @@ It owns:
 - tracking runtime state for one running VM,
 - runtime cleanup and exit state persistence,
 - signal-driven shutdown.
+
+During migration, `bento-vmmon` may temporarily keep legacy paths for older name-based startup flows, but the data-dir-driven monitor path now consumes `bento-core::VmSpec` directly instead of adapting it through legacy runtime config structures.
 
 It does not own:
 
@@ -303,11 +307,13 @@ Recommended high-level module split:
 - `context.rs`
 - `supervisor.rs`
 
-The `--data-dir` argument points at one specific instance directory, for example:
+The `vmmon` executable accepts a `--data-dir` argument that points at one specific instance directory, for example:
 
 ```text
 ~/.local/share/bento/instances/<ulid>
 ```
+
+`vmmon` is data-dir-driven. It accepts `--data-dir` and reads `config.yaml` from that directory as its startup contract.
 
 ## Startup and Shutdown Semantics
 

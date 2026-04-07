@@ -5,8 +5,6 @@ use std::fmt::{Display, Formatter};
 use bento_runtime::instance_store::InstanceStore;
 use eyre::Context;
 
-use crate::daemon_control::InstancedLauncher;
-
 pub mod create;
 pub mod create_raw;
 pub mod delete;
@@ -47,6 +45,7 @@ pub enum Command {
     Delete(delete::Cmd),
     List(list::Cmd),
     Status(status::Cmd),
+    #[command(name = "vmmon", alias = "instanced", hide = true)]
     Instanced(instanced::Cmd),
     #[command(name = "images", alias = "image")]
     Images(images::Cmd),
@@ -94,13 +93,12 @@ impl BentoCtlCmd {
                 cmd.run(&store).await
             }
             Command::Start(cmd) => {
-                let store = instance_store();
-                let launcher = start_launcher(&cmd.name)?;
-                cmd.run(&store, launcher).await
+                let libvm = libvm()?;
+                cmd.run(&libvm).await
             }
             Command::Stop(cmd) => {
-                let store = instance_store();
-                cmd.run(&store).await
+                let libvm = libvm()?;
+                cmd.run(&libvm).await
             }
             Command::Shell(cmd) => {
                 let store = instance_store();
@@ -140,9 +138,4 @@ fn instance_store() -> InstanceStore {
 
 fn libvm() -> eyre::Result<LibVm> {
     LibVm::from_env().context("initialize bento-libvm")
-}
-
-fn start_launcher(name: &str) -> eyre::Result<InstancedLauncher> {
-    let exe = std::env::current_exe().context("resolve bentoctl binary path")?;
-    Ok(InstancedLauncher::for_instance(exe, name))
 }

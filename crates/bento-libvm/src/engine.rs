@@ -1,8 +1,17 @@
 use std::fs;
+use std::io::{self, Read};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bento_core::{MachineId, VmSpec};
+use nix::{
+    fcntl::{fcntl, FcntlArg, FdFlag},
+    sys::signal::Signal,
+    unistd::{pipe, Pid},
+};
 
 use crate::layout::CONFIG_FILE_NAME;
 use crate::machine_ref::validate_machine_name;
@@ -111,6 +120,41 @@ impl LibVm {
         self.state.remove_machine(&metadata)
     }
 
+    pub async fn start(
+        &self,
+        machine: &MachineRef,
+        profiles: &[String],
+    ) -> Result<MachineRecord, LibVmError> {
+        let metadata = self.resolve_metadata(machine)?;
+        let pid_path = self.layout.monitor_pid_path(metadata.id);
+
+        if pid_path.exists() {
+            return Err(LibVmError::MachineAlreadyRunning {
+                reference: metadata.name.clone(),
+            });
+        }
+
+        let startup_pipe = spawn_vmmon(Path::new(&metadata.instance_dir), profiles)?;
+        wait_for_monitor_start(startup_pipe, &self.layout.monitor_trace_path(metadata.id)).await?;
+        self.machine_record(metadata)
+    }
+
+    pub async fn stop(&self, machine: &MachineRef) -> Result<MachineRecord, LibVmError> {
+        let metadata = self.resolve_metadata(machine)?;
+        let pid_path = self.layout.monitor_pid_path(metadata.id);
+        let pid = read_monitor_pid(&pid_path).map_err(|err| match err.kind() {
+            io::ErrorKind::NotFound => LibVmError::MachineNotRunning {
+                reference: metadata.name.clone(),
+            },
+            _ => err.into(),
+        })?;
+
+        nix::sys::signal::kill(Pid::from_raw(pid), Signal::SIGINT)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        wait_for_monitor_stop(&pid_path, &metadata.name).await?;
+        self.machine_record(metadata)
+    }
+
     fn resolve_metadata(&self, machine: &MachineRef) -> Result<MachineMetadata, LibVmError> {
         let metadata = match machine {
             MachineRef::Id(id) => self.state.get_machine_by_id(*id)?,
@@ -140,9 +184,165 @@ impl LibVm {
             id: metadata.id,
             spec,
             dir,
-            status: MachineStatus::Stopped,
+            status: if self.layout.monitor_pid_path(metadata.id).exists() {
+                MachineStatus::Running
+            } else {
+                MachineStatus::Stopped
+            },
         })
     }
+}
+
+fn spawn_vmmon(instance_dir: &Path, profiles: &[String]) -> Result<OwnedFd, LibVmError> {
+    let (read_fd, write_fd) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
+    let flags =
+        fcntl(&write_fd, FcntlArg::F_GETFD).map_err(|err| io::Error::other(err.to_string()))?;
+    let mut fd_flags = FdFlag::from_bits_retain(flags);
+    fd_flags.remove(FdFlag::FD_CLOEXEC);
+    fcntl(&write_fd, FcntlArg::F_SETFD(fd_flags))
+        .map_err(|err| io::Error::other(err.to_string()))?;
+
+    let mut command = Command::new(resolve_vmmon_executable());
+    command.arg("--data-dir").arg(instance_dir);
+    command
+        .arg("--startup-fd")
+        .arg(write_fd.as_raw_fd().to_string());
+    for profile in profiles {
+        command.arg("--profile").arg(profile);
+    }
+    unsafe {
+        command.pre_exec(|| {
+            nix::unistd::setsid()
+                .map(|_| ())
+                .map_err(|errno| io::Error::from_raw_os_error(errno as i32))
+        });
+    }
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    drop(write_fd);
+
+    Ok(read_fd)
+}
+
+fn resolve_vmmon_executable() -> PathBuf {
+    let fallback = PathBuf::from("vmmon");
+
+    let Ok(current_exe) = std::env::current_exe() else {
+        return fallback;
+    };
+    let Some(parent) = current_exe.parent() else {
+        return fallback;
+    };
+
+    let sibling = parent.join("vmmon");
+    if sibling.exists() {
+        sibling
+    } else {
+        fallback
+    }
+}
+
+async fn wait_for_monitor_start(
+    startup_pipe: OwnedFd,
+    trace_path: &Path,
+) -> Result<(), LibVmError> {
+    let deadline_duration = std::time::Duration::from_secs(30);
+    let trace_path = trace_path.to_path_buf();
+    let result = tokio::time::timeout(
+        deadline_duration,
+        tokio::task::spawn_blocking(move || read_startup_pipe(startup_pipe)),
+    )
+    .await
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "vmmon startup pipe did not report readiness in {:?} (hint: see {})",
+                deadline_duration,
+                trace_path.display(),
+            ),
+        )
+    })?
+    .map_err(|err| io::Error::other(format!("join vmmon startup wait task: {err}")))??;
+
+    match result {
+        StartupResult::Started => Ok(()),
+        StartupResult::Failed(message) => Err(io::Error::other(message).into()),
+    }
+}
+
+fn read_startup_pipe(startup_pipe: OwnedFd) -> io::Result<StartupResult> {
+    let mut input = String::new();
+    let mut file = std::fs::File::from(startup_pipe);
+    file.read_to_string(&mut input)?;
+
+    if input == "started\n" {
+        return Ok(StartupResult::Started);
+    }
+
+    if let Some(message) = input.strip_prefix("failed\t") {
+        return Ok(StartupResult::Failed(message.trim_end().to_string()));
+    }
+
+    if input.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "vmmon exited before reporting startup result",
+        ));
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("unexpected vmmon startup message: {input:?}"),
+    ))
+}
+
+enum StartupResult {
+    Started,
+    Failed(String),
+}
+
+async fn wait_for_monitor_stop(pid_path: &Path, machine_name: &str) -> Result<(), LibVmError> {
+    let timeout = std::time::Duration::from_secs(45);
+    let poll_interval = std::time::Duration::from_millis(200);
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        match tokio::fs::metadata(pid_path).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err.into()),
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "timed out after {:?} waiting for machine {:?} to stop",
+                    timeout, machine_name
+                ),
+            )
+            .into());
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
+fn read_monitor_pid(pid_path: &Path) -> io::Result<i32> {
+    let raw = fs::read_to_string(pid_path)?;
+    let trimmed = raw.trim();
+    trimmed.parse::<i32>().map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("parse monitor pid from {}: {err}", pid_path.display()),
+        )
+    })
 }
 
 impl PendingMachine {

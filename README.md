@@ -46,7 +46,7 @@ Commands:
   delete
   list
   status
-  instanced
+  vmmon
   images
 
 Options:

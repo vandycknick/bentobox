@@ -331,38 +331,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "bento-instanced"
-version = "0.1.0"
-dependencies = [
- "bento-protocol",
- "bento-runtime",
- "bento-vmm",
- "eyre",
- "fatfs",
- "futures",
- "hyper-util",
- "libc",
- "nix 0.31.1",
- "serde",
- "serde_yaml_ng",
- "thiserror 2.0.18",
- "tokio",
- "tonic",
- "tower 0.5.3",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "bento-libvm"
 version = "0.1.0"
 dependencies = [
  "bento-core",
+ "nix 0.31.1",
  "redb",
  "serde_yaml_ng",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -427,6 +405,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "bento-vmmon"
+version = "0.1.0"
+dependencies = [
+ "bento-core",
+ "bento-libvm",
+ "bento-protocol",
+ "bento-runtime",
+ "bento-vmm",
+ "clap",
+ "eyre",
+ "fatfs",
+ "futures",
+ "hyper-util",
+ "libc",
+ "nix 0.31.1",
+ "serde",
+ "serde_yaml_ng",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bento-vz"
 version = "0.1.0"
 dependencies = [
@@ -446,10 +451,10 @@ name = "bentoctl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bento-instanced",
  "bento-libvm",
  "bento-protocol",
  "bento-runtime",
+ "bento-vmmon",
  "chrono",
  "clap",
  "eyre",

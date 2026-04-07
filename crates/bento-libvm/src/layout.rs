@@ -44,6 +44,18 @@ impl Layout {
         self.instance_dir(machine_id).join(CONFIG_FILE_NAME)
     }
 
+    pub fn monitor_pid_path(&self, machine_id: MachineId) -> PathBuf {
+        self.instance_dir(machine_id).join("id.pid")
+    }
+
+    pub fn monitor_socket_path(&self, machine_id: MachineId) -> PathBuf {
+        self.instance_dir(machine_id).join("id.sock")
+    }
+
+    pub fn monitor_trace_path(&self, machine_id: MachineId) -> PathBuf {
+        self.instance_dir(machine_id).join("id.trace.log")
+    }
+
     pub fn staging_dir(&self) -> PathBuf {
         self.instances_dir().join(".staging")
     }
@@ -117,6 +129,24 @@ mod tests {
             PathBuf::from("/tmp/bento/instances")
                 .join(machine_id.to_string())
                 .join("config.yaml")
+        );
+        assert_eq!(
+            layout.monitor_pid_path(machine_id),
+            PathBuf::from("/tmp/bento/instances")
+                .join(machine_id.to_string())
+                .join("id.pid")
+        );
+        assert_eq!(
+            layout.monitor_socket_path(machine_id),
+            PathBuf::from("/tmp/bento/instances")
+                .join(machine_id.to_string())
+                .join("id.sock")
+        );
+        assert_eq!(
+            layout.monitor_trace_path(machine_id),
+            PathBuf::from("/tmp/bento/instances")
+                .join(machine_id.to_string())
+                .join("id.trace.log")
         );
     }
 

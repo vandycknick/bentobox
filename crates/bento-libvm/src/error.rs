@@ -23,6 +23,12 @@ pub enum LibVmError {
     #[error("machine {id} already exists")]
     MachineIdAlreadyExists { id: MachineId },
 
+    #[error("machine {reference} is already running")]
+    MachineAlreadyRunning { reference: String },
+
+    #[error("machine {reference} is not running")]
+    MachineNotRunning { reference: String },
+
     #[error("machine {id} metadata is missing required field {field}")]
     CorruptState { id: MachineId, field: &'static str },
 

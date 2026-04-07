@@ -205,7 +205,10 @@ The CLI must eventually stop owning business logic, and runtime policy must move
 - Manager-facing error types exist for layout resolution and machine-name validation.
 - A first `LibVm` facade now exists with `create_pending`, `inspect`, and `list` methods.
 - `LibVm` now owns canonical `VmSpec` config writing for new machines and is backed by `redb` metadata for create, inspect, list, and remove.
-- Start and stop APIs, plus deeper runtime policy migration out of `bento-runtime`, are still pending in this phase.
+- `LibVm::start` now owns monitor spawning for the new path.
+- `LibVm::stop` now owns monitor signaling and shutdown waiting for the new path.
+- Deeper runtime policy migration out of `bento-runtime` is still pending in this phase.
+- Startup synchronization now uses a startup pipe instead of pidfile polling.
 
 ### Risks
 
@@ -286,24 +289,24 @@ Today the CLI still starts the monitor and the monitor still owns too much mixed
 ### Deliverables
 
 - crate rename from `bento-instanced` to `bento-vmmon`
-- binary rename to `bento-vmmon`
+- binary rename to `vmmon`
 - `--data-dir` driven startup
-- thin `main`, staged `run()` structure
+- single `main.rs` entrypoint with separate bootstrap and `run()` responsibilities
 - self-daemonization support
 - startup pipe handshake
 - signal-based shutdown path
 
 ### Tasks
 
-- [ ] Rename crate `bento-instanced` to `bento-vmmon`.
+- [x] Rename crate `bento-instanced` to `bento-vmmon`.
 - [ ] Rename public references and imports.
 - [ ] Reorganize the code into `main`, `run`, `startup`, `services`, `shutdown`, `state`, `context`, and `supervisor` modules.
-- [ ] Add `--data-dir` argument.
-- [ ] Load `config.yaml` from the passed instance directory.
+- [x] Add `--data-dir` argument.
+- [x] Load `config.yaml` from the passed instance directory.
 - [ ] Move process daemonization into `vmmon`.
 - [ ] Add a foreground mode for tests and debugging.
-- [ ] Add startup pipe support.
-- [ ] Report structured startup success or failure over the startup pipe.
+- [x] Add startup pipe support.
+- [x] Report structured startup success or failure over the startup pipe.
 - [ ] Add signal handlers for graceful stop.
 - [ ] Add forced-stop escalation behavior.
 - [ ] Persist exit state in the instance directory.
@@ -311,7 +314,7 @@ Today the CLI still starts the monitor and the monitor still owns too much mixed
 ### Detailed Steps
 
 1. Rename the crate and binary first, before large behavior moves, so subsequent work lands on the right names.
-2. Reorganize the monitor entrypoint into the ArcBox-style thin `main` plus staged `run()`.
+2. Reorganize the monitor entrypoint into a single `main.rs` with bootstrap setup and a separate `run()` function.
 3. Change monitor startup to accept a concrete `--data-dir` instead of name-driven lookup.
 4. Move config loading and runtime artifact setup into startup code.
 5. Add the startup pipe handshake.
@@ -326,6 +329,19 @@ Today the CLI still starts the monitor and the monitor still owns too much mixed
 - `bento-vmmon` can daemonize itself.
 - `bento-vmmon` can report startup success or failure through a pipe.
 - `bento-vmmon` can be stopped through signals.
+
+### Status
+
+- The package and Rust crate have been renamed to `bento-vmmon` / `bento_vmmon`.
+- A real `bento-vmmon` binary now exists with a single `main.rs` entrypoint that separates bootstrap from `run()`.
+- The generated monitor executable is now named `vmmon`.
+- `bentoctl` now launches the hidden `vmmon` subcommand, with `instanced` retained as a hidden alias during the transition.
+- `vmmon` now accepts `--data-dir` as its startup contract and no longer has a legacy `--name` monitor path.
+- `bento-vmmon` now reads `config.yaml` from the instance directory and drives the data-dir path directly from `VmSpec`.
+- `bento-vmmon` now reports startup success or failure back to `bento-libvm` over a startup pipe.
+- `MonitorConfig` has been collapsed into a single `VmContext` for the data-dir-driven monitor path.
+- The old `VmSpec -> InstanceConfig` adapter has been deleted from `bento-vmmon`.
+- The on-disk crate directory is still `crates/bento-instanced/` for now to keep the diff narrow while the internal restructuring continues.
 
 ### Risks
 
@@ -427,7 +443,10 @@ The migration is not complete until the CLI is thin and the old ownership paths 
 
 - `bentoctl list` now reads machines through `bento-libvm`.
 - `bentoctl delete` now removes machines through `bento-libvm`.
-- `status`, `start`, `stop`, `shell`, and `exec` still depend on the old runtime and monitor path for now because they are tied to the current monitor socket contract.
+- `bentoctl start` now routes through `bento-libvm`, which spawns `vmmon --data-dir ...`.
+- `bentoctl stop` now routes through `bento-libvm`, which signals `vmmon` by pidfile for the new path.
+- `status`, `shell`, and `exec` still depend on the old runtime and monitor path for now because they are tied to the current monitor socket contract.
+- CLI-owned pidfile polling for startup has been removed from the new path.
 
 ### Risks
 
@@ -484,3 +503,10 @@ Add dated notes here whenever the migration plan changes materially.
 - 2026-04-06: Phase 3 progressed, `LibVm` facade added for create/list/inspect flows.
 - 2026-04-06: Phase 4 started, `bento-libvm` adopted `redb`, ULID-backed machine creation, and canonical `VmSpec` config writing.
 - 2026-04-06: Phase 7 started incrementally, `bentoctl list` and `bentoctl delete` now route through `bento-libvm`.
+- 2026-04-06: Phase 5 started, monitor package/crate renamed to `bento-vmmon` and split into thin `main` plus `run()` entrypoint.
+- 2026-04-06: Phase 5 progressed, `vmmon --data-dir` now loads canonical `VmSpec` from the instance directory.
+- 2026-04-06: Phase 5 progressed, `vmmon` startup now reports `Started` and `Failed` over a startup pipe.
+- 2026-04-06: Phase 5 progressed, `vmmon` data-dir path now consumes `VmSpec` directly and the temporary `VmSpec -> InstanceConfig` adapter was removed.
+- 2026-04-06: Phase 5 progressed, `vmmon` no longer supports legacy `--name` startup and `MonitorConfig` was collapsed into `VmContext`.
+- 2026-04-06: Phase 7 progressed, `bentoctl start` now routes through `bento-libvm`, which owns `vmmon` spawning for the new path.
+- 2026-04-06: Phase 7 progressed, `bentoctl stop` now routes through `bento-libvm`, and the old CLI daemon-control module was removed.
