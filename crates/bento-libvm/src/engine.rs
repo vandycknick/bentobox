@@ -6,7 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bento_core::{MachineId, VmSpec};
+use bento_core::{
+    Architecture, Backend, Boot, Bootstrap, Capabilities, Disk, DiskKind, Guest, GuestOs, Host,
+    MachineId, Mount, Network, NetworkMode, Platform, Resources, Storage, VmSpec,
+};
+use bento_runtime::capabilities::CapabilitiesConfig;
+use bento_runtime::images::store::ImageStore;
+use bento_runtime::instance::InstanceFile;
 use nix::{
     fcntl::{fcntl, FcntlArg, FdFlag},
     sys::signal::Signal,
@@ -17,6 +23,43 @@ use crate::layout::CONFIG_FILE_NAME;
 use crate::machine_ref::validate_machine_name;
 use crate::state::{metadata_from_path, MachineMetadata, StateStore};
 use crate::{Layout, LibVmError, MachineRef};
+
+const BYTES_PER_GB: u64 = 1_000_000_000;
+
+#[derive(Debug, Clone)]
+pub struct CreateMachineRequest {
+    pub image_ref: String,
+    pub name: String,
+    pub cpus: Option<u8>,
+    pub memory_mib: Option<u32>,
+    pub kernel: Option<PathBuf>,
+    pub initramfs: Option<PathBuf>,
+    pub disk_size_gb: Option<u64>,
+    pub nested_virtualization: bool,
+    pub rosetta: bool,
+    pub userdata: Option<PathBuf>,
+    pub disks: Vec<PathBuf>,
+    pub mounts: Vec<Mount>,
+    pub network: Option<NetworkMode>,
+    pub profiles: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateRawMachineRequest {
+    pub name: String,
+    pub cpus: u8,
+    pub memory_mib: u32,
+    pub kernel: Option<PathBuf>,
+    pub initramfs: Option<PathBuf>,
+    pub rootfs: Option<PathBuf>,
+    pub empty_rootfs_gb: Option<u64>,
+    pub nested_virtualization: bool,
+    pub rosetta: bool,
+    pub disks: Vec<PathBuf>,
+    pub mounts: Vec<Mount>,
+    pub network: Option<NetworkMode>,
+    pub profiles: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct MachineRecord {
@@ -57,6 +100,200 @@ impl LibVm {
 
     pub fn layout(&self) -> &Layout {
         &self.layout
+    }
+
+    pub fn create_from_image(
+        &self,
+        request: CreateMachineRequest,
+    ) -> Result<MachineRecord, LibVmError> {
+        if matches!(request.disk_size_gb, Some(0)) {
+            return Err(LibVmError::InvalidCreateRequest {
+                name: request.name,
+                reason: "--disk-size must be greater than 0".to_string(),
+            });
+        }
+
+        let mut image_store = ImageStore::open()?;
+        let kernel_path = canonicalize_optional_existing_path(request.kernel.as_deref(), "kernel")?;
+        let initramfs_path =
+            canonicalize_optional_existing_path(request.initramfs.as_deref(), "initramfs")?;
+        let userdata_path =
+            canonicalize_optional_existing_path(request.userdata.as_deref(), "userdata")?;
+        let disk_paths = canonicalize_existing_paths(&request.disks, "disk")?;
+
+        let selected_image = match image_store.resolve(&request.image_ref)? {
+            Some(image) => image,
+            None => image_store.pull(&request.image_ref, None)?,
+        };
+
+        let capabilities = default_capabilities();
+        let bootstrap = (userdata_path.is_some()
+            || capabilities.requires_bootstrap()
+            || request.rosetta)
+            .then(|| Bootstrap {
+                cloud_init: userdata_path.clone(),
+            });
+
+        if bootstrap.is_some() && !selected_image.metadata.bootstrap.cidata_cloud_init {
+            return Err(LibVmError::InvalidCreateRequest {
+                name: request.name,
+                reason: "instance requires bootstrap for userdata or resolved capabilities, but the selected image does not advertise bootstrap support".to_string(),
+            });
+        }
+
+        let resolved_kernel =
+            kernel_path.or_else(|| image_store.image_kernel_path(&selected_image));
+        let resolved_initramfs =
+            initramfs_path.or_else(|| image_store.image_initramfs_path(&selected_image));
+        let resolved_cpus = request.cpus.unwrap_or(selected_image.metadata.defaults.cpu);
+        let resolved_memory = request
+            .memory_mib
+            .unwrap_or(selected_image.metadata.defaults.memory_mib);
+
+        let spec = VmSpec {
+            version: 1,
+            name: request.name.clone(),
+            platform: Platform {
+                guest_os: guest_os_from_image(&selected_image.metadata.os)?,
+                architecture: architecture_from_image(&selected_image.metadata.arch)?,
+                backend: Backend::Auto,
+            },
+            resources: Resources {
+                cpus: resolved_cpus,
+                memory_mib: resolved_memory,
+            },
+            boot: Boot {
+                kernel: resolved_kernel,
+                initramfs: resolved_initramfs,
+                kernel_cmdline: Vec::new(),
+                bootstrap,
+            },
+            storage: Storage {
+                disks: std::iter::once(Disk {
+                    path: PathBuf::from(InstanceFile::RootDisk.as_str()),
+                    kind: DiskKind::Root,
+                    read_only: false,
+                })
+                .chain(disk_paths.into_iter().map(|path| Disk {
+                    path,
+                    kind: DiskKind::Data,
+                    read_only: false,
+                }))
+                .collect(),
+            },
+            mounts: request.mounts,
+            network: Network {
+                mode: request.network.unwrap_or(NetworkMode::User),
+            },
+            guest: Guest {
+                profiles: request.profiles,
+                capabilities: capabilities_to_spec(&capabilities),
+            },
+            host: Host {
+                nested_virtualization: request.nested_virtualization,
+                rosetta: request.rosetta,
+            },
+        };
+
+        let pending = self.create_pending(spec)?;
+        let rootfs_path = pending.dir().join(InstanceFile::RootDisk.as_str());
+        image_store.clone_base_image(&selected_image, &rootfs_path)?;
+
+        if let Some(size_bytes) = gigabytes_to_bytes_checked(request.disk_size_gb) {
+            ImageStore::resize_raw_disk(&rootfs_path, size_bytes)?;
+        }
+
+        pending.commit(self)
+    }
+
+    pub fn create_raw(
+        &self,
+        request: CreateRawMachineRequest,
+    ) -> Result<MachineRecord, LibVmError> {
+        if request.rootfs.is_some() && request.empty_rootfs_gb.is_some() {
+            return Err(LibVmError::InvalidCreateRequest {
+                name: request.name,
+                reason: "--rootfs and --empty-rootfs are mutually exclusive".to_string(),
+            });
+        }
+        if matches!(request.empty_rootfs_gb, Some(0)) {
+            return Err(LibVmError::InvalidCreateRequest {
+                name: request.name,
+                reason: "--empty-rootfs must be greater than 0".to_string(),
+            });
+        }
+
+        let kernel_path = canonicalize_optional_existing_path(request.kernel.as_deref(), "kernel")?;
+        let initramfs_path =
+            canonicalize_optional_existing_path(request.initramfs.as_deref(), "initramfs")?;
+        let rootfs_path = canonicalize_optional_existing_path(request.rootfs.as_deref(), "rootfs")?;
+        let disk_paths = canonicalize_existing_paths(&request.disks, "disk")?;
+
+        let capabilities = default_capabilities();
+        let bootstrap = (capabilities.requires_bootstrap() || request.rosetta)
+            .then_some(Bootstrap { cloud_init: None });
+
+        let mut disks = Vec::new();
+        if let Some(path) = rootfs_path.clone() {
+            disks.push(Disk {
+                path,
+                kind: DiskKind::Root,
+                read_only: false,
+            });
+        } else if request.empty_rootfs_gb.is_some() {
+            disks.push(Disk {
+                path: PathBuf::from(InstanceFile::RootDisk.as_str()),
+                kind: DiskKind::Root,
+                read_only: false,
+            });
+        }
+        disks.extend(disk_paths.into_iter().map(|path| Disk {
+            path,
+            kind: DiskKind::Data,
+            read_only: false,
+        }));
+
+        let spec = VmSpec {
+            version: 1,
+            name: request.name.clone(),
+            platform: Platform {
+                guest_os: GuestOs::Linux,
+                architecture: host_architecture(),
+                backend: Backend::Auto,
+            },
+            resources: Resources {
+                cpus: request.cpus,
+                memory_mib: request.memory_mib,
+            },
+            boot: Boot {
+                kernel: kernel_path,
+                initramfs: initramfs_path,
+                kernel_cmdline: Vec::new(),
+                bootstrap,
+            },
+            storage: Storage { disks },
+            mounts: request.mounts,
+            network: Network {
+                mode: request.network.unwrap_or(NetworkMode::User),
+            },
+            guest: Guest {
+                profiles: request.profiles,
+                capabilities: capabilities_to_spec(&capabilities),
+            },
+            host: Host {
+                nested_virtualization: request.nested_virtualization,
+                rosetta: request.rosetta,
+            },
+        };
+
+        let pending = self.create_pending(spec)?;
+
+        if let Some(size_gb) = request.empty_rootfs_gb {
+            let rootfs = pending.dir().join(InstanceFile::RootDisk.as_str());
+            fs::File::create(&rootfs)?.set_len(size_gb.saturating_mul(BYTES_PER_GB))?;
+        }
+
+        pending.commit(self)
     }
 
     pub fn create_pending(&self, spec: VmSpec) -> Result<PendingMachine, LibVmError> {
@@ -118,6 +355,39 @@ impl LibVm {
         }
 
         self.state.remove_machine(&metadata)
+    }
+
+    pub fn register_existing(
+        &self,
+        id: MachineId,
+        spec: VmSpec,
+        instance_dir: PathBuf,
+    ) -> Result<MachineRecord, LibVmError> {
+        let expected_dir = self.layout.instance_dir(id);
+        if instance_dir != expected_dir {
+            return Err(LibVmError::InvalidCreateRequest {
+                name: spec.name,
+                reason: format!(
+                    "migrated instance directory must be {}, got {}",
+                    expected_dir.display(),
+                    instance_dir.display()
+                ),
+            });
+        }
+
+        if !instance_dir.is_dir() {
+            return Err(LibVmError::InvalidCreateRequest {
+                name: spec.name,
+                reason: format!(
+                    "migrated instance directory does not exist: {}",
+                    instance_dir.display()
+                ),
+            });
+        }
+
+        let metadata = metadata_from_path(id, spec.name.clone(), &instance_dir);
+        self.state.insert_machine(&metadata)?;
+        self.machine_record(metadata)
     }
 
     pub async fn start(
@@ -193,6 +463,84 @@ impl LibVm {
     }
 }
 
+fn default_capabilities() -> CapabilitiesConfig {
+    CapabilitiesConfig::default()
+}
+
+fn capabilities_to_spec(capabilities: &CapabilitiesConfig) -> Capabilities {
+    Capabilities {
+        ssh: capabilities.ssh.enabled,
+        docker: false,
+        dns: capabilities.dns.enabled,
+        forward: capabilities.forward.enabled,
+    }
+}
+
+fn guest_os_from_image(os: &str) -> Result<GuestOs, LibVmError> {
+    match os {
+        "linux" => Ok(GuestOs::Linux),
+        other => Err(LibVmError::UnsupportedImageGuestOs {
+            os: other.to_string(),
+        }),
+    }
+}
+
+fn architecture_from_image(arch: &str) -> Result<Architecture, LibVmError> {
+    match arch {
+        "arm64" | "aarch64" => Ok(Architecture::Aarch64),
+        "amd64" | "x86_64" => Ok(Architecture::X86_64),
+        other => Err(LibVmError::UnsupportedImageArchitecture {
+            arch: other.to_string(),
+        }),
+    }
+}
+
+fn host_architecture() -> Architecture {
+    match std::env::consts::ARCH {
+        "aarch64" => Architecture::Aarch64,
+        _ => Architecture::X86_64,
+    }
+}
+
+fn gigabytes_to_bytes(size_gb: u64) -> u64 {
+    size_gb.saturating_mul(BYTES_PER_GB)
+}
+
+fn gigabytes_to_bytes_checked(size_gb: Option<u64>) -> Option<u64> {
+    size_gb.map(gigabytes_to_bytes)
+}
+
+fn canonicalize_optional_existing_path(
+    path: Option<&Path>,
+    kind: &str,
+) -> Result<Option<PathBuf>, LibVmError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+
+    Ok(Some(canonicalize_existing_path(path, kind)?))
+}
+
+fn canonicalize_existing_paths(paths: &[PathBuf], kind: &str) -> Result<Vec<PathBuf>, LibVmError> {
+    paths
+        .iter()
+        .map(|path| canonicalize_existing_path(path, kind))
+        .collect()
+}
+
+fn canonicalize_existing_path(path: &Path, kind: &str) -> Result<PathBuf, LibVmError> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+
+    std::fs::canonicalize(&abs).map_err(|err| LibVmError::InvalidCreateRequest {
+        name: kind.to_string(),
+        reason: format!("{kind} path does not exist: {} ({err})", abs.display()),
+    })
+}
+
 fn spawn_vmmon(instance_dir: &Path, profiles: &[String]) -> Result<OwnedFd, LibVmError> {
     let (read_fd, write_fd) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
     let flags =
@@ -202,7 +550,7 @@ fn spawn_vmmon(instance_dir: &Path, profiles: &[String]) -> Result<OwnedFd, LibV
     fcntl(&write_fd, FcntlArg::F_SETFD(fd_flags))
         .map_err(|err| io::Error::other(err.to_string()))?;
 
-    let mut command = Command::new(resolve_vmmon_executable());
+    let mut command = Command::new(resolve_vmmon_executable()?);
     command.arg("--data-dir").arg(instance_dir);
     command
         .arg("--startup-fd")
@@ -229,22 +577,27 @@ fn spawn_vmmon(instance_dir: &Path, profiles: &[String]) -> Result<OwnedFd, LibV
     Ok(read_fd)
 }
 
-fn resolve_vmmon_executable() -> PathBuf {
-    let fallback = PathBuf::from("vmmon");
+fn resolve_vmmon_executable() -> Result<PathBuf, LibVmError> {
+    let current_exe = std::env::current_exe()?;
+    let expected_path = current_exe
+        .parent()
+        .map(|parent| parent.join("vmmon"))
+        .unwrap_or_else(|| PathBuf::from("vmmon"));
 
-    let Ok(current_exe) = std::env::current_exe() else {
-        return fallback;
-    };
-    let Some(parent) = current_exe.parent() else {
-        return fallback;
-    };
-
-    let sibling = parent.join("vmmon");
-    if sibling.exists() {
-        sibling
-    } else {
-        fallback
+    if expected_path.exists() {
+        return Ok(expected_path);
     }
+
+    if let Some(path) = std::env::var_os("PATH") {
+        if std::env::split_paths(&path)
+            .map(|path| path.join("vmmon"))
+            .any(|candidate| candidate.exists())
+        {
+            return Ok(PathBuf::from("vmmon"));
+        }
+    }
+
+    Err(LibVmError::VmMonExecutableNotFound { expected_path })
 }
 
 async fn wait_for_monitor_start(

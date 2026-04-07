@@ -335,12 +335,27 @@ name = "bento-libvm"
 version = "0.1.0"
 dependencies = [
  "bento-core",
+ "bento-runtime",
  "nix 0.31.1",
  "redb",
  "serde_yaml_ng",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "bento-migrate-daemonless"
+version = "0.1.0"
+dependencies = [
+ "bento-core",
+ "bento-libvm",
+ "bento-runtime",
+ "clap",
+ "eyre",
+ "nix 0.31.1",
+ "serde_yaml_ng",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -451,6 +466,7 @@ name = "bentoctl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bento-core",
  "bento-libvm",
  "bento-protocol",
  "bento-runtime",

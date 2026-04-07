@@ -29,6 +29,20 @@ pub enum LibVmError {
     #[error("machine {reference} is not running")]
     MachineNotRunning { reference: String },
 
+    #[error(
+        "vmmon executable not found. Expected a sibling binary at {expected_path} or `vmmon` in PATH. Build it with `cargo build -p bento-vmmon` (or `cargo build --release -p bento-vmmon`)."
+    )]
+    VmMonExecutableNotFound { expected_path: PathBuf },
+
+    #[error("invalid create request for machine {name:?}: {reason}")]
+    InvalidCreateRequest { name: String, reason: String },
+
+    #[error("unsupported image architecture {arch:?}")]
+    UnsupportedImageArchitecture { arch: String },
+
+    #[error("unsupported image guest OS {os:?}")]
+    UnsupportedImageGuestOs { os: String },
+
     #[error("machine {id} metadata is missing required field {field}")]
     CorruptState { id: MachineId, field: &'static str },
 
@@ -67,4 +81,7 @@ pub enum LibVmError {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    ImageStore(#[from] bento_runtime::images::store::ImageStoreError),
 }

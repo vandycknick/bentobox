@@ -81,16 +81,16 @@ impl BentoCtlCmd {
     async fn invoke_sub_command(&self) -> eyre::Result<()> {
         match &self.cmd {
             Command::Create(cmd) => {
-                let store = instance_store();
-                cmd.run(&store).await
+                let libvm = libvm()?;
+                cmd.run(&libvm).await
             }
             Command::New(cmd) => {
-                let store = instance_store();
-                cmd.run(&store).await
+                let libvm = libvm()?;
+                cmd.run(&libvm).await
             }
             Command::CreateRaw(cmd) => {
-                let store = instance_store();
-                cmd.run(&store).await
+                let libvm = libvm()?;
+                cmd.run(&libvm).await
             }
             Command::Start(cmd) => {
                 let libvm = libvm()?;

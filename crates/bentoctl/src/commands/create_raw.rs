@@ -1,15 +1,10 @@
-use bento_runtime::capabilities::CapabilitiesConfig;
-use bento_runtime::instance::{
-    BootstrapConfig, InstanceFile, MountConfig, NetworkConfig, NetworkMode,
-};
-use bento_runtime::instance_store::{InstanceCreateOptions, InstanceStore};
-use bento_vmmon::machine::prepare_instance;
+use bento_core::Mount;
+use bento_libvm::{CreateRawMachineRequest, LibVm};
+use bento_runtime::instance::{MountConfig, NetworkMode};
 use clap::Args;
 use eyre::Context;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
-
-const BYTES_PER_GB: u64 = 1_000_000_000;
 
 #[derive(Args, Debug)]
 pub struct Cmd {
@@ -66,52 +61,24 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
-        if self.rootfs.is_some() && self.empty_rootfs.is_some() {
-            eyre::bail!("--rootfs and --empty-rootfs are mutually exclusive");
-        }
-        if matches!(self.empty_rootfs, Some(0)) {
-            eyre::bail!("--empty-rootfs must be greater than 0");
-        }
+    pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
+        let request = CreateRawMachineRequest {
+            name: self.name.clone(),
+            cpus: self.cpus,
+            memory_mib: self.memory,
+            kernel: resolve_optional_path(self.kernel.as_deref(), "kernel")?,
+            initramfs: resolve_optional_path(self.initramfs.as_deref(), "initramfs")?,
+            rootfs: resolve_optional_path(self.rootfs.as_deref(), "rootfs")?,
+            empty_rootfs_gb: self.empty_rootfs,
+            nested_virtualization: self.nested_virtualization,
+            rosetta: self.rosetta,
+            disks: resolve_existing_paths(&self.disks, "disk")?,
+            mounts: self.mounts.iter().cloned().map(mount_to_spec).collect(),
+            network: self.network.map(map_network_mode),
+            profiles: self.profiles.clone(),
+        };
 
-        let kernel_path = resolve_optional_path(self.kernel.as_deref(), "kernel")?;
-        let initramfs_path = resolve_optional_path(self.initramfs.as_deref(), "initramfs")?;
-        let rootfs_path = resolve_optional_path(self.rootfs.as_deref(), "rootfs")?;
-        let disk_paths = resolve_existing_paths(&self.disks, "disk")?;
-
-        let capabilities = CapabilitiesConfig::default();
-        let bootstrap = (capabilities.requires_bootstrap() || self.rosetta)
-            .then(BootstrapConfig::cidata_cloud_init);
-
-        let options = InstanceCreateOptions::default()
-            .with_cpus(self.cpus)
-            .with_memory(self.memory)
-            .with_kernel(kernel_path)
-            .with_initramfs(initramfs_path)
-            .with_root_disk(rootfs_path)
-            .with_nested_virtualization(self.nested_virtualization)
-            .with_rosetta(self.rosetta)
-            .with_disks(disk_paths)
-            .with_mounts(self.mounts.clone())
-            .with_network(self.network.map(|mode| NetworkConfig { mode }))
-            .with_bootstrap(bootstrap)
-            .with_profiles(self.profiles.clone())
-            .with_capabilities(capabilities);
-
-        let pending = store.create_pending(&self.name, options)?;
-        let inst = pending.instance();
-
-        prepare_instance(inst)?;
-
-        if let Some(size_gb) = self.empty_rootfs {
-            let rootfs = inst.file(InstanceFile::RootDisk);
-            std::fs::File::create(&rootfs)
-                .context("create empty rootfs file")?
-                .set_len(size_gb.saturating_mul(BYTES_PER_GB))
-                .context("size empty rootfs file")?;
-        }
-
-        pending.commit()?;
+        libvm.create_raw(request)?;
 
         println!("created {}", self.name);
         Ok(())
@@ -144,4 +111,21 @@ fn resolve_existing_path(path: &Path, kind: &str) -> eyre::Result<PathBuf> {
         .context(format!("{kind} path does not exist: {}", abs.display()))?;
 
     Ok(abs)
+}
+
+fn map_network_mode(mode: NetworkMode) -> bento_core::NetworkMode {
+    match mode {
+        NetworkMode::VzNat => bento_core::NetworkMode::User,
+        NetworkMode::None => bento_core::NetworkMode::None,
+        NetworkMode::Bridged => bento_core::NetworkMode::Bridged,
+        NetworkMode::Cni => bento_core::NetworkMode::User,
+    }
+}
+
+fn mount_to_spec(mount: MountConfig) -> Mount {
+    Mount {
+        source: mount.location,
+        tag: String::new(),
+        read_only: !mount.writable,
+    }
 }

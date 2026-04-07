@@ -1,18 +1,12 @@
-use bento_runtime::capabilities::CapabilitiesConfig;
-use bento_runtime::images::store::ImageStore;
-use bento_runtime::instance::{
-    BootstrapConfig, InstanceFile, MountConfig, NetworkConfig, NetworkMode,
-};
-use bento_runtime::instance_store::{InstanceCreateOptions, InstanceStore};
-use bento_vmmon::machine::prepare_instance;
+use bento_core::Mount;
+use bento_libvm::{CreateMachineRequest, LibVm};
+use bento_runtime::instance::{MountConfig, NetworkMode};
 use clap::Args;
 use eyre::Context;
 use std::{
     fmt::{Display, Formatter},
     path::{Path, PathBuf},
 };
-
-const BYTES_PER_GB: u64 = 1_000_000_000;
 
 #[derive(Args, Debug)]
 pub struct Cmd {
@@ -66,83 +60,29 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
-        let mut image_store = ImageStore::open()?;
-
-        if matches!(self.disk_size, Some(0)) {
-            eyre::bail!("--disk-size must be greater than 0");
-        }
-
-        let kernel_path = resolve_optional_path(self.kernel.as_deref(), "kernel")?;
-        let initramfs_path = resolve_optional_path(self.initramfs.as_deref(), "initramfs")?;
-        let userdata_path = resolve_optional_path(self.userdata.as_deref(), "userdata")?;
-        let disk_paths = resolve_existing_paths(&self.disks, "disk")?;
-
-        let selected_image = match image_store.resolve(&self.image_ref)? {
-            Some(image) => image,
-            None => image_store.pull(&self.image_ref, None)?,
+    pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
+        let request = CreateMachineRequest {
+            image_ref: self.image_ref.clone(),
+            name: self.name.clone(),
+            cpus: self.cpus,
+            memory_mib: self.memory,
+            kernel: resolve_optional_path(self.kernel.as_deref(), "kernel")?,
+            initramfs: resolve_optional_path(self.initramfs.as_deref(), "initramfs")?,
+            disk_size_gb: self.disk_size,
+            nested_virtualization: self.nested_virtualization,
+            rosetta: self.rosetta,
+            userdata: resolve_optional_path(self.userdata.as_deref(), "userdata")?,
+            disks: resolve_existing_paths(&self.disks, "disk")?,
+            mounts: self.mounts.iter().cloned().map(mount_to_spec).collect(),
+            network: self.network.map(map_network_mode),
+            profiles: self.profiles.clone(),
         };
 
-        let capabilities = CapabilitiesConfig::default();
-
-        let bootstrap =
-            (userdata_path.is_some() || capabilities.requires_bootstrap() || self.rosetta)
-                .then(BootstrapConfig::cidata_cloud_init);
-
-        if bootstrap.is_some() && !selected_image.metadata.bootstrap.cidata_cloud_init {
-            eyre::bail!(
-                "instance requires bootstrap for userdata or resolved capabilities, but the selected image does not advertise bootstrap support"
-            );
-        }
-
-        let resolved_kernel =
-            kernel_path.or_else(|| image_store.image_kernel_path(&selected_image));
-        let resolved_initramfs =
-            initramfs_path.or_else(|| image_store.image_initramfs_path(&selected_image));
-        let resolved_cpus = self.cpus.unwrap_or(selected_image.metadata.defaults.cpu);
-        let resolved_memory = self
-            .memory
-            .unwrap_or(selected_image.metadata.defaults.memory_mib);
-
-        let options = InstanceCreateOptions::default()
-            .with_cpus(resolved_cpus)
-            .with_memory(resolved_memory)
-            .with_kernel(resolved_kernel)
-            .with_initramfs(resolved_initramfs)
-            .with_nested_virtualization(self.nested_virtualization)
-            .with_rosetta(self.rosetta)
-            .with_disks(disk_paths)
-            .with_mounts(self.mounts.clone())
-            .with_network(self.network.map(|mode| NetworkConfig { mode }))
-            .with_bootstrap(bootstrap)
-            .with_profiles(self.profiles.clone())
-            .with_capabilities(capabilities)
-            .with_userdata(userdata_path);
-
-        let pending = store.create_pending(&self.name, options)?;
-        let inst = pending.instance();
-
-        prepare_instance(inst)?;
-
-        image_store.clone_base_image(&selected_image, &inst.file(InstanceFile::RootDisk))?;
-
-        if let Some(size_bytes) = gigabytes_to_bytes_checked(self.disk_size) {
-            ImageStore::resize_raw_disk(&inst.file(InstanceFile::RootDisk), size_bytes)?;
-        }
-
-        pending.commit()?;
+        libvm.create_from_image(request)?;
 
         println!("created {}", self.name);
         Ok(())
     }
-}
-
-fn gigabytes_to_bytes(size_gb: u64) -> u64 {
-    size_gb.saturating_mul(BYTES_PER_GB)
-}
-
-fn gigabytes_to_bytes_checked(size_gb: Option<u64>) -> Option<u64> {
-    size_gb.map(gigabytes_to_bytes)
 }
 
 fn resolve_optional_path(path: Option<&Path>, kind: &str) -> eyre::Result<Option<PathBuf>> {
@@ -208,6 +148,28 @@ pub(crate) fn parse_network_mode(input: &str) -> Result<NetworkMode, String> {
             "invalid network mode '{input}', expected one of: vznat, none, bridged, cni"
         )),
     }
+}
+
+fn map_network_mode(mode: NetworkMode) -> bento_core::NetworkMode {
+    match mode {
+        NetworkMode::VzNat => bento_core::NetworkMode::User,
+        NetworkMode::None => bento_core::NetworkMode::None,
+        NetworkMode::Bridged => bento_core::NetworkMode::Bridged,
+        NetworkMode::Cni => bento_core::NetworkMode::User,
+    }
+}
+
+fn mount_to_spec(mount: MountConfig) -> Mount {
+    Mount {
+        source: mount.location,
+        tag: String::new(),
+        read_only: !mount.writable,
+    }
+}
+
+#[cfg(test)]
+fn gigabytes_to_bytes(size_gb: u64) -> u64 {
+    size_gb.saturating_mul(1_000_000_000)
 }
 
 #[cfg(test)]

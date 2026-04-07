@@ -276,6 +276,50 @@ The architecture depends on stable machine identity, manager-owned metadata, and
 - Existing machine compatibility may be trickier than expected.
 - Partial writes during create must be handled transactionally enough to avoid orphaned directories or DB records.
 
+## Phase 4.5: One-off local migration tool
+
+### Goal
+
+Provide a one-off local tool that migrates existing old-world VMs into the new ULID, `VmSpec`, and `redb`-backed layout.
+
+### Why this phase exists
+
+The new architecture no longer treats the old name-based instance layout as a long-term compatibility target. Existing machines therefore need a one-time migration path rather than a permanent compatibility layer.
+
+### Deliverables
+
+- a one-off local migration tool in the workspace
+- dry-run support
+- per-VM or all-VM execution
+- explicit refusal to migrate running VMs
+
+### Tasks
+
+- [x] Add a one-off migration tool, likely as a small Rust workspace crate or internal bin.
+- [x] Discover old-world instance directories.
+- [x] Parse old `InstanceConfig` from old-world `config.yaml`.
+- [x] Convert old config into canonical `VmSpec`.
+- [x] Allocate a new ULID for each migrated VM.
+- [x] Move each VM into `~/.local/share/bento/instances/<ulid>/`.
+- [x] Rewrite `config.yaml` as canonical `VmSpec`.
+- [x] Insert name and ULID mappings into `~/.local/share/bento/state.redb`.
+- [x] Refuse to migrate any VM whose `id.pid` points to a live process.
+- [x] Support dry-run output before making changes.
+
+### Status
+
+- A one-off migration tool crate now exists at `crates/bento-migrate-daemonless`.
+- The tool supports dry-run by default and `--execute` to apply migrations.
+- The tool supports `--all` or explicit VM names.
+- The tool refuses any VM whose `id.pid` points to a live process.
+- The tool migrates old-world configs into canonical `VmSpec`, moves the directory into the ULID-backed layout, and registers the migrated VM in `redb`.
+
+### Exit Criteria
+
+- Existing stopped VMs can be migrated into the new layout.
+- Running VMs are refused explicitly and safely.
+- The tool is good enough for one-time local use and does not introduce a new compatibility layer.
+
 ## Phase 5: Rename and restructure `bento-instanced` into `bento-vmmon`
 
 ### Goal
@@ -443,6 +487,8 @@ The migration is not complete until the CLI is thin and the old ownership paths 
 
 - `bentoctl list` now reads machines through `bento-libvm`.
 - `bentoctl delete` now removes machines through `bento-libvm`.
+- `bentoctl create` now routes through `bento-libvm` and creates machines directly in the ULID, `VmSpec`, and `redb`-backed layout.
+- `bentoctl create-raw` now routes through `bento-libvm` and creates raw machines directly in the new layout.
 - `bentoctl start` now routes through `bento-libvm`, which spawns `vmmon --data-dir ...`.
 - `bentoctl stop` now routes through `bento-libvm`, which signals `vmmon` by pidfile for the new path.
 - `status`, `shell`, and `exec` still depend on the old runtime and monitor path for now because they are tied to the current monitor socket contract.
@@ -473,8 +519,8 @@ These are not standalone phases, but they must be handled throughout the migrati
 
 ### Compatibility and migration
 
-- [ ] Decide how existing name-based instance directories are discovered or migrated.
-- [ ] Decide whether manager state can be lazily reconstructed from disk for legacy instances.
+- [x] Decide how existing name-based instance directories are discovered or migrated.
+- [x] Decide whether manager state can be lazily reconstructed from disk for legacy instances.
 - [ ] Decide the exact cutover point where old CLI ownership paths are removed.
 
 ### Error handling and observability
@@ -487,11 +533,11 @@ These are not standalone phases, but they must be handled throughout the migrati
 
 The next implementation slice should be:
 
-1. Phase 2, create `bento-core`
-2. Define machine identity and `VmSpec`
-3. Add serialization tests
+1. Add the one-off local migration tool for existing old-world VMs.
+2. Move monitor connection and Negotiate client ownership into `bento-libvm`.
+3. Route `status`, `shell`, and `exec` through `bento-libvm`.
 
-That gives the migration a stable contract before moving storage or process ownership.
+That closes the remaining gap between the new manager/monitor lifecycle and the old CLI-owned monitor protocol path.
 
 ## Change Log
 
@@ -508,5 +554,7 @@ Add dated notes here whenever the migration plan changes materially.
 - 2026-04-06: Phase 5 progressed, `vmmon` startup now reports `Started` and `Failed` over a startup pipe.
 - 2026-04-06: Phase 5 progressed, `vmmon` data-dir path now consumes `VmSpec` directly and the temporary `VmSpec -> InstanceConfig` adapter was removed.
 - 2026-04-06: Phase 5 progressed, `vmmon` no longer supports legacy `--name` startup and `MonitorConfig` was collapsed into `VmContext`.
+- 2026-04-06: Phase 7 progressed, `bentoctl create` and `create-raw` now route through `bento-libvm`, so new machines are created directly in the new layout.
 - 2026-04-06: Phase 7 progressed, `bentoctl start` now routes through `bento-libvm`, which owns `vmmon` spawning for the new path.
 - 2026-04-06: Phase 7 progressed, `bentoctl stop` now routes through `bento-libvm`, and the old CLI daemon-control module was removed.
+- 2026-04-06: Phase 4.5 started, `bento-migrate-daemonless` was added as a one-off local migration tool for old-world VMs.

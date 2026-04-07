@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 bento-core = { path = "../bento-core" }
+bento-runtime = { path = "../bento-runtime" }
 nix = { version = "0.31.1", features = ["process", "signal", "fs"] }
 redb = "4.0.0"
 serde_yaml_ng = "0.10.0"

@@ -5,6 +5,7 @@ edition = "2021"
 default-run = "bentoctl"
 
 [dependencies]
+bento-core = { path = "../bento-core" }
 bento-libvm = { path = "../bento-libvm" }
 anyhow = "1.0.89"
 bento-vmmon = { path = "../bento-instanced" }
