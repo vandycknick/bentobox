@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use bento_runtime::instance_store::InstanceStore;
+use bento_libvm::{LibVm, MachineRef};
 use clap::Args;
 
 #[derive(Args, Debug)]
@@ -15,10 +15,9 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
-        let inst = store.inspect(&self.name)?;
-
-        store.delete(&inst)?;
+    pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
+        let machine = MachineRef::parse(self.name.clone())?;
+        libvm.remove(&machine)?;
 
         println!("deleted {}", self.name);
         Ok(())

@@ -167,7 +167,7 @@ The CLI must eventually stop owning business logic, and runtime policy must move
 - [x] Add instance-dir path helpers for ULID-backed paths.
 - [x] Add manager-facing error types.
 - [x] Add machine lookup and identity resolution abstractions.
-- [ ] Add initial create/start/stop/list/inspect API skeletons.
+- [x] Add initial create/start/stop/list/inspect API skeletons.
 - [ ] Start moving `bento-runtime` policy code into `bento-libvm`.
 - [ ] Keep compatibility shims where needed so the workspace still builds.
 
@@ -203,7 +203,9 @@ The CLI must eventually stop owning business logic, and runtime policy must move
 - The first slice includes canonical data-dir and layout ownership, including `state.redb`, `instances/<ulid>/`, and `images/` path helpers.
 - `MachineRef` now provides the initial manager-facing name-vs-ULID lookup abstraction.
 - Manager-facing error types exist for layout resolution and machine-name validation.
-- Lifecycle APIs and runtime policy migration are still pending in this phase.
+- A first `LibVm` facade now exists with `create_pending`, `inspect`, and `list` methods.
+- `LibVm` now owns canonical `VmSpec` config writing for new machines and is backed by `redb` metadata for create, inspect, list, and remove.
+- Start and stop APIs, plus deeper runtime policy migration out of `bento-runtime`, are still pending in this phase.
 
 ### Risks
 
@@ -229,15 +231,15 @@ The architecture depends on stable machine identity, manager-owned metadata, and
 
 ### Tasks
 
-- [ ] Add `redb` dependency to the appropriate crate.
-- [ ] Define `redb` tables for machine identity and metadata.
-- [ ] Store ULID to name mapping.
-- [ ] Store name to ULID mapping.
-- [ ] Store instance directory path.
+- [x] Add `redb` dependency to the appropriate crate.
+- [x] Define `redb` tables for machine identity and metadata.
+- [x] Store ULID to name mapping.
+- [x] Store name to ULID mapping.
+- [x] Store instance directory path.
 - [ ] Store creation time, labels, restart policy, and related metadata.
-- [ ] Change machine creation to allocate ULIDs.
-- [ ] Change machine creation to create `instances/<ulid>/`.
-- [ ] Write `config.yaml` as the canonical machine config.
+- [x] Change machine creation to allocate ULIDs.
+- [x] Change machine creation to create `instances/<ulid>/`.
+- [x] Write `config.yaml` as the canonical machine config.
 - [ ] Add migration or compatibility behavior for existing name-based instance directories if needed.
 
 ### Detailed Steps
@@ -257,6 +259,14 @@ The architecture depends on stable machine identity, manager-owned metadata, and
 - New machines use `instances/<ulid>/config.yaml`.
 - `redb` stores the canonical name and ULID mappings.
 - Manager lookup no longer depends on machine names as directory names.
+
+### Status
+
+- `bento-libvm` now creates new machines with ULIDs.
+- New machine configs are written as canonical `VmSpec` YAML under `instances/<ulid>/config.yaml`.
+- `redb` now stores ULID-to-name, name-to-ULID, and instance-dir mappings for the new path.
+- Additional machine metadata such as creation time, labels, and restart policy are still pending.
+- Legacy instance migration behavior is still intentionally undefined.
 
 ### Risks
 
@@ -413,6 +423,12 @@ The migration is not complete until the CLI is thin and the old ownership paths 
 - `bento-vmmon` owns runtime supervision.
 - `bento-runtime` no longer exists or no longer owns manager/runtime business logic.
 
+### Status
+
+- `bentoctl list` now reads machines through `bento-libvm`.
+- `bentoctl delete` now removes machines through `bento-libvm`.
+- `status`, `start`, `stop`, `shell`, and `exec` still depend on the old runtime and monitor path for now because they are tied to the current monitor socket contract.
+
 ### Risks
 
 - Dead code may linger if cleanup is deferred too long.
@@ -465,3 +481,6 @@ Add dated notes here whenever the migration plan changes materially.
 - 2026-04-06: Initial migration plan created.
 - 2026-04-06: Phase 2 started, `bento-core` added with ULID-backed `MachineId` and initial `VmSpec` model.
 - 2026-04-06: Phase 3 started, `bento-libvm` added with layout helpers, `MachineRef`, and initial manager-facing error types.
+- 2026-04-06: Phase 3 progressed, `LibVm` facade added for create/list/inspect flows.
+- 2026-04-06: Phase 4 started, `bento-libvm` adopted `redb`, ULID-backed machine creation, and canonical `VmSpec` config writing.
+- 2026-04-06: Phase 7 started incrementally, `bentoctl list` and `bentoctl delete` now route through `bento-libvm`.

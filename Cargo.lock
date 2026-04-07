@@ -359,6 +359,8 @@ name = "bento-libvm"
 version = "0.1.0"
 dependencies = [
  "bento-core",
+ "redb",
+ "serde_yaml_ng",
  "tempfile",
  "thiserror 2.0.18",
 ]
@@ -445,6 +447,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bento-instanced",
+ "bento-libvm",
  "bento-protocol",
  "bento-runtime",
  "chrono",
@@ -2767,6 +2770,15 @@ name = "rand_core"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c8d0fd677905edcbeedbf2edb6494d676f0e98d54d5cf9bda0b061cb8fb8aba"
+
+[[package]]
+name = "redb"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67f7f231ea7b1172b7ac00ccf96b1250f0fb5a16d5585836aa4ebc997df7cbde"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "redox_syscall"

@@ -1,3 +1,4 @@
+use bento_libvm::LibVm;
 use clap::{Parser, Subcommand};
 use std::fmt::{Display, Formatter};
 
@@ -110,12 +111,12 @@ impl BentoCtlCmd {
                 cmd.run(&store).await
             }
             Command::Delete(cmd) => {
-                let store = instance_store();
-                cmd.run(&store).await
+                let libvm = libvm()?;
+                cmd.run(&libvm).await
             }
             Command::List(cmd) => {
-                let store = instance_store();
-                cmd.run(&store).await
+                let libvm = libvm()?;
+                cmd.run(&libvm).await
             }
             Command::Status(cmd) => {
                 let store = instance_store();
@@ -135,6 +136,10 @@ impl BentoCtlCmd {
 
 fn instance_store() -> InstanceStore {
     InstanceStore::new()
+}
+
+fn libvm() -> eyre::Result<LibVm> {
+    LibVm::from_env().context("initialize bento-libvm")
 }
 
 fn start_launcher(name: &str) -> eyre::Result<InstancedLauncher> {

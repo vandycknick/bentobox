@@ -22,7 +22,7 @@ impl MachineRef {
     }
 }
 
-fn validate_machine_name(name: &str) -> Result<(), LibVmError> {
+pub(crate) fn validate_machine_name(name: &str) -> Result<(), LibVmError> {
     if name.is_empty() {
         return Err(LibVmError::InvalidMachineName {
             name: name.to_string(),

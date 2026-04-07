@@ -6,6 +6,7 @@ use bento_core::MachineId;
 use crate::LibVmError;
 
 pub const STATE_DB_FILE_NAME: &str = "state.redb";
+pub const CONFIG_FILE_NAME: &str = "config.yaml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
@@ -37,6 +38,14 @@ impl Layout {
 
     pub fn instance_dir(&self, machine_id: MachineId) -> PathBuf {
         self.instances_dir().join(machine_id.to_string())
+    }
+
+    pub fn instance_config_path(&self, machine_id: MachineId) -> PathBuf {
+        self.instance_dir(machine_id).join(CONFIG_FILE_NAME)
+    }
+
+    pub fn staging_dir(&self) -> PathBuf {
+        self.instances_dir().join(".staging")
     }
 
     pub fn images_dir(&self) -> PathBuf {
@@ -98,6 +107,16 @@ mod tests {
         assert_eq!(
             layout.instance_dir(machine_id),
             PathBuf::from("/tmp/bento/instances").join(machine_id.to_string())
+        );
+        assert_eq!(
+            layout.staging_dir(),
+            PathBuf::from("/tmp/bento/instances/.staging")
+        );
+        assert_eq!(
+            layout.instance_config_path(machine_id),
+            PathBuf::from("/tmp/bento/instances")
+                .join(machine_id.to_string())
+                .join("config.yaml")
         );
     }
 
