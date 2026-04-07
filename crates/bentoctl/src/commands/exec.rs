@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use bento_libvm::{LibVm, MachineRef, MachineStatus};
+use bento_libvm::{LibVm, MachineRef};
 use clap::Args;
 use eyre::bail;
 
@@ -36,7 +36,7 @@ impl Cmd {
     pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
         let machine = libvm.inspect(&MachineRef::parse(self.name.clone())?)?;
 
-        if machine.status != MachineStatus::Running {
+        if !machine.status.is_running() {
             return Err(bento_libvm::LibVmError::MachineNotRunning {
                 reference: self.name.clone(),
             }

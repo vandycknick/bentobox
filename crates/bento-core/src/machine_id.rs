@@ -19,7 +19,16 @@ impl MachineId {
     pub fn as_uuid(&self) -> Uuid {
         self.0
     }
+
+    /// Returns the first 12 hex characters of the ID as a new `String`,
+    /// matching the short format used by `podman` and `docker`.
+    pub fn short(&self) -> String {
+        self.0.simple().to_string()[..SHORT_ID_LEN].to_string()
+    }
 }
+
+/// Number of hex characters shown in short ID output (matches podman/docker).
+pub const SHORT_ID_LEN: usize = 12;
 
 impl Default for MachineId {
     fn default() -> Self {
@@ -139,6 +148,15 @@ mod tests {
         assert!(looks_like_id_prefix("a1b2c3"));
         assert!(looks_like_id_prefix("deadbeef"));
         assert!(looks_like_id_prefix("0123456789abcdef0123456789abcdef"));
+    }
+
+    #[test]
+    fn short_returns_first_12_chars() {
+        let id = MachineId::new();
+        let full = id.to_string();
+        let short = id.short();
+        assert_eq!(short.len(), 12);
+        assert_eq!(short, &full[..12]);
     }
 
     #[test]

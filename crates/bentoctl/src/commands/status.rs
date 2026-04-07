@@ -1,7 +1,7 @@
 use clap::Args;
 use std::fmt::{Display, Formatter};
 
-use bento_libvm::{LibVm, MachineRef, MachineStatus};
+use bento_libvm::{LibVm, MachineRef};
 use bento_protocol::v1::LifecycleState;
 
 #[derive(Args, Debug)]
@@ -23,7 +23,7 @@ impl Cmd {
         println!("name: {}", machine.spec.name);
         println!("process: {:?}", machine.status);
 
-        if machine.status != MachineStatus::Running {
+        if !machine.status.is_running() {
             println!("ready: no");
             return Ok(());
         }

@@ -6,13 +6,14 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{Layout, LibVmError};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MachineMetadata {
     pub id: MachineId,
     pub name: String,
     pub instance_dir: String,
+    pub created_at: i64,
 }
 
 pub struct StateStore {
@@ -29,11 +30,12 @@ impl StateStore {
 
     pub fn insert_machine(&self, metadata: &MachineMetadata) -> Result<(), LibVmError> {
         self.conn.execute(
-            "INSERT INTO machines (id, name, instance_dir) VALUES (?1, ?2, ?3)",
+            "INSERT INTO machines (id, name, instance_dir, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![
                 metadata.id.to_string(),
                 metadata.name,
-                metadata.instance_dir
+                metadata.instance_dir,
+                metadata.created_at,
             ],
         )?;
         Ok(())
@@ -42,7 +44,7 @@ impl StateStore {
     pub fn get_machine_by_id(&self, id: MachineId) -> Result<Option<MachineMetadata>, LibVmError> {
         self.conn
             .query_row(
-                "SELECT id, name, instance_dir FROM machines WHERE id = ?1",
+                "SELECT id, name, instance_dir, created_at FROM machines WHERE id = ?1",
                 params![id.to_string()],
                 row_to_metadata,
             )
@@ -53,7 +55,7 @@ impl StateStore {
     pub fn get_machine_by_name(&self, name: &str) -> Result<Option<MachineMetadata>, LibVmError> {
         self.conn
             .query_row(
-                "SELECT id, name, instance_dir FROM machines WHERE name = ?1",
+                "SELECT id, name, instance_dir, created_at FROM machines WHERE name = ?1",
                 params![name],
                 row_to_metadata,
             )
@@ -68,7 +70,7 @@ impl StateStore {
         let pattern = format!("{prefix}%");
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, instance_dir FROM machines WHERE id LIKE ?1")?;
+            .prepare("SELECT id, name, instance_dir, created_at FROM machines WHERE id LIKE ?1")?;
         let rows = stmt.query_map(params![pattern], row_to_metadata)?;
         let mut machines = Vec::new();
         for row in rows {
@@ -80,7 +82,7 @@ impl StateStore {
     pub fn list_machines(&self) -> Result<Vec<MachineMetadata>, LibVmError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, instance_dir FROM machines ORDER BY name")?;
+            .prepare("SELECT id, name, instance_dir, created_at FROM machines ORDER BY name")?;
         let rows = stmt.query_map([], row_to_metadata)?;
         let mut machines = Vec::new();
         for row in rows {
@@ -121,6 +123,13 @@ fn run_migrations(conn: &Connection) -> Result<(), LibVmError> {
         )?;
     }
 
+    if version < 2 {
+        conn.execute_batch(
+            "ALTER TABLE machines ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
+            PRAGMA user_version = 2;",
+        )?;
+    }
+
     debug_assert_eq!(
         conn.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
             .unwrap_or(0),
@@ -140,7 +149,15 @@ fn row_to_metadata(row: &rusqlite::Row<'_>) -> rusqlite::Result<MachineMetadata>
         id,
         name: row.get(1)?,
         instance_dir: row.get(2)?,
+        created_at: row.get(3)?,
     })
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_secs() as i64
 }
 
 pub fn metadata_from_path(id: MachineId, name: String, instance_dir: &Path) -> MachineMetadata {
@@ -148,6 +165,7 @@ pub fn metadata_from_path(id: MachineId, name: String, instance_dir: &Path) -> M
         id,
         name,
         instance_dir: instance_dir.display().to_string(),
+        created_at: now_unix(),
     }
 }
 

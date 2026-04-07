@@ -1,4 +1,4 @@
-use bento_libvm::{LibVm, MachineRef, MachineStatus};
+use bento_libvm::{LibVm, MachineRef};
 use clap::{Args, ValueEnum};
 use std::fmt::{Display, Formatter};
 
@@ -49,7 +49,7 @@ impl Cmd {
         let machine_ref = MachineRef::parse(self.name.clone())?;
         let machine = libvm.inspect(&machine_ref)?;
 
-        if machine.status != MachineStatus::Running {
+        if !machine.status.is_running() {
             return Err(bento_libvm::LibVmError::MachineNotRunning {
                 reference: self.name.clone(),
             }

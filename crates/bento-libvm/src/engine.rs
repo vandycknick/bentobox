@@ -68,12 +68,23 @@ pub struct MachineRecord {
     pub spec: VmSpec,
     pub dir: PathBuf,
     pub status: MachineStatus,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MachineStatus {
-    Running,
+    /// VM is running. `started_at` is the unix timestamp when it started
+    /// (derived from the pidfile mtime).
+    Running {
+        started_at: i64,
+    },
     Stopped,
+}
+
+impl MachineStatus {
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Running { .. })
+    }
 }
 
 pub struct LibVm {
@@ -525,15 +536,25 @@ impl LibVm {
                 source,
             })?;
 
+        let pid_path = self.layout.monitor_pid_path(metadata.id);
+        let status = if pid_path.exists() {
+            let started_at = std::fs::metadata(&pid_path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            MachineStatus::Running { started_at }
+        } else {
+            MachineStatus::Stopped
+        };
+
         Ok(MachineRecord {
             id: metadata.id,
             spec,
             dir,
-            status: if self.layout.monitor_pid_path(metadata.id).exists() {
-                MachineStatus::Running
-            } else {
-                MachineStatus::Stopped
-            },
+            status,
+            created_at: metadata.created_at,
         })
     }
 
