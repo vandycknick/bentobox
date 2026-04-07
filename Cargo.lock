@@ -355,6 +355,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bento-libvm"
+version = "0.1.0"
+dependencies = [
+ "bento-core",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bento-protocol"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,79 @@
+use std::str::FromStr;
+
+use bento_core::MachineId;
+
+use crate::LibVmError;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MachineRef {
+    Id(MachineId),
+    Name(String),
+}
+
+impl MachineRef {
+    pub fn parse(input: impl Into<String>) -> Result<Self, LibVmError> {
+        let input = input.into();
+        if let Ok(id) = MachineId::from_str(&input) {
+            return Ok(Self::Id(id));
+        }
+
+        validate_machine_name(&input)?;
+        Ok(Self::Name(input))
+    }
+}
+
+fn validate_machine_name(name: &str) -> Result<(), LibVmError> {
+    if name.is_empty() {
+        return Err(LibVmError::InvalidMachineName {
+            name: name.to_string(),
+            reason: "name cannot be empty".to_string(),
+        });
+    }
+
+    if name.starts_with('-') {
+        return Err(LibVmError::InvalidMachineName {
+            name: name.to_string(),
+            reason: "name cannot start with '-'".to_string(),
+        });
+    }
+
+    if let Some(ch) = name
+        .chars()
+        .find(|ch| !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.'))
+    {
+        return Err(LibVmError::InvalidMachineName {
+            name: name.to_string(),
+            reason: format!("unsupported character {ch:?}"),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MachineRef;
+    use bento_core::MachineId;
+
+    #[test]
+    fn parse_treats_ulid_as_machine_id() {
+        let id = MachineId::new();
+        let machine_ref = MachineRef::parse(id.to_string()).expect("parse machine ref");
+
+        assert_eq!(machine_ref, MachineRef::Id(id));
+    }
+
+    #[test]
+    fn parse_treats_non_ulid_as_name() {
+        let machine_ref = MachineRef::parse("devbox").expect("parse machine ref");
+
+        assert_eq!(machine_ref, MachineRef::Name("devbox".to_string()));
+    }
+
+    #[test]
+    fn parse_rejects_invalid_name() {
+        let err = MachineRef::parse("bad/name").expect_err("invalid name should fail");
+
+        assert!(err.to_string().contains("unsupported character"));
+    }
+}

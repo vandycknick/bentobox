@@ -161,12 +161,12 @@ The CLI must eventually stop owning business logic, and runtime policy must move
 
 ### Tasks
 
-- [ ] Add `crates/bento-libvm/Cargo.toml`.
-- [ ] Add `crates/bento-libvm/src/lib.rs`.
-- [ ] Add top-level data-dir resolution helpers.
-- [ ] Add instance-dir path helpers for ULID-backed paths.
-- [ ] Add manager-facing error types.
-- [ ] Add machine lookup and identity resolution abstractions.
+- [x] Add `crates/bento-libvm/Cargo.toml`.
+- [x] Add `crates/bento-libvm/src/lib.rs`.
+- [x] Add top-level data-dir resolution helpers.
+- [x] Add instance-dir path helpers for ULID-backed paths.
+- [x] Add manager-facing error types.
+- [x] Add machine lookup and identity resolution abstractions.
 - [ ] Add initial create/start/stop/list/inspect API skeletons.
 - [ ] Start moving `bento-runtime` policy code into `bento-libvm`.
 - [ ] Keep compatibility shims where needed so the workspace still builds.
@@ -196,6 +196,14 @@ The CLI must eventually stop owning business logic, and runtime policy must move
 - `bento-libvm` exists and compiles.
 - New code can start depending on `bento-libvm` for manager concerns.
 - A meaningful slice of runtime policy has moved out of `bento-runtime`.
+
+### Status
+
+- `bento-libvm` has been added to the workspace.
+- The first slice includes canonical data-dir and layout ownership, including `state.redb`, `instances/<ulid>/`, and `images/` path helpers.
+- `MachineRef` now provides the initial manager-facing name-vs-ULID lookup abstraction.
+- Manager-facing error types exist for layout resolution and machine-name validation.
+- Lifecycle APIs and runtime policy migration are still pending in this phase.
 
 ### Risks
 
@@ -456,3 +464,4 @@ Add dated notes here whenever the migration plan changes materially.
 
 - 2026-04-06: Initial migration plan created.
 - 2026-04-06: Phase 2 started, `bento-core` added with ULID-backed `MachineId` and initial `VmSpec` model.
+- 2026-04-06: Phase 3 started, `bento-libvm` added with layout helpers, `MachineRef`, and initial manager-facing error types.
