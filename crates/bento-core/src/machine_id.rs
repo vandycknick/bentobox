@@ -1,23 +1,22 @@
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
-use ulid::Ulid;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct MachineId(Ulid);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MachineId(Uuid);
 
 impl MachineId {
     pub fn new() -> Self {
-        Self(Ulid::new())
+        Self(Uuid::new_v4())
     }
 
-    pub fn from_ulid(ulid: Ulid) -> Self {
-        Self(ulid)
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(uuid)
     }
 
-    pub fn as_ulid(&self) -> Ulid {
+    pub fn as_uuid(&self) -> Uuid {
         self.0
     }
 }
@@ -30,39 +29,125 @@ impl Default for MachineId {
 
 impl Display for MachineId {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.0, f)
+        write!(f, "{}", self.0.simple())
     }
 }
 
-impl From<Ulid> for MachineId {
-    fn from(value: Ulid) -> Self {
-        Self::from_ulid(value)
+impl From<Uuid> for MachineId {
+    fn from(value: Uuid) -> Self {
+        Self::from_uuid(value)
     }
 }
 
-impl From<MachineId> for Ulid {
+impl From<MachineId> for Uuid {
     fn from(value: MachineId) -> Self {
         value.0
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MachineIdParseError {
+    InvalidFormat(String),
+}
+
+impl std::fmt::Display for MachineIdParseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidFormat(input) => write!(f, "invalid machine id: {input:?}"),
+        }
+    }
+}
+
+impl std::error::Error for MachineIdParseError {}
+
 impl FromStr for MachineId {
-    type Err = ulid::DecodeError;
+    type Err = MachineIdParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ulid::from_string(s).map(Self)
+        Uuid::parse_str(s)
+            .map(Self)
+            .map_err(|_| MachineIdParseError::InvalidFormat(s.to_string()))
     }
+}
+
+impl Serialize for MachineId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for MachineId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Returns true if the input looks like a hex string that could be a machine
+/// ID prefix (3-32 hex characters). Requires at least 3 chars to avoid
+/// treating short names as ID prefixes.
+pub fn looks_like_id_prefix(input: &str) -> bool {
+    input.len() >= 3 && input.len() <= 32 && input.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::machine_id::looks_like_id_prefix;
+
     use super::MachineId;
 
     #[test]
     fn machine_id_round_trips_through_string() {
         let id = MachineId::new();
-        let parsed: MachineId = id.to_string().parse().expect("parse machine id");
-
+        let s = id.to_string();
+        assert_eq!(s.len(), 32, "should be 32 hex chars, got {s:?}");
+        let parsed: MachineId = s.parse().expect("parse machine id");
         assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn machine_id_display_is_lowercase_hex_no_dashes() {
+        let id = MachineId::new();
+        let s = id.to_string();
+        assert!(!s.contains('-'), "should not contain dashes: {s:?}");
+        assert_eq!(s, s.to_lowercase(), "should be lowercase: {s:?}");
+    }
+
+    #[test]
+    fn machine_id_parses_dashed_uuid() {
+        let id = MachineId::new();
+        let dashed = id.as_uuid().to_string();
+        let parsed: MachineId = dashed.parse().expect("parse dashed uuid");
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn machine_id_serde_round_trip() {
+        let id = MachineId::new();
+        let json = serde_json::to_string(&id).expect("serialize");
+        let parsed: MachineId = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, id);
+        // Should serialize as simple hex string
+        assert!(
+            !json.contains('-'),
+            "json should not contain dashes: {json}"
+        );
+    }
+
+    #[test]
+    fn looks_like_id_prefix_accepts_hex() {
+        assert!(looks_like_id_prefix("a1b2c3"));
+        assert!(looks_like_id_prefix("deadbeef"));
+        assert!(looks_like_id_prefix("0123456789abcdef0123456789abcdef"));
+    }
+
+    #[test]
+    fn looks_like_id_prefix_rejects_non_hex() {
+        assert!(!looks_like_id_prefix(""));
+        assert!(!looks_like_id_prefix("ab")); // too short
+        assert!(!looks_like_id_prefix("devbox"));
+        assert!(!looks_like_id_prefix("test-vm"));
+        // 33 chars is too long
+        assert!(!looks_like_id_prefix("0123456789abcdef0123456789abcdef0"));
     }
 }

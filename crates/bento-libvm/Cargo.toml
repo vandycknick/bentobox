@@ -9,7 +9,7 @@ bento-core = { path = "../bento-core" }
 bento-runtime = { path = "../bento-runtime" }
 hyper-util = "0.1.17"
 nix = { version = "0.31.1", features = ["process", "signal", "fs"] }
-redb = "4.0.0"
+rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde_yaml_ng = "0.10.0"
 thiserror = "2.0.18"
 tokio = { version = "1.48.0", features = ["time", "fs", "rt", "net", "io-util", "sync"] }

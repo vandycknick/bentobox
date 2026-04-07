@@ -5,7 +5,7 @@ use bento_core::MachineId;
 
 use crate::LibVmError;
 
-pub const STATE_DB_FILE_NAME: &str = "state.redb";
+pub const STATE_DB_FILE_NAME: &str = "state.db";
 pub const CONFIG_FILE_NAME: &str = "config.yaml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,10 +107,7 @@ mod tests {
         let machine_id = MachineId::new();
 
         assert_eq!(layout.data_dir(), PathBuf::from("/tmp/bento").as_path());
-        assert_eq!(
-            layout.state_db_path(),
-            PathBuf::from("/tmp/bento/state.redb")
-        );
+        assert_eq!(layout.state_db_path(), PathBuf::from("/tmp/bento/state.db"));
         assert_eq!(
             layout.instances_dir(),
             PathBuf::from("/tmp/bento/instances")

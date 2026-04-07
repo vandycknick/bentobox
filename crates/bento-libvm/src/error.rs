@@ -67,23 +67,11 @@ pub enum LibVmError {
         source: serde_yaml_ng::Error,
     },
 
-    #[error("redb state error: {0}")]
-    StateStore(#[from] redb::Error),
+    #[error("ambiguous machine id prefix {prefix:?} matched {count} machines")]
+    AmbiguousIdPrefix { prefix: String, count: usize },
 
     #[error(transparent)]
-    StateDatabase(#[from] redb::DatabaseError),
-
-    #[error(transparent)]
-    StateStorage(#[from] redb::StorageError),
-
-    #[error(transparent)]
-    StateTransaction(#[from] redb::TransactionError),
-
-    #[error(transparent)]
-    StateTable(#[from] redb::TableError),
-
-    #[error(transparent)]
-    StateCommit(#[from] redb::CommitError),
+    StateStore(#[from] rusqlite::Error),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

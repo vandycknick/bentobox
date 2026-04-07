@@ -358,39 +358,6 @@ impl LibVm {
         self.state.remove_machine(&metadata)
     }
 
-    pub fn register_existing(
-        &self,
-        id: MachineId,
-        spec: VmSpec,
-        instance_dir: PathBuf,
-    ) -> Result<MachineRecord, LibVmError> {
-        let expected_dir = self.layout.instance_dir(id);
-        if instance_dir != expected_dir {
-            return Err(LibVmError::InvalidCreateRequest {
-                name: spec.name,
-                reason: format!(
-                    "migrated instance directory must be {}, got {}",
-                    expected_dir.display(),
-                    instance_dir.display()
-                ),
-            });
-        }
-
-        if !instance_dir.is_dir() {
-            return Err(LibVmError::InvalidCreateRequest {
-                name: spec.name,
-                reason: format!(
-                    "migrated instance directory does not exist: {}",
-                    instance_dir.display()
-                ),
-            });
-        }
-
-        let metadata = metadata_from_path(id, spec.name.clone(), &instance_dir);
-        self.state.insert_machine(&metadata)?;
-        self.machine_record(metadata)
-    }
-
     pub async fn start(
         &self,
         machine: &MachineRef,
@@ -516,17 +483,35 @@ impl LibVm {
     }
 
     fn resolve_metadata(&self, machine: &MachineRef) -> Result<MachineMetadata, LibVmError> {
-        let metadata = match machine {
-            MachineRef::Id(id) => self.state.get_machine_by_id(*id)?,
-            MachineRef::Name(name) => self.state.get_machine_by_name(name)?,
-        };
-
-        metadata.ok_or_else(|| LibVmError::MachineNotFound {
-            reference: match machine {
-                MachineRef::Id(id) => id.to_string(),
-                MachineRef::Name(name) => name.clone(),
-            },
-        })
+        match machine {
+            MachineRef::Id(id) => {
+                self.state
+                    .get_machine_by_id(*id)?
+                    .ok_or_else(|| LibVmError::MachineNotFound {
+                        reference: id.to_string(),
+                    })
+            }
+            MachineRef::Name(name) => {
+                self.state
+                    .get_machine_by_name(name)?
+                    .ok_or_else(|| LibVmError::MachineNotFound {
+                        reference: name.clone(),
+                    })
+            }
+            MachineRef::IdPrefix(prefix) => {
+                let matches = self.state.get_machine_by_id_prefix(prefix)?;
+                match matches.len() {
+                    0 => Err(LibVmError::MachineNotFound {
+                        reference: prefix.clone(),
+                    }),
+                    1 => Ok(matches.into_iter().next().expect("just checked len == 1")),
+                    count => Err(LibVmError::AmbiguousIdPrefix {
+                        prefix: prefix.clone(),
+                        count,
+                    }),
+                }
+            }
+        }
     }
 
     fn machine_record(&self, metadata: MachineMetadata) -> Result<MachineRecord, LibVmError> {
@@ -960,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn inspect_and_list_use_redb_backed_name_and_id_lookup() {
+    fn inspect_and_list_use_name_and_id_lookup() {
         let temp = tempfile::tempdir().expect("create temp dir");
         let libvm = LibVm::new(Layout::new(temp.path().join("bento"))).expect("create libvm");
 
