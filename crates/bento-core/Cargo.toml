@@ -1,0 +1,11 @@
+[package]
+name = "bento-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0.217", features = ["derive"] }
+ulid = { version = "1.2.1", features = ["serde"] }
+
+[dev-dependencies]
+serde_yaml_ng = "0.10.0"
