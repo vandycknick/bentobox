@@ -397,15 +397,13 @@ fn cloud_mount_entries(config: &VmContext) -> Vec<[String; 6]> {
     config
         .mounts()
         .iter()
-        .enumerate()
         .map(|mount| {
-            let (index, mount) = mount;
             let path = resolve_mount_location(&mount.source)
                 .unwrap_or_else(|_| mount.source.clone())
                 .to_string_lossy()
                 .to_string();
             [
-                format!("mount{index}"),
+                mount.tag.clone(),
                 path,
                 "virtiofs".to_string(),
                 if mount.writable {

@@ -60,6 +60,7 @@ We will adopt the following architecture:
 - `bento-libvm` and `bento-vmmon` will synchronize startup using a dedicated startup pipe, not an RPC `Start` call.
 - `bento-libvm` will stop `bento-vmmon` using signals. `Stop` will not be part of `VmMonitorService`.
 - during migration, `bento-libvm` may temporarily use the monitor pidfile to signal `vmmon` for stop and to observe shutdown completion.
+- the daemonizing parent `vmmon` process forwards the child monitor startup result over the original startup pipe so `bento-libvm` still sees a single startup handshake.
 - The machine stable identity will be a ULID stored in `redb` and used as the per-instance directory name.
 - The canonical per-instance data directory will be `~/.local/share/bento/instances/<ulid>/`.
 - The canonical `redb` database location will be `~/.local/share/bento/state.redb`.
@@ -78,7 +79,8 @@ It owns:
 - argument parsing,
 - output formatting,
 - user interaction,
-- calling `bento-libvm`.
+- calling `bento-libvm`,
+- stdio proxying and local terminal handling once a monitor stream has already been opened by `bento-libvm`.
 
 It does not own:
 
@@ -128,6 +130,7 @@ It owns:
 - bootstrap and host-side integration policy,
 - spawning `bento-vmmon` in local ABI mode,
 - client-side Negotiate logic,
+- monitor connection logic for status, service readiness, and negotiated proxy streams,
 - client-side manager API abstraction for local ABI and future tunnel mode.
 
 It does not own:
@@ -145,6 +148,7 @@ It owns:
 - reading `config.yaml` from the instance directory,
 - daemonizing itself,
 - writing its pidfile and runtime artifacts,
+- writing durable exit metadata in `exit.json`,
 - starting and supervising one VM,
 - exposing `VmMonitorService`,
 - implementing the Negotiate server for serial attach, vsock connect, and monitor RPC upgrades,
@@ -264,8 +268,7 @@ It includes:
 
 - `Ping`
 - `Inspect`
-- `GetSystemInfo`
-- `Exec`
+- `WatchStatus`
 
 It does not include `Stop`.
 

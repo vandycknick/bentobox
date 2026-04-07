@@ -1,88 +1,20 @@
 use std::os::fd::{AsFd, AsRawFd};
 
-use bento_runtime::negotiate::{
-    ClientUpgradeStreamError, Negotiate, ProxyMode, RejectCode, Upgrade,
-};
-use bento_runtime::services::SERVICE_SERIAL;
-use eyre::{bail, Context};
+use eyre::Context;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-pub(crate) async fn attach_serial(socket_path: &str) -> eyre::Result<()> {
-    let stream = match UnixStream::connect(socket_path).await {
-        Ok(stream) => stream,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            bail!(
-                "instanced_unreachable: control socket {} is missing, make sure the VM is running",
-                socket_path
-            )
-        }
-        Err(err) => return Err(err).context(format!("connect {}", socket_path)),
-    };
-
-    let mode = ProxyMode::ReadWrite;
-    let stream = Negotiate::client_upgrade_stream_v1(
-        stream,
-        Upgrade::Proxy {
-            service: SERVICE_SERIAL.to_string(),
-            mode,
-        },
-    )
-    .await
-    .map_err(|err| match err {
-        ClientUpgradeStreamError::Io(io_err) => {
-            eyre::eyre!(io_err).wrap_err("negotiate serial proxy stream")
-        }
-        ClientUpgradeStreamError::Reject(reject) => {
-            eyre::eyre!(render_reject_error(reject.code, &reject.message))
-        }
-    })?;
-
-    print_serial_exit_hint(mode);
+pub(crate) async fn attach_serial_stream(stream: UnixStream) -> eyre::Result<()> {
+    print_serial_exit_hint();
     proxy_serial_stdio(stream).await
 }
 
-fn print_serial_exit_hint(mode: ProxyMode) {
-    if mode != ProxyMode::ReadWrite {
-        return;
-    }
-
+fn print_serial_exit_hint() {
     if unsafe { libc::isatty(std::io::stderr().as_raw_fd()) } == 0 {
         return;
     }
 
     eprintln!("Connected to serial console. Exit with Ctrl+]");
-}
-
-fn render_reject_error(code: RejectCode, message: &str) -> String {
-    match code {
-        RejectCode::ServiceStarting => {
-            format!("service_starting: {message}")
-        }
-        RejectCode::ServiceUnavailable => {
-            format!("service_unavailable: {message}. ensure guest service is running")
-        }
-        RejectCode::UnsupportedService => {
-            format!("unknown_service: {message}. try a supported service like 'serial'")
-        }
-        RejectCode::UnsupportedProtocol => {
-            format!(
-                "unsupported_protocol: {message}. update bentoctl/instanced to matching versions"
-            )
-        }
-        RejectCode::UnsupportedUpgrade => {
-            format!("unsupported_upgrade: {message}")
-        }
-        RejectCode::PermissionDenied => {
-            format!("permission_denied: {message}")
-        }
-        RejectCode::AuthFailed => {
-            format!("auth_failed: {message}")
-        }
-        RejectCode::Internal => {
-            format!("internal_error: {message}")
-        }
-    }
 }
 
 async fn proxy_serial_stdio(stream: UnixStream) -> eyre::Result<()> {

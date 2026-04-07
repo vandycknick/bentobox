@@ -347,13 +347,13 @@ Today the CLI still starts the monitor and the monitor still owns too much mixed
 - [ ] Reorganize the code into `main`, `run`, `startup`, `services`, `shutdown`, `state`, `context`, and `supervisor` modules.
 - [x] Add `--data-dir` argument.
 - [x] Load `config.yaml` from the passed instance directory.
-- [ ] Move process daemonization into `vmmon`.
-- [ ] Add a foreground mode for tests and debugging.
+- [x] Move process daemonization into `vmmon`.
+- [x] Add a foreground mode for tests and debugging.
 - [x] Add startup pipe support.
 - [x] Report structured startup success or failure over the startup pipe.
-- [ ] Add signal handlers for graceful stop.
+- [x] Add signal handlers for graceful stop.
 - [ ] Add forced-stop escalation behavior.
-- [ ] Persist exit state in the instance directory.
+- [x] Persist exit state in the instance directory.
 
 ### Detailed Steps
 
@@ -385,6 +385,9 @@ Today the CLI still starts the monitor and the monitor still owns too much mixed
 - `bento-vmmon` now reports startup success or failure back to `bento-libvm` over a startup pipe.
 - `MonitorConfig` has been collapsed into a single `VmContext` for the data-dir-driven monitor path.
 - The old `VmSpec -> InstanceConfig` adapter has been deleted from `bento-vmmon`.
+- `vmmon` now daemonizes itself by re-execing a detached `--daemonized` child and forwarding the child startup result back through the original startup pipe.
+- `vmmon` now supports hidden `--foreground` and `--daemonized` modes for debug versus detached operation.
+- `vmmon` now persists durable exit state to `exit.json` in the instance directory.
 - The on-disk crate directory is still `crates/bento-instanced/` for now to keep the diff narrow while the internal restructuring continues.
 
 ### Risks
@@ -412,12 +415,12 @@ The long-term architecture depends on a stable distinction between machine-manag
 ### Tasks
 
 - [ ] Define or update protocol definitions for `InstanceService`.
-- [ ] Define or update protocol definitions for `VmMonitorService`.
+- [x] Define or update protocol definitions for `VmMonitorService`.
 - [ ] Ensure `VmMonitorService` does not include `Stop`.
 - [ ] Move monitor RPC server implementation into `bento-vmmon` under the new service boundary.
-- [ ] Move client-side monitor connection logic from `bentoctl` into `bento-libvm`.
-- [ ] Keep existing Negotiate behavior for serial attach, vsock connect, and RPC upgrades.
-- [ ] Remove direct CLI ownership of Negotiate clients.
+- [x] Move client-side monitor connection logic from `bentoctl` into `bento-libvm`.
+- [x] Keep existing Negotiate behavior for serial attach, vsock connect, and RPC upgrades.
+- [x] Remove direct CLI ownership of Negotiate clients.
 
 ### Detailed Steps
 
@@ -439,6 +442,14 @@ The long-term architecture depends on a stable distinction between machine-manag
 
 - Protocol churn can ripple through the CLI, monitor, and guest-facing flows.
 - If the split is too abrupt, migration may temporarily break status, shell, or exec flows.
+
+### Status
+
+- Client-side monitor connection logic now lives in `bento-libvm`.
+- Client-side Negotiate usage for status, readiness waiting, and proxy stream upgrade now lives in `bento-libvm`.
+- `status`, `shell`, `exec`, and the hidden `shell-proxy` CLI path now route through `bento-libvm`.
+- `InstanceControlService` has been removed and replaced by `VmMonitorService`.
+- The manager-facing `InstanceService` definition is still pending.
 
 ## Phase 7: Thin the CLI and remove obsolete seams
 
@@ -491,7 +502,7 @@ The migration is not complete until the CLI is thin and the old ownership paths 
 - `bentoctl create-raw` now routes through `bento-libvm` and creates raw machines directly in the new layout.
 - `bentoctl start` now routes through `bento-libvm`, which spawns `vmmon --data-dir ...`.
 - `bentoctl stop` now routes through `bento-libvm`, which signals `vmmon` by pidfile for the new path.
-- `status`, `shell`, and `exec` still depend on the old runtime and monitor path for now because they are tied to the current monitor socket contract.
+- `bentoctl status`, `shell`, and `exec` now route through `bento-libvm` for monitor connection and Negotiate client behavior.
 - CLI-owned pidfile polling for startup has been removed from the new path.
 
 ### Risks
@@ -554,7 +565,10 @@ Add dated notes here whenever the migration plan changes materially.
 - 2026-04-06: Phase 5 progressed, `vmmon` startup now reports `Started` and `Failed` over a startup pipe.
 - 2026-04-06: Phase 5 progressed, `vmmon` data-dir path now consumes `VmSpec` directly and the temporary `VmSpec -> InstanceConfig` adapter was removed.
 - 2026-04-06: Phase 5 progressed, `vmmon` no longer supports legacy `--name` startup and `MonitorConfig` was collapsed into `VmContext`.
+- 2026-04-06: Phase 5 progressed, `vmmon` now self-daemonizes, supports a foreground mode, and persists `exit.json` on shutdown.
 - 2026-04-06: Phase 7 progressed, `bentoctl create` and `create-raw` now route through `bento-libvm`, so new machines are created directly in the new layout.
 - 2026-04-06: Phase 7 progressed, `bentoctl start` now routes through `bento-libvm`, which owns `vmmon` spawning for the new path.
 - 2026-04-06: Phase 7 progressed, `bentoctl stop` now routes through `bento-libvm`, and the old CLI daemon-control module was removed.
+- 2026-04-06: Phase 6 progressed, client-side monitor connection and Negotiate usage moved from `bentoctl` into `bento-libvm`.
+- 2026-04-06: Phase 7 progressed, `bentoctl status`, `shell`, `exec`, and `shell-proxy` now route through `bento-libvm` for monitor connectivity.
 - 2026-04-06: Phase 4.5 started, `bento-migrate-daemonless` was added as a one-off local migration tool for old-world VMs.

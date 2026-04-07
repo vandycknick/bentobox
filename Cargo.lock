@@ -335,13 +335,17 @@ name = "bento-libvm"
 version = "0.1.0"
 dependencies = [
  "bento-core",
+ "bento-protocol",
  "bento-runtime",
+ "hyper-util",
  "nix 0.31.1",
  "redb",
  "serde_yaml_ng",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tonic",
+ "tower 0.5.3",
 ]
 
 [[package]]
@@ -436,6 +440,7 @@ dependencies = [
  "libc",
  "nix 0.31.1",
  "serde",
+ "serde_json",
  "serde_yaml_ng",
  "thiserror 2.0.18",
  "tokio",

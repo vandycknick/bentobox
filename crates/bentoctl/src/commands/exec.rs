@@ -1,7 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use bento_runtime::instance::InstanceStatus;
-use bento_runtime::instance_store::{InstanceError, InstanceStore};
+use bento_libvm::{LibVm, MachineRef, MachineStatus};
 use clap::Args;
 use eyre::bail;
 
@@ -34,17 +33,17 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
-        let inst = store.inspect(&self.name)?;
+    pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
+        let machine = libvm.inspect(&MachineRef::parse(self.name.clone())?)?;
 
-        if inst.status() != InstanceStatus::Running {
-            return Err(InstanceError::InstanceNotRunning {
-                name: self.name.clone(),
+        if machine.status != MachineStatus::Running {
+            return Err(bento_libvm::LibVmError::MachineNotRunning {
+                reference: self.name.clone(),
             }
             .into());
         }
 
-        if !inst.capabilities().ssh.enabled {
+        if !machine.spec.guest.capabilities.ssh {
             bail!("instance has no ssh capability, cannot run remote commands")
         }
 

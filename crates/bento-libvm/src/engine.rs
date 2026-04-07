@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,17 +9,19 @@ use bento_core::{
     Architecture, Backend, Boot, Bootstrap, Capabilities, Disk, DiskKind, Guest, GuestOs, Host,
     MachineId, Mount, Network, NetworkMode, Platform, Resources, Storage, VmSpec,
 };
+use bento_protocol::v1::InspectResponse;
 use bento_runtime::capabilities::CapabilitiesConfig;
 use bento_runtime::images::store::ImageStore;
 use bento_runtime::instance::InstanceFile;
+use bento_runtime::profiles::ENDPOINT_SSH;
 use nix::{
-    fcntl::{fcntl, FcntlArg, FdFlag},
     sys::signal::Signal,
     unistd::{pipe, Pid},
 };
 
 use crate::layout::CONFIG_FILE_NAME;
 use crate::machine_ref::validate_machine_name;
+use crate::monitor;
 use crate::state::{metadata_from_path, MachineMetadata, StateStore};
 use crate::{Layout, LibVmError, MachineRef};
 
@@ -181,7 +182,7 @@ impl LibVm {
                 }))
                 .collect(),
             },
-            mounts: request.mounts,
+            mounts: assign_mount_tags(request.mounts),
             network: Network {
                 mode: request.network.unwrap_or(NetworkMode::User),
             },
@@ -272,7 +273,7 @@ impl LibVm {
                 bootstrap,
             },
             storage: Storage { disks },
-            mounts: request.mounts,
+            mounts: assign_mount_tags(request.mounts),
             network: Network {
                 mode: request.network.unwrap_or(NetworkMode::User),
             },
@@ -409,6 +410,20 @@ impl LibVm {
         self.machine_record(metadata)
     }
 
+    pub async fn wait_for_guest_running(
+        &self,
+        machine: &MachineRef,
+        timeout: std::time::Duration,
+    ) -> Result<(), LibVmError> {
+        let (metadata, socket_path) = self.resolve_running_socket(machine)?;
+        monitor::wait_for_guest_running(&socket_path, timeout)
+            .await
+            .map_err(|message| LibVmError::MonitorProtocol {
+                reference: metadata.name,
+                message,
+            })
+    }
+
     pub async fn stop(&self, machine: &MachineRef) -> Result<MachineRecord, LibVmError> {
         let metadata = self.resolve_metadata(machine)?;
         let pid_path = self.layout.monitor_pid_path(metadata.id);
@@ -423,6 +438,81 @@ impl LibVm {
             .map_err(|err| io::Error::other(err.to_string()))?;
         wait_for_monitor_stop(&pid_path, &metadata.name).await?;
         self.machine_record(metadata)
+    }
+
+    pub async fn get_status(&self, machine: &MachineRef) -> Result<InspectResponse, LibVmError> {
+        let (metadata, socket_path) = self.resolve_running_socket(machine)?;
+        monitor::get_vm_monitor_inspect(&socket_path)
+            .await
+            .map_err(|message| LibVmError::MonitorProtocol {
+                reference: metadata.name,
+                message,
+            })
+    }
+
+    pub async fn open_service_stream(
+        &self,
+        machine: &MachineRef,
+        service: &str,
+        wait_for_guest_readiness: bool,
+    ) -> Result<tokio::net::UnixStream, LibVmError> {
+        let metadata = self.resolve_metadata(machine)?;
+        let socket_path = self.layout.monitor_socket_path(metadata.id);
+
+        if !self.layout.monitor_pid_path(metadata.id).exists() {
+            return Err(LibVmError::MachineNotRunning {
+                reference: metadata.name.clone(),
+            });
+        }
+
+        if wait_for_guest_readiness {
+            let machine_record = self.machine_record(metadata.clone())?;
+            let should_wait =
+                machine_record.spec.boot.bootstrap.is_some() && service == ENDPOINT_SSH;
+
+            if should_wait {
+                let services = monitor::wait_for_services_with_timeout(
+                    &socket_path,
+                    monitor::DEFAULT_SERVICE_READINESS_TIMEOUT,
+                    std::time::Duration::from_secs(1),
+                )
+                .await
+                .map_err(|message| LibVmError::MonitorProtocol {
+                    reference: metadata.name.clone(),
+                    message,
+                })?;
+
+                if service == ENDPOINT_SSH
+                    && services
+                        .iter()
+                        .all(|descriptor| descriptor.name != ENDPOINT_SSH)
+                {
+                    let available = if services.is_empty() {
+                        "none".to_string()
+                    } else {
+                        services
+                            .iter()
+                            .map(|descriptor| descriptor.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    };
+
+                    return Err(LibVmError::MonitorProtocol {
+                        reference: metadata.name,
+                        message: format!(
+                            "unsupported_service: guest discovery is ready but ssh is not supported (available endpoints: {available})"
+                        ),
+                    });
+                }
+            }
+        }
+
+        monitor::open_service_stream(&socket_path, service)
+            .await
+            .map_err(|message| LibVmError::MonitorProtocol {
+                reference: metadata.name,
+                message,
+            })
     }
 
     fn resolve_metadata(&self, machine: &MachineRef) -> Result<MachineMetadata, LibVmError> {
@@ -461,6 +551,21 @@ impl LibVm {
             },
         })
     }
+
+    fn resolve_running_socket(
+        &self,
+        machine: &MachineRef,
+    ) -> Result<(MachineMetadata, PathBuf), LibVmError> {
+        let metadata = self.resolve_metadata(machine)?;
+        if !self.layout.monitor_pid_path(metadata.id).exists() {
+            return Err(LibVmError::MachineNotRunning {
+                reference: metadata.name,
+            });
+        }
+
+        let socket_path = self.layout.monitor_socket_path(metadata.id);
+        Ok((metadata, socket_path))
+    }
 }
 
 fn default_capabilities() -> CapabilitiesConfig {
@@ -474,6 +579,19 @@ fn capabilities_to_spec(capabilities: &CapabilitiesConfig) -> Capabilities {
         dns: capabilities.dns.enabled,
         forward: capabilities.forward.enabled,
     }
+}
+
+fn assign_mount_tags(mounts: Vec<Mount>) -> Vec<Mount> {
+    mounts
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut mount)| {
+            if mount.tag.trim().is_empty() {
+                mount.tag = format!("mount{index}");
+            }
+            mount
+        })
+        .collect()
 }
 
 fn guest_os_from_image(os: &str) -> Result<GuestOs, LibVmError> {
@@ -543,12 +661,6 @@ fn canonicalize_existing_path(path: &Path, kind: &str) -> Result<PathBuf, LibVmE
 
 fn spawn_vmmon(instance_dir: &Path, profiles: &[String]) -> Result<OwnedFd, LibVmError> {
     let (read_fd, write_fd) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
-    let flags =
-        fcntl(&write_fd, FcntlArg::F_GETFD).map_err(|err| io::Error::other(err.to_string()))?;
-    let mut fd_flags = FdFlag::from_bits_retain(flags);
-    fd_flags.remove(FdFlag::FD_CLOEXEC);
-    fcntl(&write_fd, FcntlArg::F_SETFD(fd_flags))
-        .map_err(|err| io::Error::other(err.to_string()))?;
 
     let mut command = Command::new(resolve_vmmon_executable()?);
     command.arg("--data-dir").arg(instance_dir);
@@ -558,13 +670,18 @@ fn spawn_vmmon(instance_dir: &Path, profiles: &[String]) -> Result<OwnedFd, LibV
     for profile in profiles {
         command.arg("--profile").arg(profile);
     }
-    unsafe {
-        command.pre_exec(|| {
-            nix::unistd::setsid()
-                .map(|_| ())
-                .map_err(|errno| io::Error::from_raw_os_error(errno as i32))
-        });
-    }
+
+    // vmmon handles its own daemonization via double-fork internally,
+    // so we just need to make sure the write end of the startup pipe
+    // is inherited by the child. nix::pipe() sets FD_CLOEXEC by default,
+    // so we need to clear it for the write fd.
+    use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+    let flags =
+        fcntl(&write_fd, FcntlArg::F_GETFD).map_err(|err| io::Error::other(err.to_string()))?;
+    let mut fd_flags = FdFlag::from_bits_retain(flags);
+    fd_flags.remove(FdFlag::FD_CLOEXEC);
+    fcntl(&write_fd, FcntlArg::F_SETFD(fd_flags))
+        .map_err(|err| io::Error::other(err.to_string()))?;
 
     command
         .stdin(Stdio::null())

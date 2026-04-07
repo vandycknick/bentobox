@@ -16,6 +16,7 @@ pub(crate) struct VmContext {
 #[derive(Debug, Clone)]
 pub(crate) struct MonitorMount {
     pub source: PathBuf,
+    pub tag: String,
     pub writable: bool,
 }
 
@@ -80,6 +81,7 @@ impl VmContext {
             .iter()
             .map(|mount| MonitorMount {
                 source: mount.source.clone(),
+                tag: mount.tag.clone(),
                 writable: !mount.read_only,
             })
             .collect()

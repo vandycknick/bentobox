@@ -155,7 +155,7 @@ impl InstanceServer {
                     }
                 }
             }
-            Upgrade::InstanceControl { .. } => {
+            Upgrade::VmMonitor { .. } => {
                 accept(&mut stream, request.request_id, None).await?;
                 services::serve(stream, self.store.clone()).await
             }

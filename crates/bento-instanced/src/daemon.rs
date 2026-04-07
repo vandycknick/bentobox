@@ -23,11 +23,12 @@ use crate::monitor_config::VmContext;
 use crate::pid_guard::PidGuard;
 use crate::port_forward::spawn_port_forward_manager;
 use crate::server::InstanceServer;
-use crate::state::{new_instance_store, Action};
+use crate::state::{new_instance_store, select_current_inspect, Action};
 use crate::StartupReporter;
 
 const GUEST_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const GUEST_DISCOVERY_RETRY: Duration = Duration::from_secs(1);
+const VM_STOP_TIMEOUT: Duration = Duration::from_secs(45);
 enum LoopExit {
     Signal(&'static str),
     InternalExit(&'static str),
@@ -36,6 +37,15 @@ enum LoopExit {
 
 struct VmStopInfo {
     message: String,
+}
+
+#[derive(serde::Serialize)]
+struct ExitState {
+    outcome: &'static str,
+    message: String,
+    vm_state: String,
+    guest_state: String,
+    timestamp_unix_ms: i64,
 }
 
 pub struct VmMon {
@@ -53,8 +63,19 @@ impl VmMon {
         let result = self.run_inner(&mut startup_reporter).await;
 
         if let Err(err) = &result {
+            let full_error = format_error_chain(err);
+            let _ = write_exit_state(
+                &self.data_dir,
+                ExitState {
+                    outcome: "failed",
+                    message: full_error.clone(),
+                    vm_state: "error".to_string(),
+                    guest_state: "error".to_string(),
+                    timestamp_unix_ms: unix_time_ms(),
+                },
+            );
             if let Some(reporter) = startup_reporter.as_mut() {
-                let _ = reporter.report_failed(&err.to_string());
+                let _ = reporter.report_failed(&full_error);
             }
         }
 
@@ -65,8 +86,8 @@ impl VmMon {
         let context = self.load_context()?;
         let instance_name = context.name.clone();
         let resolved_capabilities = resolve_startup_capabilities(&context, &self.profiles)?;
-        let _trace_guard = init_tracing(&context.file(InstanceFile::InstancedTraceLog))?;
         tracing::info!(instance = %instance_name, "vmmon starting");
+        remove_stale_exit_state(&self.data_dir)?;
 
         rebuild_bootstrap(&context, &resolved_capabilities)?;
 
@@ -130,19 +151,22 @@ impl VmMon {
 
         machine.start().await?;
 
-        if let Err(err) = serial_console
-            .stream_to_file(&context.file(InstanceFile::SerialLog))
-            .await
-        {
-            let _ = machine.stop().await;
-            return Err(err.into());
-        }
-
         store.dispatch(Action::vm_running());
 
         if let Some(reporter) = startup_reporter.as_mut() {
             reporter.report_started()?;
         }
+
+        let serial_log_path = context.file(InstanceFile::SerialLog);
+        let serial_console_for_log = serial_console.clone();
+        tokio::spawn(async move {
+            if let Err(err) = serial_console_for_log
+                .stream_to_file(&serial_log_path)
+                .await
+            {
+                tracing::warn!(error = %err, path = %serial_log_path.display(), "serial log attachment failed");
+            }
+        });
 
         tracing::info!(instance = %instance_name, "vmmon running");
 
@@ -242,22 +266,51 @@ impl VmMon {
             });
         }
 
-        if vm_already_stopped {
+        let stop_message = if vm_already_stopped {
             tracing::info!(instance = %instance_name, "vm already stopped, finalizing instance shutdown");
+            if let LoopExit::VmStopped(event) = &loop_exit {
+                event.message.clone()
+            } else {
+                String::from("vm already stopped")
+            }
         } else {
             tracing::info!(instance = %instance_name, "sending stop signal to vm");
-        }
-
-        machine.stop().await?;
-
-        store.dispatch(Action::VmTransition {
-            state: LifecycleState::Stopped,
-            message: String::from("vm stopped"),
-        });
+            tokio::time::timeout(VM_STOP_TIMEOUT, machine.stop())
+                .await
+                .map_err(|_| {
+                    eyre::eyre!("timed out after {:?} waiting for vm stop", VM_STOP_TIMEOUT)
+                })??;
+            store.dispatch(Action::VmTransition {
+                state: LifecycleState::Stopped,
+                message: String::from("vm stopped"),
+            });
+            String::from("vm stopped")
+        };
 
         for export in host_socket_exports {
             let _ = std::fs::remove_file(&export.host_path);
         }
+
+        let snapshot = store.snapshot().unwrap_or_default();
+        let inspect = select_current_inspect(&snapshot);
+        write_exit_state(
+            context.dir(),
+            ExitState {
+                outcome: "stopped",
+                message: stop_message,
+                vm_state: format!(
+                    "{:?}",
+                    LifecycleState::try_from(inspect.vm_state)
+                        .unwrap_or(LifecycleState::Unspecified)
+                ),
+                guest_state: format!(
+                    "{:?}",
+                    LifecycleState::try_from(inspect.guest_state)
+                        .unwrap_or(LifecycleState::Unspecified)
+                ),
+                timestamp_unix_ms: unix_time_ms(),
+            },
+        )?;
 
         tracing::info!(instance = %instance_name, "instance stopped");
 
@@ -274,12 +327,45 @@ impl VmMon {
     }
 }
 
+fn remove_stale_exit_state(data_dir: &Path) -> eyre::Result<()> {
+    match std::fs::remove_file(exit_state_path(data_dir)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn write_exit_state(data_dir: &Path, state: ExitState) -> eyre::Result<()> {
+    let raw = serde_json::to_vec_pretty(&state)?;
+    std::fs::write(exit_state_path(data_dir), raw)?;
+    Ok(())
+}
+
+fn exit_state_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("exit.json")
+}
+
+fn unix_time_ms() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as i64,
+        Err(_) => 0,
+    }
+}
+
 fn read_vm_spec_from_dir(data_dir: &Path) -> eyre::Result<VmSpec> {
     let config_path = data_dir.join(InstanceFile::Config.as_str());
     let raw = std::fs::read_to_string(&config_path)
         .wrap_err_with(|| format!("read vm spec at {}", config_path.display()))?;
     serde_yaml_ng::from_str(&raw)
-        .wrap_err_with(|| format!("parse vm spec at {}", config_path.display()))
+        .map_err(|err| eyre::eyre!("parse vm spec at {}: {}", config_path.display(), err))
+}
+
+fn format_error_chain(err: &eyre::Report) -> String {
+    let mut parts = Vec::new();
+    for cause in err.chain() {
+        parts.push(cause.to_string());
+    }
+    parts.join(": ")
 }
 
 fn spawn_guest_capability_monitor(
@@ -622,28 +708,4 @@ fn remove_stale_socket(path: &std::path::Path) -> eyre::Result<()> {
     }
 
     Ok(())
-}
-
-fn init_tracing(
-    trace_path: &std::path::Path,
-) -> eyre::Result<tracing_appender::non_blocking::WorkerGuard> {
-    let trace_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(trace_path)
-        .context(format!("open {}", trace_path.display()))?;
-
-    let (writer, guard) = tracing_appender::non_blocking(trace_file);
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_level(true)
-        .with_writer(writer)
-        .try_init()
-        .map_err(|err| eyre::eyre!("initialize instanced tracing: {err}"))?;
-
-    Ok(guard)
 }

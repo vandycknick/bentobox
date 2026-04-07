@@ -346,9 +346,10 @@ fn legacy_config_to_vm_spec(
         mounts: config
             .mounts
             .into_iter()
-            .map(|mount| Mount {
+            .enumerate()
+            .map(|(index, mount)| Mount {
                 source: mount.location,
-                tag: String::new(),
+                tag: format!("mount{index}"),
                 read_only: !mount.writable,
             })
             .collect(),

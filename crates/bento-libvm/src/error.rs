@@ -29,6 +29,12 @@ pub enum LibVmError {
     #[error("machine {reference} is not running")]
     MachineNotRunning { reference: String },
 
+    #[error("monitor connection for {reference} failed: {message}")]
+    MonitorConnection { reference: String, message: String },
+
+    #[error("monitor protocol for {reference} failed: {message}")]
+    MonitorProtocol { reference: String, message: String },
+
     #[error(
         "vmmon executable not found. Expected a sibling binary at {expected_path} or `vmmon` in PATH. Build it with `cargo build -p bento-vmmon` (or `cargo build --release -p bento-vmmon`)."
     )]

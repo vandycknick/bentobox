@@ -4,22 +4,22 @@ package bento.v1;
 
 import "common.proto";
 
-service InstanceControlService {
-  rpc Health(InstanceControlHealthRequest) returns (InstanceControlHealthResponse);
-  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+service VmMonitorService {
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc Inspect(InspectRequest) returns (InspectResponse);
   rpc WatchStatus(WatchStatusRequest) returns (stream StatusUpdate);
 }
 
-message InstanceControlHealthRequest {}
+message PingRequest {}
 
-message InstanceControlHealthResponse {
+message PingResponse {
   bool ok = 1;
   string message = 2;
 }
 
-message GetStatusRequest {}
+message InspectRequest {}
 
-message GetStatusResponse {
+message InspectResponse {
   LifecycleState vm_state = 1;
   LifecycleState guest_state = 2;
   bool ready = 3;

@@ -27,6 +27,9 @@ pub enum MachineSpecError {
 
     #[error("invalid mount location: {0}")]
     InvalidMountLocation(String),
+
+    #[error("invalid mount tag for {mount_source}: mount tags must be non-empty")]
+    InvalidMountTag { mount_source: String },
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +162,11 @@ pub(crate) fn vm_spec_machine_config(
     for mount in &inputs.spec.mounts {
         let host_path = resolve_mount_location(&mount.source)
             .map_err(MachineSpecError::InvalidMountLocation)?;
+        if mount.tag.trim().is_empty() {
+            return Err(MachineSpecError::InvalidMountTag {
+                mount_source: mount.source.display().to_string(),
+            });
+        }
         builder = builder.mount(SharedDirectory {
             host_path,
             tag: mount.tag.clone(),

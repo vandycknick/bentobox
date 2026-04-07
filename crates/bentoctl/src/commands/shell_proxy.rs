@@ -1,18 +1,10 @@
 use std::fmt::{Display, Formatter};
-use std::io;
-use std::time::{Duration, Instant};
 
-use bento_runtime::instance::{InstanceFile, InstanceStatus};
-use bento_runtime::instance_store::InstanceStore;
-use bento_runtime::negotiate::{
-    ClientUpgradeStreamError, Negotiate, ProxyMode, RejectCode, Upgrade,
-};
+use bento_libvm::{LibVm, MachineRef};
 use bento_runtime::profiles::ENDPOINT_SSH;
 use clap::Args;
-use eyre::{bail, Context};
+use eyre::Context;
 use tokio::io::AsyncWriteExt;
-
-use crate::service_readiness;
 
 #[derive(Args, Debug)]
 #[command(hide = true)]
@@ -31,173 +23,16 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
-        let inst = store.inspect(&self.name)?;
-        let socket_path = inst.file(InstanceFile::InstancedSocket);
-
-        let should_wait_for_guest_readiness =
-            inst.status() == InstanceStatus::Running && inst.uses_bootstrap();
-        let deadline = Instant::now() + service_readiness::DEFAULT_SERVICE_READINESS_TIMEOUT;
-
-        loop {
-            match try_open_service_once(&socket_path, &self.service).await {
-                Ok(stream) => return proxy_stdio(stream).await,
-                Err(ControlClientError::Fatal { message }) => bail!("{message}"),
-                Err(ControlClientError::Retryable { message }) => {
-                    if !should_wait_for_guest_readiness {
-                        bail!("{message}");
-                    }
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        bail!(
-                            "timed out waiting {:?} for guest ssh readiness (last error: {message})",
-                            service_readiness::DEFAULT_SERVICE_READINESS_TIMEOUT
-                        );
-                    }
-
-                    let services = service_readiness::wait_for_services_with_timeout(
-                        &socket_path,
-                        remaining,
-                        Duration::from_secs(1),
-                    )
-                    .await
-                    .context("wait for guest endpoint discovery readiness")?;
-
-                    if self.service == ENDPOINT_SSH
-                        && services.iter().all(|service| service.name != ENDPOINT_SSH)
-                    {
-                        let available = if services.is_empty() {
-                            "none".to_string()
-                        } else {
-                            services
-                                .iter()
-                                .map(|service| service.name.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        };
-
-                        bail!(
-                            "unsupported_service: guest discovery is ready but ssh is not supported (available endpoints: {available})"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn try_open_service_once(
-    socket_path: &std::path::Path,
-    service: &str,
-) -> Result<tokio::net::UnixStream, ControlClientError> {
-    let stream = tokio::net::UnixStream::connect(socket_path)
-        .await
-        .map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                ControlClientError::Retryable {
-                    message: format!(
-                        "instanced_unreachable: control socket {} is missing, make sure the VM is running",
-                        socket_path.display()
-                    ),
-                }
-            } else {
-                classify_io_error(
-                    "connect control socket",
-                    io::Error::new(err.kind(), format!("{} ({})", err, socket_path.display())),
-                )
-            }
-        })?;
-
-    match Negotiate::client_upgrade_stream_v1(
-        stream,
-        Upgrade::Proxy {
-            service: service.to_string(),
-            mode: ProxyMode::ReadWrite,
-        },
-    )
-    .await
-    {
-        Ok(stream) => Ok(stream),
-        Err(ClientUpgradeStreamError::Reject(reject)) => {
-            Err(classify_reject_code(reject.code, &reject.message))
-        }
-        Err(ClientUpgradeStreamError::Io(err)) => {
-            Err(classify_io_error("negotiate proxy stream", err))
-        }
-    }
-}
-
-enum ControlClientError {
-    Retryable { message: String },
-    Fatal { message: String },
-}
-
-fn classify_reject_code(code: RejectCode, message: &str) -> ControlClientError {
-    match code {
-        RejectCode::ServiceStarting | RejectCode::ServiceUnavailable => {
-            ControlClientError::Retryable {
-                message: render_reject_error(code, message),
-            }
-        }
-        _ => ControlClientError::Fatal {
-            message: render_reject_error(code, message),
-        },
-    }
-}
-
-fn classify_io_error(context: &str, err: io::Error) -> ControlClientError {
-    let message = format!("{context} failed: {err}");
-
-    if is_retryable_io_kind(err.kind()) {
-        return ControlClientError::Retryable { message };
-    }
-
-    ControlClientError::Fatal { message }
-}
-
-fn is_retryable_io_kind(kind: io::ErrorKind) -> bool {
-    matches!(
-        kind,
-        io::ErrorKind::NotFound
-            | io::ErrorKind::ConnectionRefused
-            | io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::TimedOut
-            | io::ErrorKind::WouldBlock
-            | io::ErrorKind::Interrupted
-            | io::ErrorKind::NotConnected
-            | io::ErrorKind::UnexpectedEof
-    )
-}
-
-fn render_reject_error(code: RejectCode, message: &str) -> String {
-    match code {
-        RejectCode::ServiceStarting => {
-            format!("service_starting: {message}")
-        }
-        RejectCode::ServiceUnavailable => {
-            format!("service_unavailable: {message}. ensure guest service is running")
-        }
-        RejectCode::UnsupportedService => {
-            format!("unknown_service: {message}. try a supported service like 'ssh'")
-        }
-        RejectCode::UnsupportedProtocol => {
-            format!(
-                "unsupported_protocol: {message}. update bentoctl/instanced to matching versions"
+    pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
+        let stream = libvm
+            .open_service_stream(
+                &MachineRef::parse(self.name.clone())?,
+                &self.service,
+                self.service == ENDPOINT_SSH,
             )
-        }
-        RejectCode::UnsupportedUpgrade => {
-            format!("unsupported_upgrade: {message}")
-        }
-        RejectCode::PermissionDenied => {
-            format!("permission_denied: {message}")
-        }
-        RejectCode::AuthFailed => {
-            format!("auth_failed: {message}")
-        }
-        RejectCode::Internal => {
-            format!("internal_error: {message}")
-        }
+            .await
+            .context("open negotiated monitor proxy stream")?;
+        proxy_stdio(stream).await
     }
 }
 

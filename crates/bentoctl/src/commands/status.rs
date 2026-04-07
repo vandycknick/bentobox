@@ -1,11 +1,8 @@
 use clap::Args;
 use std::fmt::{Display, Formatter};
 
+use bento_libvm::{LibVm, MachineRef, MachineStatus};
 use bento_protocol::v1::LifecycleState;
-use bento_runtime::instance::{InstanceFile, InstanceStatus};
-use bento_runtime::instance_store::InstanceStore;
-
-use crate::service_readiness;
 
 #[derive(Args, Debug)]
 pub struct Cmd {
@@ -19,20 +16,19 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
-        let inst = store.inspect(&self.name)?;
+    pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
+        let machine_ref = MachineRef::parse(self.name.clone())?;
+        let machine = libvm.inspect(&machine_ref)?;
 
-        println!("name: {}", inst.name);
-        println!("process: {:?}", inst.status());
+        println!("name: {}", machine.spec.name);
+        println!("process: {:?}", machine.status);
 
-        if inst.status() != InstanceStatus::Running {
+        if machine.status != MachineStatus::Running {
             println!("ready: no");
             return Ok(());
         }
 
-        let status =
-            service_readiness::get_instance_status(&inst.file(InstanceFile::InstancedSocket))
-                .await?;
+        let status = libvm.get_status(&MachineRef::Id(machine.id)).await?;
 
         println!("vm: {}", lifecycle_label(status.vm_state));
         println!("guest: {}", lifecycle_label(status.guest_state));

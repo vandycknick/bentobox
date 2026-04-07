@@ -2,8 +2,6 @@ use bento_libvm::{LibVm, MachineRecord, MachineRef};
 use clap::Args;
 use std::fmt::{Display, Formatter};
 
-use crate::service_readiness;
-
 #[derive(Args, Debug)]
 pub struct Cmd {
     pub name: String,
@@ -24,12 +22,13 @@ impl Cmd {
         let machine = libvm.start(&machine_ref, &self.profiles).await?;
 
         if requires_guest_readiness(&machine, &self.profiles) {
-            service_readiness::wait_for_guest_running(
-                &machine.dir.join("id.sock"),
-                service_readiness::DEFAULT_SERVICE_READINESS_TIMEOUT,
-            )
-            .await
-            .map_err(|err| eyre::eyre!("guest capability readiness check failed: {err}"))?;
+            libvm
+                .wait_for_guest_running(
+                    &MachineRef::Id(machine.id),
+                    bento_libvm::DEFAULT_SERVICE_READINESS_TIMEOUT,
+                )
+                .await
+                .map_err(|err| eyre::eyre!("guest capability readiness check failed: {err}"))?;
         }
 
         Ok(())

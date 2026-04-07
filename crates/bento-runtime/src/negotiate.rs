@@ -21,7 +21,7 @@ pub enum ProxyMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Upgrade {
     Proxy { service: String, mode: ProxyMode },
-    InstanceControl { api_version: u32 },
+    VmMonitor { api_version: u32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -421,11 +421,9 @@ mod tests {
                 .expect("write accept response");
             });
 
-            let result = Negotiate::client_upgrade_stream_v1(
-                client,
-                Upgrade::InstanceControl { api_version: 1 },
-            )
-            .await;
+            let result =
+                Negotiate::client_upgrade_stream_v1(client, Upgrade::VmMonitor { api_version: 1 })
+                    .await;
 
             server_task.await.expect("server task join");
             assert!(result.is_ok());
@@ -459,11 +457,9 @@ mod tests {
                 .expect("write reject response");
             });
 
-            let result = Negotiate::client_upgrade_stream_v1(
-                client,
-                Upgrade::InstanceControl { api_version: 1 },
-            )
-            .await;
+            let result =
+                Negotiate::client_upgrade_stream_v1(client, Upgrade::VmMonitor { api_version: 1 })
+                    .await;
 
             server_task.await.expect("server task join");
             match result {

@@ -1,5 +1,4 @@
-use bento_runtime::instance::{InstanceFile, InstanceStatus};
-use bento_runtime::instance_store::{InstanceError, InstanceStore};
+use bento_libvm::{LibVm, MachineRef, MachineStatus};
 use clap::{Args, ValueEnum};
 use std::fmt::{Display, Formatter};
 
@@ -46,12 +45,13 @@ impl Display for AttachMode {
 }
 
 impl Cmd {
-    pub async fn run(&self, store: &InstanceStore) -> eyre::Result<()> {
-        let inst = store.inspect(&self.name)?;
+    pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
+        let machine_ref = MachineRef::parse(self.name.clone())?;
+        let machine = libvm.inspect(&machine_ref)?;
 
-        if inst.status() != InstanceStatus::Running {
-            return Err(InstanceError::InstanceNotRunning {
-                name: self.name.clone(),
+        if machine.status != MachineStatus::Running {
+            return Err(bento_libvm::LibVmError::MachineNotRunning {
+                reference: self.name.clone(),
             }
             .into());
         }
@@ -61,8 +61,14 @@ impl Cmd {
                 if self.user.is_some() {
                     eprintln!("[bentoctl] --user is ignored for serial attach");
                 }
-                let socket_path = inst.file(InstanceFile::InstancedSocket);
-                return terminal::attach_serial(&socket_path.to_string_lossy()).await;
+                let stream = libvm
+                    .open_service_stream(
+                        &MachineRef::Id(machine.id),
+                        bento_runtime::services::SERVICE_SERIAL,
+                        false,
+                    )
+                    .await?;
+                return terminal::attach_serial_stream(stream).await;
             }
             Some(AttachMode::Ssh) => {
                 return ssh::exec_remote_shell(&self.name, self.user.as_deref());
@@ -70,13 +76,19 @@ impl Cmd {
             None => {}
         }
 
-        if !inst.capabilities().ssh.enabled {
+        if !machine.spec.guest.capabilities.ssh {
             if self.user.is_some() {
                 eprintln!("[bentoctl] --user is ignored for serial attach");
             }
             eprintln!("[bentoctl] instance has no ssh capability, using serial attach");
-            let socket_path = inst.file(InstanceFile::InstancedSocket);
-            return terminal::attach_serial(&socket_path.to_string_lossy()).await;
+            let stream = libvm
+                .open_service_stream(
+                    &MachineRef::Id(machine.id),
+                    bento_runtime::services::SERVICE_SERIAL,
+                    false,
+                )
+                .await?;
+            return terminal::attach_serial_stream(stream).await;
         }
 
         ssh::exec_remote_shell(&self.name, self.user.as_deref())

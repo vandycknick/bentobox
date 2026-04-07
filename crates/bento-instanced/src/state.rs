@@ -1,8 +1,8 @@
 use std::sync::Mutex;
 
 use bento_protocol::v1::{
-    CapabilityStatus, EndpointStatus, GetStatusResponse, InstanceControlHealthResponse,
-    LifecycleState, StatusSource, StatusUpdate,
+    CapabilityStatus, EndpointStatus, InspectResponse, LifecycleState, PingResponse, StatusSource,
+    StatusUpdate,
 };
 use tokio::sync::broadcast;
 
@@ -175,16 +175,16 @@ pub(crate) fn new_instance_store() -> InstanceStore {
     )
 }
 
-pub(crate) fn select_current_health(state: &InstanceState) -> InstanceControlHealthResponse {
+pub(crate) fn select_current_ping(state: &InstanceState) -> PingResponse {
     let ok = state.vm == LifecycleState::Running && state.guest == LifecycleState::Running;
-    InstanceControlHealthResponse {
+    PingResponse {
         ok,
         message: status_summary(state),
     }
 }
 
-pub(crate) fn select_current_status(state: &InstanceState) -> GetStatusResponse {
-    GetStatusResponse {
+pub(crate) fn select_current_inspect(state: &InstanceState) -> InspectResponse {
+    InspectResponse {
         vm_state: state.vm as i32,
         guest_state: state.guest as i32,
         ready: state.vm == LifecycleState::Running && state.guest == LifecycleState::Running,

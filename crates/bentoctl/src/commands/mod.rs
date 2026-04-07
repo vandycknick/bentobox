@@ -2,7 +2,6 @@ use bento_libvm::LibVm;
 use clap::{Parser, Subcommand};
 use std::fmt::{Display, Formatter};
 
-use bento_runtime::instance_store::InstanceStore;
 use eyre::Context;
 
 pub mod create;
@@ -101,12 +100,12 @@ impl BentoCtlCmd {
                 cmd.run(&libvm).await
             }
             Command::Shell(cmd) => {
-                let store = instance_store();
-                cmd.run(&store).await
+                let libvm = libvm()?;
+                cmd.run(&libvm).await
             }
             Command::Exec(cmd) => {
-                let store = instance_store();
-                cmd.run(&store).await
+                let libvm = libvm()?;
+                cmd.run(&libvm).await
             }
             Command::Delete(cmd) => {
                 let libvm = libvm()?;
@@ -117,23 +116,19 @@ impl BentoCtlCmd {
                 cmd.run(&libvm).await
             }
             Command::Status(cmd) => {
-                let store = instance_store();
-                cmd.run(&store).await
+                let libvm = libvm()?;
+                cmd.run(&libvm).await
             }
 
             Command::Instanced(cmd) => cmd.run().await,
 
             Command::Images(cmd) => cmd.run().await,
             Command::ShellProxy(cmd) => {
-                let store = instance_store();
-                cmd.run(&store).await
+                let libvm = libvm()?;
+                cmd.run(&libvm).await
             }
         }
     }
-}
-
-fn instance_store() -> InstanceStore {
-    InstanceStore::new()
 }
 
 fn libvm() -> eyre::Result<LibVm> {
