@@ -10,7 +10,7 @@ use bento_fc::types::{
     BootSource, Drive, DriveCacheType, DriveIoEngine, MachineConfiguration, Vsock,
 };
 use bento_fc::FirecrackerProcessBuilder;
-use bento_protocol::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
+use bento_protocol::{DEFAULT_AGENT_CONTROL_PORT, KERNEL_PARAM_AGENT_CONTROL_PORT};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 
@@ -470,7 +470,7 @@ fn build_boot_args(config: &crate::types::VmConfig) -> String {
     }
     args.push(format!(
         "{}={}",
-        KERNEL_PARAM_DISCOVERY_PORT, DEFAULT_DISCOVERY_PORT
+        KERNEL_PARAM_AGENT_CONTROL_PORT, DEFAULT_AGENT_CONTROL_PORT
     ));
     args.join(" ")
 }

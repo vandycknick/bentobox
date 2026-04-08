@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use bento_core::capabilities::{
     CapabilitiesConfig, DnsCapabilityConfig, ForwardCapabilityConfig, SshCapabilityConfig,
 };
+use bento_core::services::GuestRuntimeConfig;
 use bento_core::{InstanceFile, NetworkMode as SpecNetworkMode, VmSpec};
 
 #[derive(Debug, Clone)]
@@ -48,9 +49,10 @@ impl VmContext {
         &self.spec.guest.profiles
     }
 
-    pub(crate) fn requires_bootstrap_for(&self, capabilities: &CapabilitiesConfig) -> bool {
+    pub(crate) fn requires_bootstrap_for(&self, guest_runtime: &GuestRuntimeConfig) -> bool {
         self.spec.boot.bootstrap.is_some()
-            || capabilities.requires_bootstrap()
+            || !guest_runtime.services.is_empty()
+            || guest_runtime.dns.enabled
             || self.spec.host.rosetta
     }
 

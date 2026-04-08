@@ -37,21 +37,17 @@ impl Cmd {
             println!("summary: {}", status.summary);
         }
 
-        if !status.capabilities.is_empty() {
-            println!("capabilities:");
-            for capability in status.capabilities {
+        if !status.services.is_empty() {
+            println!("services:");
+            for service in status.services {
                 println!(
-                    "  - {} enabled={} startup_required={} configured={} running={}",
-                    capability.name,
-                    capability.enabled,
-                    capability.startup_required,
-                    capability.configured,
-                    capability.running,
+                    "  - {} startup_required={} healthy={}",
+                    service.name, service.startup_required, service.healthy,
                 );
-                if !capability.summary.is_empty() {
-                    println!("    summary: {}", capability.summary);
+                if !service.summary.is_empty() {
+                    println!("    summary: {}", service.summary);
                 }
-                for problem in capability.problems {
+                for problem in service.problems {
                     println!("    problem: {}", problem);
                 }
             }

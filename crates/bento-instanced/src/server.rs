@@ -9,8 +9,9 @@ use bento_protocol::services::ENDPOINT_SERIAL;
 use bento_vmm::{spawn_serial_tunnel, SerialAccess, SerialConsole, VirtualMachine};
 use eyre::Context;
 use tokio::net::{UnixListener, UnixStream};
+use tokio_util::sync::CancellationToken;
 
-use crate::discovery::{ServiceRegistry, ServiceTarget};
+use crate::service_config::HostServiceDefinition;
 use crate::services;
 use crate::state::InstanceStore;
 use crate::tunnel::spawn_tunnel;
@@ -22,6 +23,7 @@ const RETRY_AFTER_STARTING_MS: u32 = 1000;
 pub(crate) struct InstanceServer {
     machine: VirtualMachine,
     serial_console: Arc<SerialConsole>,
+    services: Arc<Vec<HostServiceDefinition>>,
     store: Arc<InstanceStore>,
 }
 
@@ -29,11 +31,13 @@ impl InstanceServer {
     pub(crate) fn new(
         machine: VirtualMachine,
         serial_console: Arc<SerialConsole>,
+        services: Vec<HostServiceDefinition>,
         store: Arc<InstanceStore>,
     ) -> Self {
         Self {
             machine,
             serial_console,
+            services: Arc::new(services),
             store,
         }
     }
@@ -41,19 +45,27 @@ impl InstanceServer {
     pub(crate) fn listen(
         &self,
         path: &Path,
+        shutdown: CancellationToken,
     ) -> eyre::Result<tokio::task::JoinHandle<eyre::Result<()>>> {
         let listener =
             UnixListener::bind(path).context(format!("bind socket {}", path.display()))?;
         let server = self.clone();
-        Ok(tokio::spawn(async move { server.run(listener).await }))
+        Ok(tokio::spawn(
+            async move { server.run(listener, shutdown).await },
+        ))
     }
 
-    async fn run(self, listener: UnixListener) -> eyre::Result<()> {
+    async fn run(self, listener: UnixListener, shutdown: CancellationToken) -> eyre::Result<()> {
         loop {
-            let (stream, _) = listener
-                .accept()
-                .await
-                .context("accept control socket connection")?;
+            let (stream, _) = tokio::select! {
+                _ = shutdown.cancelled() => {
+                    tracing::info!("instance control socket shutting down");
+                    return Ok(());
+                }
+                accepted = listener.accept() => {
+                    accepted.context("accept control socket connection")?
+                }
+            };
 
             let server = self.clone();
             tokio::spawn(async move {
@@ -122,27 +134,25 @@ impl InstanceServer {
                 };
 
                 match target {
-                    ServiceTarget::VsockPort(port) => {
-                        match self.machine.connect_vsock(port).await {
-                            Ok(vsock_stream) => {
-                                accept(&mut stream, request.request_id, None).await?;
-                                spawn_tunnel(stream, vsock_stream);
-                                Ok(())
-                            }
-                            Err(err) => {
-                                tracing::info!(error = %err, service = %service, "proxy service still starting");
-                                reject(
-                                    &mut stream,
-                                    request.request_id,
-                                    RejectCode::ServiceStarting,
-                                    "service is starting",
-                                    Some(RETRY_AFTER_STARTING_MS),
-                                )
-                                .await
-                            }
+                    ProxyTarget::VsockPort(port) => match self.machine.connect_vsock(port).await {
+                        Ok(vsock_stream) => {
+                            accept(&mut stream, request.request_id, None).await?;
+                            spawn_tunnel(stream, vsock_stream);
+                            Ok(())
                         }
-                    }
-                    ServiceTarget::Serial => {
+                        Err(err) => {
+                            tracing::info!(error = %err, service = %service, "proxy service still starting");
+                            reject(
+                                &mut stream,
+                                request.request_id,
+                                RejectCode::ServiceStarting,
+                                "service is starting",
+                                Some(RETRY_AFTER_STARTING_MS),
+                            )
+                            .await
+                        }
+                    },
+                    ProxyTarget::Serial => {
                         let access = match mode {
                             ProxyMode::ReadOnly => SerialAccess::Watch,
                             ProxyMode::ReadWrite => SerialAccess::Interactive,
@@ -162,16 +172,21 @@ impl InstanceServer {
         }
     }
 
-    async fn resolve_proxy_target(&self, service: &str) -> Option<ServiceTarget> {
+    async fn resolve_proxy_target(&self, service: &str) -> Option<ProxyTarget> {
         if service == ENDPOINT_SERIAL {
-            return Some(ServiceTarget::Serial);
+            return Some(ProxyTarget::Serial);
         }
 
-        ServiceRegistry::discover(&self.machine)
-            .await
-            .ok()
-            .and_then(|registry| registry.resolve(service))
+        self.services
+            .iter()
+            .find(|candidate| candidate.id == service)
+            .map(|candidate| ProxyTarget::VsockPort(candidate.port))
     }
+}
+
+enum ProxyTarget {
+    VsockPort(u32),
+    Serial,
 }
 
 async fn accept(

@@ -27,5 +27,5 @@ pub mod v1 {
     }
 }
 
-pub const DEFAULT_DISCOVERY_PORT: u32 = 1027;
-pub const KERNEL_PARAM_DISCOVERY_PORT: &str = "bento.guest.control_port";
+pub const DEFAULT_AGENT_CONTROL_PORT: u32 = 1027;
+pub const KERNEL_PARAM_AGENT_CONTROL_PORT: &str = "bento.guest.control_port";

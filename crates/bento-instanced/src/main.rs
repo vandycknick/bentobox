@@ -3,9 +3,29 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use bento_core::InstanceFile;
-use bento_vmmon::daemon::VmMon;
-use bento_vmmon::StartupReporter;
 use clap::Parser;
+
+mod background;
+mod bootstrap;
+mod context;
+mod guest;
+mod guest_control;
+mod host_export;
+mod machine;
+mod monitor_config;
+mod pid_guard;
+mod runtime;
+mod server;
+mod service_config;
+mod services;
+mod shutdown;
+mod startup;
+mod startup_reporter;
+mod state;
+mod tunnel;
+
+use crate::runtime::format_error_chain;
+use crate::startup_reporter::StartupReporter;
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "vmmon", disable_help_subcommand = true)]
@@ -26,9 +46,18 @@ struct Args {
 fn main() -> eyre::Result<()> {
     let args = Args::parse();
 
+    if args.startup_fd.is_none() && !args.foreground {
+        return Err(eyre::eyre!(
+            "--startup-fd is required unless running with --foreground"
+        ));
+    }
+
     if !args.foreground {
         daemonize(&args)?;
     }
+
+    let startup_reporter = StartupReporter::from(args.startup_fd)
+        .map_err(|err| eyre::eyre!("open startup reporter: {err}"))?;
 
     let trace_path = args.data_dir.join(InstanceFile::InstancedTraceLog.as_str());
 
@@ -50,8 +79,6 @@ fn main() -> eyre::Result<()> {
         .try_init()
         .map_err(|err| eyre::eyre!("initialize instanced tracing: {err}"))?;
 
-    let startup_reporter = args.startup_fd.map(StartupReporter::from_raw_fd);
-
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -59,10 +86,21 @@ fn main() -> eyre::Result<()> {
         .block_on(run(args, startup_reporter))
 }
 
-async fn run(args: Args, startup_reporter: Option<StartupReporter>) -> eyre::Result<()> {
-    VmMon::new(args.data_dir, args.profiles)
-        .run(startup_reporter)
-        .await
+async fn run(args: Args, startup_reporter: StartupReporter) -> eyre::Result<()> {
+    let mut startup_reporter = startup_reporter;
+    let ctx = startup::init(args.data_dir.clone(), args.profiles).await?;
+
+    let result = match background::start(&ctx, &mut startup_reporter).await {
+        Ok(handles) => shutdown::run(ctx, handles).await,
+        Err(err) => Err(err),
+    };
+
+    if let Err(err) = &result {
+        let full_error = format_error_chain(err);
+        let _ = startup_reporter.report_failed(&full_error);
+    }
+
+    result
 }
 
 #[cfg(target_os = "macos")]

@@ -10,21 +10,18 @@ mod config;
 mod dns;
 mod host;
 mod init;
-mod port;
 mod port_forward;
 mod rpc;
 mod server;
 
 use std::io;
 
-use bento_protocol::services::ENDPOINT_SSH;
-use bento_protocol::v1::{EndpointDescriptor, EndpointKind};
+use bento_core::services::{GuestServiceKind, SERVICE_ID_SSH};
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
 
-use crate::config::GuestdConfig;
+use crate::config::load_guestd_config;
 use crate::dns::DnsServer;
-use crate::port_forward::ForwardRuntime;
 use crate::rpc::{serve_agent_connection, AgentContext};
 use crate::server::VsockServer;
 
@@ -48,45 +45,45 @@ async fn main() -> eyre::Result<()> {
 
     tracing::info!("agent starting");
 
-    let guestd_config = GuestdConfig::load()?;
-    let discovery_port = crate::port::from_kernel_cmdline();
-    let mut endpoints = Vec::<EndpointDescriptor>::new();
+    let guestd_config = load_guestd_config()?;
+    let control_port = guestd_config.control_port;
     let mut running_servers = Vec::new();
-    let dns_server = if guestd_config.capabilities.dns.enabled {
-        let dns_server = DnsServer::new(&guestd_config.capabilities.dns).await?;
-        DnsServer::write_resolv_conf(Some(guestd_config.capabilities.dns.listen_address))?;
+    let dns_server = if guestd_config.dns.enabled {
+        let dns_server = DnsServer::new(&guestd_config.dns).await?;
+        DnsServer::write_resolv_conf(Some(guestd_config.dns.listen_address))?;
         Some(dns_server)
     } else {
         None
     };
 
-    if guestd_config.capabilities.ssh.enabled {
-        let ssh_server = VsockServer::create(|mut stream| async move {
-            let mut ssh = TcpStream::connect("127.0.0.1:22").await?;
-            let _ = copy_bidirectional(&mut stream, &mut ssh).await?;
-            Ok(())
-        })
-        .with_concurrency(256)
-        .with_tracing(tracing::info_span!("vsock_server", endpoint = ENDPOINT_SSH))
-        .listen(None)?;
-
-        endpoints.push(EndpointDescriptor {
-            name: String::from(ENDPOINT_SSH),
-            kind: EndpointKind::Ssh as i32,
-            port: ssh_server.port,
-            guest_address: String::from("127.0.0.1:22"),
-        });
-        running_servers.push(ssh_server);
+    for service in &guestd_config.services {
+        match service.kind {
+            GuestServiceKind::Ssh => {
+                let ssh_port = service.port;
+                let ssh_server = VsockServer::create(|mut stream| async move {
+                    let mut ssh = TcpStream::connect("127.0.0.1:22").await?;
+                    let _ = copy_bidirectional(&mut stream, &mut ssh).await?;
+                    Ok(())
+                })
+                .with_concurrency(256)
+                .with_tracing(tracing::info_span!(
+                    "vsock_server",
+                    service = SERVICE_ID_SSH
+                ))
+                .listen(Some(ssh_port))?;
+                running_servers.push(ssh_server);
+            }
+            GuestServiceKind::UnixSocketForward => {
+                if let Some(server) = crate::port_forward::start_guest_service(service)? {
+                    running_servers.push(server);
+                }
+            }
+        }
     }
 
-    let forward_runtime = ForwardRuntime::start(&guestd_config.capabilities.forward)?;
-    endpoints.extend_from_slice(forward_runtime.endpoints());
+    let agent_service = AgentContext::new(guestd_config.clone());
 
-    tracing::info!(endpoints = ?endpoints, "setting up endpoints for agent discovery");
-
-    let agent_service = AgentContext::new(guestd_config.capabilities, endpoints, forward_runtime);
-
-    let discovery_server = VsockServer::create(move |stream| {
+    let control_server = VsockServer::create(move |stream| {
         let agent = agent_service.clone();
         async move {
             serve_agent_connection(stream, agent)
@@ -96,9 +93,9 @@ async fn main() -> eyre::Result<()> {
     })
     .with_concurrency(64)
     .with_tracing(tracing::info_span!("vsock_server", service = "agent"))
-    .listen(Some(discovery_port))?;
+    .listen(Some(control_port))?;
 
-    running_servers.push(discovery_server);
+    running_servers.push(control_server);
 
     let mut join_set = tokio::task::JoinSet::new();
     for server in running_servers {

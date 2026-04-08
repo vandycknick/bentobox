@@ -24,7 +24,7 @@ message InspectResponse {
   LifecycleState guest_state = 2;
   bool ready = 3;
   string summary = 4;
-  repeated CapabilityStatus capabilities = 5;
+  repeated ServiceHealth services = 5;
   repeated EndpointStatus endpoints = 6;
 }
 

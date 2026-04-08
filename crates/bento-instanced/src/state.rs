@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use bento_protocol::v1::{
-    CapabilityStatus, EndpointStatus, InspectResponse, LifecycleState, PingResponse, StatusSource,
+    EndpointStatus, InspectResponse, LifecycleState, PingResponse, ServiceHealth, StatusSource,
     StatusUpdate,
 };
 use tokio::sync::broadcast;
@@ -89,7 +89,7 @@ pub(crate) struct InstanceState {
     vm: LifecycleState,
     guest: LifecycleState,
     guest_message: String,
-    capabilities: Vec<CapabilityStatus>,
+    services: Vec<ServiceHealth>,
     static_endpoints: Vec<EndpointStatus>,
     dynamic_endpoints: Vec<EndpointStatus>,
 }
@@ -104,8 +104,8 @@ pub(crate) enum Action {
         state: LifecycleState,
         message: String,
     },
-    SetCapabilities {
-        capabilities: Vec<CapabilityStatus>,
+    SetServices {
+        services: Vec<ServiceHealth>,
     },
     SetStaticEndpoints {
         endpoints: Vec<EndpointStatus>,
@@ -133,14 +133,14 @@ impl Action {
     pub(crate) fn guest_starting() -> Self {
         Self::GuestTransition {
             state: LifecycleState::Starting,
-            message: String::from("waiting for guest capabilities"),
+            message: String::from("waiting for guest services"),
         }
     }
 
     pub(crate) fn guest_running() -> Self {
         Self::GuestTransition {
             state: LifecycleState::Running,
-            message: String::from("startup-required guest capabilities ready"),
+            message: String::from("startup-required guest services ready"),
         }
     }
 
@@ -151,8 +151,8 @@ impl Action {
         }
     }
 
-    pub(crate) fn set_capabilities(capabilities: Vec<CapabilityStatus>) -> Self {
-        Self::SetCapabilities { capabilities }
+    pub(crate) fn set_services(services: Vec<ServiceHealth>) -> Self {
+        Self::SetServices { services }
     }
 
     pub(crate) fn set_static_endpoints(endpoints: Vec<EndpointStatus>) -> Self {
@@ -189,7 +189,7 @@ pub(crate) fn select_current_inspect(state: &InstanceState) -> InspectResponse {
         guest_state: state.guest as i32,
         ready: state.vm == LifecycleState::Running && state.guest == LifecycleState::Running,
         summary: status_summary(state),
-        capabilities: state.capabilities.clone(),
+        services: state.services.clone(),
         endpoints: state
             .static_endpoints
             .iter()
@@ -228,8 +228,8 @@ fn reduce_instance_state(current: &InstanceState, action: &Action) -> InstanceSt
             next.guest = *state;
             next.guest_message = message.clone();
         }
-        Action::SetCapabilities { capabilities } => {
-            next.capabilities = capabilities.clone();
+        Action::SetServices { services } => {
+            next.services = services.clone();
         }
         Action::SetStaticEndpoints { endpoints } => {
             next.static_endpoints = endpoints.clone();
@@ -252,7 +252,7 @@ fn project_status_update(action: &Action) -> Option<StatusUpdate> {
             *state,
             message.clone(),
         )),
-        Action::SetCapabilities { .. }
+        Action::SetServices { .. }
         | Action::SetStaticEndpoints { .. }
         | Action::SetDynamicEndpoints { .. } => None,
     }
@@ -268,16 +268,16 @@ fn status_summary(state: &InstanceState) -> String {
     }
 
     let problems = state
-        .capabilities
+        .services
         .iter()
-        .filter(|capability| capability.enabled && capability.startup_required)
-        .flat_map(|capability| {
-            if capability.configured && capability.running {
+        .filter(|service| service.startup_required)
+        .flat_map(|service| {
+            if service.healthy {
                 Vec::new()
-            } else if capability.problems.is_empty() {
-                vec![capability.summary.clone()]
+            } else if service.problems.is_empty() {
+                vec![service.summary.clone()]
             } else {
-                capability.problems.clone()
+                service.problems.clone()
             }
         })
         .collect::<Vec<_>>();
@@ -286,7 +286,7 @@ fn status_summary(state: &InstanceState) -> String {
         state.guest_message.clone()
     } else {
         format!(
-            "startup-required capabilities not ready: {}",
+            "startup-required services not ready: {}",
             problems.join("; ")
         )
     }

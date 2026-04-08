@@ -416,6 +416,7 @@ dependencies = [
  "serde_yaml_ng",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tonic",
  "tower 0.5.3",
  "tracing",

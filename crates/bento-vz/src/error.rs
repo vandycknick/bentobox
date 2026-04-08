@@ -19,7 +19,7 @@ pub enum VzError {
     #[error("operation is not implemented yet: {0}")]
     Unimplemented(&'static str),
 
-    #[error("backend error: {0}")]
+    #[error("{0}")]
     Backend(String),
 
     #[error(transparent)]

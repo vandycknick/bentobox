@@ -2,6 +2,7 @@ pub mod capabilities;
 mod instance_file;
 mod machine_id;
 mod mount_path;
+pub mod services;
 mod spec;
 
 pub use crate::instance_file::InstanceFile;

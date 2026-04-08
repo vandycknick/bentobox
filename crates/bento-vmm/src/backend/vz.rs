@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bento_protocol::{DEFAULT_DISCOVERY_PORT, KERNEL_PARAM_DISCOVERY_PORT};
+use bento_protocol::{DEFAULT_AGENT_CONTROL_PORT, KERNEL_PARAM_AGENT_CONTROL_PORT};
 use bento_vz::device::{
     EntropyDeviceConfiguration, LinuxRosettaDirectoryShare, MemoryBalloonDeviceConfiguration,
     NetworkDeviceConfiguration, SerialPortConfiguration, SharedDirectory, SingleDirectoryShare,
@@ -371,7 +371,7 @@ fn build_boot_loader(spec: &VmConfig) -> Result<LinuxBootLoader, VmmError> {
         .unwrap_or("");
     let command_line = format!(
         "console=hvc0 rd.break=initqueue{} {}={} selinux=1 enforcing=0",
-        root_arg, KERNEL_PARAM_DISCOVERY_PORT, DEFAULT_DISCOVERY_PORT,
+        root_arg, KERNEL_PARAM_AGENT_CONTROL_PORT, DEFAULT_AGENT_CONTROL_PORT,
     );
     boot_loader.set_command_line(&command_line);
     Ok(boot_loader)

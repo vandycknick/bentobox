@@ -4,22 +4,34 @@ package bento.v1;
 
 message Empty {}
 
+message ServiceHealth {
+  string name = 1;
+  bool startup_required = 2;
+  bool healthy = 3;
+  string summary = 4;
+  repeated string problems = 5;
+}
+
+message SystemInfo {
+  string kernel_version = 1;
+  string os_name = 2;
+  string os_version = 3;
+  string arch = 4;
+  uint64 total_memory = 5;
+  uint64 available_memory = 6;
+  uint32 cpu_count = 7;
+  repeated double load_average = 8;
+  string hostname = 9;
+  uint64 uptime = 10;
+  repeated string ip_addresses = 11;
+}
+
 enum EndpointKind {
   ENDPOINT_KIND_UNSPECIFIED = 0;
   ENDPOINT_KIND_TCP = 1;
   ENDPOINT_KIND_UNIX_SOCKET = 2;
   ENDPOINT_KIND_SSH = 3;
   ENDPOINT_KIND_SERIAL = 4;
-}
-
-message CapabilityStatus {
-  string name = 1;
-  bool enabled = 2;
-  bool startup_required = 3;
-  bool configured = 4;
-  bool running = 5;
-  string summary = 6;
-  repeated string problems = 7;
 }
 
 message EndpointDescriptor {

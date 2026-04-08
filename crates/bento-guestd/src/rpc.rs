@@ -1,28 +1,21 @@
-use std::collections::VecDeque;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use bento_core::capabilities::{
-    CapabilitiesConfig, CAPABILITY_DNS, CAPABILITY_FORWARD, CAPABILITY_SSH,
-};
+use bento_core::services::{GuestRuntimeConfig, GuestServiceConfig, GuestServiceKind};
 use bento_protocol::v1::agent_service_server::{AgentService, AgentServiceServer};
 use bento_protocol::v1::{
-    AgentPingRequest, AgentPingResponse, CapabilityStatus, Empty, EndpointDescriptor,
-    ListCapabilitiesResponse, ListEndpointsResponse, PortEvent, SystemInfo, WatchPortsRequest,
+    AgentPingRequest, AgentPingResponse, Empty, HealthRequest, HealthResponse, ServiceHealth,
+    SystemInfo,
 };
-use futures::stream::{self, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::TcpStream;
-use tokio::sync::broadcast;
+use tokio::net::{TcpStream, UnixStream};
 use tokio_vsock::VsockStream;
 use tonic::transport::server::Connected;
 use tonic::{Request, Response, Status};
 
-use crate::dns;
 use crate::host::info::get_system_info;
-use crate::port_forward::ForwardRuntime;
 
 #[derive(Debug)]
 struct ConnectedVsock(VsockStream);
@@ -66,31 +59,19 @@ impl AsyncWrite for ConnectedVsock {
 
 #[derive(Clone)]
 pub struct AgentContext {
-    capabilities: CapabilitiesConfig,
-    endpoints: Arc<Vec<EndpointDescriptor>>,
-    forward: Arc<ForwardRuntime>,
+    config: Arc<GuestRuntimeConfig>,
 }
 
 impl AgentContext {
-    pub fn new(
-        capabilities: CapabilitiesConfig,
-        endpoints: Vec<EndpointDescriptor>,
-        forward: ForwardRuntime,
-    ) -> Self {
+    pub fn new(config: GuestRuntimeConfig) -> Self {
         Self {
-            capabilities,
-            endpoints: Arc::new(endpoints),
-            forward: Arc::new(forward),
+            config: Arc::new(config),
         }
     }
 }
 
-type WatchPortsStream = Pin<Box<dyn Stream<Item = Result<PortEvent, Status>> + Send>>;
-
 #[tonic::async_trait]
 impl AgentService for AgentContext {
-    type WatchPortsStream = WatchPortsStream;
-
     async fn ping(
         &self,
         _request: Request<AgentPingRequest>,
@@ -101,144 +82,144 @@ impl AgentService for AgentContext {
         }))
     }
 
+    async fn health(
+        &self,
+        _request: Request<HealthRequest>,
+    ) -> Result<Response<HealthResponse>, Status> {
+        let services = service_health(&self.config).await;
+        let ready = services
+            .iter()
+            .filter(|service| service.startup_required)
+            .all(|service| service.healthy);
+        let summary = health_summary(&services, ready);
+
+        Ok(Response::new(HealthResponse {
+            ready,
+            summary,
+            services,
+        }))
+    }
+
     async fn get_system_info(
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<SystemInfo>, Status> {
-        let info = get_system_info().map_err(|err| Status::internal(err.to_string()))?;
-        Ok(Response::new(info))
-    }
-
-    async fn list_capabilities(
-        &self,
-        _request: Request<Empty>,
-    ) -> Result<Response<ListCapabilitiesResponse>, Status> {
-        Ok(Response::new(ListCapabilitiesResponse {
-            capabilities: capability_statuses(&self.capabilities).await,
-        }))
-    }
-
-    async fn list_endpoints(
-        &self,
-        _request: Request<Empty>,
-    ) -> Result<Response<ListEndpointsResponse>, Status> {
-        Ok(Response::new(ListEndpointsResponse {
-            endpoints: self.endpoints.as_ref().clone(),
-        }))
-    }
-
-    async fn watch_ports(
-        &self,
-        _request: Request<WatchPortsRequest>,
-    ) -> Result<Response<Self::WatchPortsStream>, Status> {
-        let Some(manager) = self.forward.port_manager() else {
-            return Ok(Response::new(Box::pin(stream::empty())));
-        };
-
-        let snapshot = manager.snapshot_events().await;
-        let rx = manager.subscribe();
-        let pending = VecDeque::from(snapshot);
-        let updates = stream::unfold((pending, rx), |(mut pending, mut rx)| async move {
-            if let Some(event) = pending.pop_front() {
-                return Some((Ok(event), (pending, rx)));
-            }
-
-            match rx.recv().await {
-                Ok(update) => Some((Ok(update), (pending, rx))),
-                Err(broadcast::error::RecvError::Lagged(skipped)) => Some((
-                    Err(Status::resource_exhausted(format!(
-                        "port stream lagged, skipped {skipped} updates"
-                    ))),
-                    (pending, rx),
-                )),
-                Err(broadcast::error::RecvError::Closed) => None,
-            }
-        });
-
-        Ok(Response::new(Box::pin(updates)))
+        let system_info = get_system_info()
+            .map_err(|err| Status::internal(format!("failed to collect system info: {err}")))?;
+        Ok(Response::new(system_info))
     }
 }
 
-async fn capability_statuses(capabilities: &CapabilitiesConfig) -> Vec<CapabilityStatus> {
+async fn service_health(config: &GuestRuntimeConfig) -> Vec<ServiceHealth> {
     let mut statuses = Vec::new();
 
-    if capabilities.ssh.enabled {
-        statuses.push(probe_ssh().await);
-    }
-
-    if capabilities.dns.enabled {
-        let (configured, running, summary, problems) =
-            dns::capability_status(&capabilities.dns).await;
-        statuses.push(CapabilityStatus {
-            name: String::from(CAPABILITY_DNS),
-            enabled: true,
+    if config.dns.enabled {
+        let (healthy, summary, problems) = dns_health(config).await;
+        statuses.push(ServiceHealth {
+            name: String::from("dns"),
             startup_required: false,
-            configured,
-            running,
+            healthy,
             summary,
             problems,
         });
     }
 
-    if capabilities.forward.enabled {
-        statuses.push(CapabilityStatus {
-            name: String::from(CAPABILITY_FORWARD),
-            enabled: true,
-            startup_required: false,
-            configured: true,
-            running: true,
-            summary: String::from("Forward capability configured"),
-            problems: Vec::new(),
-        });
+    for service in &config.services {
+        statuses.push(probe_service(service).await);
     }
 
     statuses
 }
 
-async fn probe_ssh() -> CapabilityStatus {
-    let configured =
-        command_exists("sshd") || std::path::Path::new("/etc/ssh/sshd_config").exists();
-    let running = TcpStream::connect("127.0.0.1:22").await.is_ok();
+async fn dns_health(config: &GuestRuntimeConfig) -> (bool, String, Vec<String>) {
+    let listen = config.dns.listen_address;
+    let configured = std::path::Path::new("/etc/resolv.conf").exists();
 
-    let (summary, problems) = match (configured, running) {
-        (true, true) => (
-            String::from("OpenSSH is configured and running"),
-            Vec::new(),
-        ),
-        (true, false) => (
-            String::from("OpenSSH is configured but not running"),
-            vec![String::from("OpenSSH service is not reachable")],
-        ),
-        (false, _) => (
-            String::from("OpenSSH is not configured"),
-            vec![String::from(
-                "OpenSSH is not installed or configured in the guest",
-            )],
-        ),
+    if configured {
+        (true, format!("dns configured for {}", listen), Vec::new())
+    } else {
+        (
+            false,
+            String::from("dns configuration is missing"),
+            vec![String::from("/etc/resolv.conf was not configured")],
+        )
+    }
+}
+
+async fn probe_service(service: &GuestServiceConfig) -> ServiceHealth {
+    match service.kind {
+        GuestServiceKind::Ssh => probe_ssh(service).await,
+        GuestServiceKind::UnixSocketForward => probe_unix_socket_forward(service).await,
+    }
+}
+
+async fn probe_ssh(service: &GuestServiceConfig) -> ServiceHealth {
+    let healthy = TcpStream::connect("127.0.0.1:22").await.is_ok();
+    let (summary, problems) = if healthy {
+        (String::from("ssh is reachable"), Vec::new())
+    } else {
+        (
+            String::from("ssh is not reachable"),
+            vec![String::from("failed to connect to 127.0.0.1:22")],
+        )
     };
 
-    CapabilityStatus {
-        name: String::from(CAPABILITY_SSH),
-        enabled: true,
-        startup_required: true,
-        configured,
-        running,
+    ServiceHealth {
+        name: service.id.clone(),
+        startup_required: service.startup_required,
+        healthy,
         summary,
         problems,
     }
 }
 
-fn command_exists(command: &str) -> bool {
-    std::process::Command::new("sh")
-        .arg("-lc")
-        .arg(format!("command -v {command} >/dev/null 2>&1"))
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+async fn probe_unix_socket_forward(service: &GuestServiceConfig) -> ServiceHealth {
+    let healthy = UnixStream::connect(&service.target).await.is_ok();
+    let (summary, problems) = if healthy {
+        (format!("{} is reachable", service.target), Vec::new())
+    } else {
+        (
+            format!("{} is not reachable", service.target),
+            vec![format!("failed to connect to {}", service.target)],
+        )
+    };
+
+    ServiceHealth {
+        name: service.id.clone(),
+        startup_required: service.startup_required,
+        healthy,
+        summary,
+        problems,
+    }
+}
+
+fn health_summary(services: &[ServiceHealth], ready: bool) -> String {
+    if ready {
+        return String::from("startup-required guest services are healthy");
+    }
+
+    let waiting = services
+        .iter()
+        .filter(|service| service.startup_required && !service.healthy)
+        .map(|service| {
+            let detail = service
+                .problems
+                .first()
+                .cloned()
+                .unwrap_or_else(|| service.summary.clone());
+            format!("{}: {}", service.name, detail)
+        })
+        .collect::<Vec<_>>();
+
+    if waiting.is_empty() {
+        String::from("guest services are starting")
+    } else {
+        waiting.join("; ")
+    }
 }
 
 pub async fn serve_agent_connection(stream: VsockStream, agent: AgentContext) -> eyre::Result<()> {
-    let incoming = stream::once(async move { Ok::<_, io::Error>(ConnectedVsock(stream)) });
+    let incoming = futures::stream::once(async move { Ok::<_, io::Error>(ConnectedVsock(stream)) });
 
     tonic::transport::Server::builder()
         .add_service(AgentServiceServer::new(agent))

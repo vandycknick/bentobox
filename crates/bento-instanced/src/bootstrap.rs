@@ -4,7 +4,7 @@ use std::io::{self, Seek, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bento_core::capabilities::CapabilitiesConfig;
+use bento_core::services::GuestRuntimeConfig;
 use bento_core::{resolve_mount_location, InstanceFile};
 use bento_libvm::global_config::{ensure_guest_agent_binary, GlobalConfig};
 use bento_libvm::host_user::{self, HostUser};
@@ -36,9 +36,9 @@ struct CidataEntry {
 
 pub(crate) fn rebuild_bootstrap(
     config: &VmContext,
-    capabilities: &CapabilitiesConfig,
+    guest_runtime: &GuestRuntimeConfig,
 ) -> eyre::Result<()> {
-    if !config.requires_bootstrap_for(capabilities) {
+    if !config.requires_bootstrap_for(guest_runtime) {
         let iso_path = config.file(InstanceFile::CidataDisk);
         if iso_path.exists() {
             std::fs::remove_file(&iso_path)
@@ -54,7 +54,7 @@ pub(crate) fn rebuild_bootstrap(
         config,
         &host_user,
         &user_keys.public_key_openssh,
-        capabilities,
+        guest_runtime,
     )
 }
 
@@ -62,14 +62,14 @@ fn build_cidata_disk(
     config: &VmContext,
     host_user: &HostUser,
     ssh_public_key: &str,
-    capabilities: &CapabilitiesConfig,
+    guest_runtime: &GuestRuntimeConfig,
 ) -> eyre::Result<()> {
     let global_config = GlobalConfig::load()?;
     let agent_binary_path = ensure_guest_agent_binary(&global_config)?;
     let guest_agent_binary = std::fs::read(agent_binary_path)
         .with_context(|| format!("read guest agent binary {}", agent_binary_path.display()))?;
 
-    let desired_state = desired_guestd_state(capabilities)?;
+    let desired_state = desired_guestd_state(guest_runtime)?;
     let user_data = render_user_data(config, host_user, ssh_public_key, &desired_state)?;
     let meta_data = render_meta_data(config)?;
     let network_config = render_network_config_for_instance(config)?;
@@ -270,15 +270,15 @@ struct EthernetConfigV2 {
     dhcp6: bool,
 }
 
-fn desired_guestd_state(capabilities: &CapabilitiesConfig) -> eyre::Result<CapabilitiesConfig> {
-    Ok(capabilities.clone())
+fn desired_guestd_state(guest_runtime: &GuestRuntimeConfig) -> eyre::Result<GuestRuntimeConfig> {
+    Ok(guest_runtime.clone())
 }
 
 fn render_user_data(
     config: &VmContext,
     host_user: &HostUser,
     ssh_public_key: &str,
-    _capabilities: &CapabilitiesConfig,
+    _guest_runtime: &GuestRuntimeConfig,
 ) -> eyre::Result<String> {
     let timezone = resolve_host_timezone();
     let locale = resolve_host_locale();
@@ -422,19 +422,13 @@ fn cloud_mount_entries(config: &VmContext) -> Vec<[String; 6]> {
         .collect()
 }
 
-#[derive(Serialize)]
-struct GuestdDesiredConfig<'a> {
-    capabilities: &'a CapabilitiesConfig,
-}
-
-fn render_guestd_config(capabilities: &CapabilitiesConfig) -> eyre::Result<String> {
-    serde_yaml_ng::to_string(&GuestdDesiredConfig { capabilities })
-        .context("serialize guestd config")
+fn render_guestd_config(guest_runtime: &GuestRuntimeConfig) -> eyre::Result<String> {
+    serde_yaml_ng::to_string(guest_runtime).context("serialize guestd config")
 }
 
 fn render_config_env(
     config: &VmContext,
-    _capabilities: &CapabilitiesConfig,
+    _guest_runtime: &GuestRuntimeConfig,
 ) -> eyre::Result<String> {
     let mut env = String::new();
 
