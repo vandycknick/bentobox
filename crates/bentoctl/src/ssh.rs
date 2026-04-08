@@ -2,8 +2,8 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus};
 
-use bento_runtime::profiles::ENDPOINT_SSH;
-use bento_runtime::{host_user, ssh_keys};
+use bento_libvm::{host_user, ssh_keys};
+use bento_protocol::services::ENDPOINT_SSH;
 use eyre::{bail, Context};
 
 pub(crate) fn exec_remote_shell(name: &str, user: Option<&str>) -> eyre::Result<()> {

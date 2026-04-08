@@ -3,10 +3,10 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bento_protocol::services::ENDPOINT_SERIAL;
 use bento_protocol::v1::agent_service_client::AgentServiceClient;
 use bento_protocol::v1::{AgentPingRequest, CapabilityStatus, Empty, EndpointDescriptor};
 use bento_protocol::DEFAULT_DISCOVERY_PORT;
-use bento_runtime::profiles::ENDPOINT_SERIAL;
 use bento_vmm::VirtualMachine;
 use eyre::Context;
 use hyper_util::rt::TokioIo;

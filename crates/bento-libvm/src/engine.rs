@@ -5,15 +5,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::images::store::ImageStore;
+use bento_core::capabilities::CapabilitiesConfig;
+use bento_core::InstanceFile;
 use bento_core::{
     Architecture, Backend, Boot, Bootstrap, Capabilities, Disk, DiskKind, Guest, GuestOs, Host,
     MachineId, Mount, Network, NetworkMode, Platform, Resources, Storage, VmSpec,
 };
+use bento_protocol::services::ENDPOINT_SSH;
 use bento_protocol::v1::InspectResponse;
-use bento_runtime::capabilities::CapabilitiesConfig;
-use bento_runtime::images::store::ImageStore;
-use bento_runtime::instance::InstanceFile;
-use bento_runtime::profiles::ENDPOINT_SSH;
 use nix::{
     sys::signal::Signal,
     unistd::{pipe, Pid},

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_runtime::capabilities::{
+use bento_core::capabilities::{
     DnsCapabilityConfig, DnsRecordValue, DnsZone, DNS_RECORD_HOST_BENTO_INTERNAL,
 };
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
@@ -391,14 +391,14 @@ fn with_builtin_bento_zone(
     });
 
     if let Some(ip) = ipv4 {
-        zone.records.push(bento_runtime::capabilities::DnsRecord {
+        zone.records.push(bento_core::capabilities::DnsRecord {
             name: String::from("host"),
             value: DnsRecordValue::A(ip),
         });
     }
 
     if let Some(ip) = ipv6 {
-        zone.records.push(bento_runtime::capabilities::DnsRecord {
+        zone.records.push(bento_core::capabilities::DnsRecord {
             name: String::from("host"),
             value: DnsRecordValue::Aaaa(ip),
         });
@@ -522,7 +522,7 @@ fn select_upstreams(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bento_runtime::capabilities::{DnsRecord, DnsZone};
+    use bento_core::capabilities::{DnsRecord, DnsZone};
 
     #[test]
     fn write_resolv_conf_replaces_existing_file_with_symlink() {

@@ -77,5 +77,5 @@ pub enum LibVmError {
     Io(#[from] std::io::Error),
 
     #[error(transparent)]
-    ImageStore(#[from] bento_runtime::images::store::ImageStoreError),
+    ImageStore(#[from] crate::images::store::ImageStoreError),
 }

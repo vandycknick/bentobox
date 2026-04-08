@@ -311,8 +311,8 @@ dependencies = [
 name = "bento-guestd"
 version = "0.1.0"
 dependencies = [
+ "bento-core",
  "bento-protocol",
- "bento-runtime",
  "eyre",
  "futures",
  "futures-util",
@@ -337,58 +337,44 @@ version = "0.1.0"
 dependencies = [
  "bento-core",
  "bento-protocol",
- "bento-runtime",
+ "chrono",
+ "eyre",
+ "flate2",
+ "getrandom 0.3.4",
  "hyper-util",
+ "libc",
  "nix 0.31.1",
+ "oci-client",
+ "oci-spec 0.9.0",
  "rusqlite",
+ "serde",
+ "serde_json",
  "serde_yaml_ng",
+ "sha2 0.10.9",
+ "ssh-key",
+ "tar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
  "tower 0.5.3",
+ "zstd",
 ]
 
 [[package]]
 name = "bento-protocol"
 version = "0.1.0"
 dependencies = [
+ "postcard",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
  "serde",
  "serde_json",
  "tarpc",
+ "tokio",
  "tonic",
  "tonic-build",
-]
-
-[[package]]
-name = "bento-runtime"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "eyre",
- "flate2",
- "futures",
- "getrandom 0.3.4",
- "libc",
- "nix 0.31.1",
- "oci-client",
- "oci-spec 0.9.0",
- "postcard",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2 0.10.9",
- "signal-hook",
- "ssh-key",
- "tar",
- "tarpc",
- "thiserror 2.0.18",
- "tokio",
- "vsock",
- "zstd",
 ]
 
 [[package]]
@@ -417,7 +403,6 @@ dependencies = [
  "bento-core",
  "bento-libvm",
  "bento-protocol",
- "bento-runtime",
  "bento-vmm",
  "clap",
  "eyre",
@@ -461,8 +446,6 @@ dependencies = [
  "bento-core",
  "bento-libvm",
  "bento-protocol",
- "bento-runtime",
- "bento-vmmon",
  "chrono",
  "clap",
  "eyre",
@@ -3346,16 +3329,6 @@ name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
-
-[[package]]
-name = "signal-hook"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b57709da74f9ff9f4a27dce9526eec25ca8407c45a7887243b031a58935fb8e"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
 
 [[package]]
 name = "signal-hook-registry"

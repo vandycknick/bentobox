@@ -17,8 +17,8 @@ mod server;
 
 use std::io;
 
+use bento_protocol::services::ENDPOINT_SSH;
 use bento_protocol::v1::{EndpointDescriptor, EndpointKind};
-use bento_runtime::profiles::ENDPOINT_SSH;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
 

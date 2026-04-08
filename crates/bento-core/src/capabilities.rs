@@ -125,3 +125,114 @@ pub struct UdsForwardConfig {
     pub guest_path: String,
     pub host_path: String,
 }
+
+// Overlay types used by profile resolution to merge capability config layers.
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct CapabilitiesOverlay {
+    #[serde(default)]
+    pub ssh: SshCapabilityOverlay,
+    #[serde(default)]
+    pub dns: DnsCapabilityOverlay,
+    #[serde(default)]
+    pub forward: ForwardCapabilityOverlay,
+}
+
+impl CapabilitiesOverlay {
+    pub fn is_empty(&self) -> bool {
+        self.ssh.enabled.is_none()
+            && self.dns.enabled.is_none()
+            && self.dns.listen_address.is_none()
+            && self.dns.upstream_servers.is_empty()
+            && self.dns.zones.is_empty()
+            && self.forward.enabled.is_none()
+            && self.forward.tcp.auto_discover.is_none()
+            && self.forward.uds.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SshCapabilityOverlay {
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DnsCapabilityOverlay {
+    pub enabled: Option<bool>,
+    pub listen_address: Option<IpAddr>,
+    #[serde(default)]
+    pub upstream_servers: Vec<SocketAddr>,
+    #[serde(default)]
+    pub zones: Vec<DnsZone>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ForwardCapabilityOverlay {
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub tcp: TcpForwardOverlay,
+    #[serde(default)]
+    pub uds: Vec<UdsForwardConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct TcpForwardOverlay {
+    pub auto_discover: Option<bool>,
+}
+
+impl CapabilitiesConfig {
+    pub fn merge(&mut self, overlay: CapabilitiesOverlay) {
+        if let Some(enabled) = overlay.ssh.enabled {
+            self.ssh.enabled = enabled;
+        }
+
+        if let Some(enabled) = overlay.dns.enabled {
+            self.dns.enabled = enabled;
+        }
+        if let Some(listen_address) = overlay.dns.listen_address {
+            self.dns.listen_address = listen_address;
+        }
+        for upstream in overlay.dns.upstream_servers {
+            if !self
+                .dns
+                .upstream_servers
+                .iter()
+                .any(|existing| existing == &upstream)
+            {
+                self.dns.upstream_servers.push(upstream);
+            }
+        }
+        for zone in overlay.dns.zones {
+            if let Some(existing) = self
+                .dns
+                .zones
+                .iter_mut()
+                .find(|existing| existing.domain == zone.domain)
+            {
+                *existing = zone;
+            } else {
+                self.dns.zones.push(zone);
+            }
+        }
+
+        if let Some(enabled) = overlay.forward.enabled {
+            self.forward.enabled = enabled;
+        }
+        if let Some(auto_discover) = overlay.forward.tcp.auto_discover {
+            self.forward.tcp.auto_discover = auto_discover;
+        }
+        for forward in overlay.forward.uds {
+            if let Some(existing) = self
+                .forward
+                .uds
+                .iter_mut()
+                .find(|existing| existing.name == forward.name)
+            {
+                *existing = forward;
+            } else {
+                self.forward.uds.push(forward);
+            }
+        }
+    }
+}

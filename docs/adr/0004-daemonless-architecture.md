@@ -35,7 +35,7 @@ We want to preserve the rough no-central-daemon model used by Podman/libpod/conm
 - Make `bento-vmmon` one process per running VM.
 - Move monitor spawn and startup ownership from the CLI into `bento-libvm`.
 - Keep `config.yaml` in the per-instance directory as the canonical machine configuration.
-- Use `redb` for manager metadata and indexes, including ULID-to-name mapping.
+- Use SQLite (WAL mode) for manager metadata and indexes, including UUID-to-name mapping.
 - Preserve the existing Negotiate protocol model so `vmmon` can still upgrade a connection to serial attach, vsock access, or RPC.
 - Define an API split that supports local ABI mode now and future tunnel mode later.
 
@@ -44,7 +44,7 @@ We want to preserve the rough no-central-daemon model used by Podman/libpod/conm
 - Implement the future remote manager daemon in this phase.
 - Introduce a long-lived always-on daemon as the primary architecture.
 - Redesign the current Negotiate protocol.
-- Finalize the full `redb` schema beyond the responsibilities and canonical data ownership defined here.
+- Finalize the full SQLite schema beyond the responsibilities and canonical data ownership defined here.
 
 ## Decision
 
@@ -61,9 +61,9 @@ We will adopt the following architecture:
 - `bento-libvm` will stop `bento-vmmon` using signals. `Stop` will not be part of `VmMonitorService`.
 - during migration, `bento-libvm` may temporarily use the monitor pidfile to signal `vmmon` for stop and to observe shutdown completion.
 - the daemonizing parent `vmmon` process forwards the child monitor startup result over the original startup pipe so `bento-libvm` still sees a single startup handshake.
-- The machine stable identity will be a ULID stored in `redb` and used as the per-instance directory name.
-- The canonical per-instance data directory will be `~/.local/share/bento/instances/<ulid>/`.
-- The canonical `redb` database location will be `~/.local/share/bento/state.redb`.
+- The machine stable identity will be a UUID stored in SQLite and used as the per-instance directory name.
+- The canonical per-instance data directory will be `~/.local/share/bento/instances/<uuid>/`.
+- The canonical SQLite database location will be `~/.local/share/bento/state.db`.
 - `InstanceService` will be the manager API.
 - `VmMonitorService` will be the per-VM monitor API.
 - The existing Negotiate protocol will remain, implemented server-side in `bento-vmmon` and client-side in `bento-libvm`.
@@ -101,11 +101,11 @@ It owns:
 - backend, architecture, platform, network, and storage enums and structs,
 - machine metadata types shared across crates,
 - restart policy and label models,
-- ULID-backed machine identity types.
+- UUID-backed machine identity types.
 
 It does not own:
 
-- `redb`,
+- SQLite,
 - filesystem layout,
 - image store policy,
 - process management,
@@ -120,9 +120,9 @@ It owns:
 
 - machine creation, start, stop, remove, list, and inspect,
 - the top-level data directory and instance directory layout,
-- `redb` state at `~/.local/share/bento/state.redb`,
-- ULID allocation,
-- mapping ULID to name and name to ULID,
+- SQLite state at `~/.local/share/bento/state.db`,
+- UUID allocation,
+- mapping UUID to name and name to UUID,
 - instance metadata, labels, creation timestamps, and restart policy,
 - writing the canonical `config.yaml` from `bento-core::VmSpec`,
 - image resolution and instance materialization,
@@ -191,10 +191,10 @@ It does not own:
 
 ### Canonical machine identity
 
-- Every machine has a stable ULID.
-- The ULID is the manager identity used in `redb`.
-- The per-instance directory name is that ULID.
-- Human-readable names are aliases resolved through `redb`.
+- Every machine has a stable UUID.
+- The UUID is the manager identity used in SQLite.
+- The per-instance directory name is that UUID (32 lowercase hex chars, no dashes).
+- Human-readable names are aliases resolved through SQLite.
 
 ### Canonical machine config
 
@@ -204,24 +204,20 @@ It does not own:
 
 ### Manager metadata and indexes
 
-`~/.local/share/bento/state.redb` stores:
+`~/.local/share/bento/state.db` (SQLite, WAL mode) stores:
 
-- ULID to name mapping,
-- name to ULID mapping,
+- UUID to name mapping,
+- name to UUID mapping,
 - creation time,
-- labels,
-- restart policy,
-- instance directory path,
-- image and source relationships,
-- cached last-known runtime metadata as needed.
+- instance directory path.
 
-`redb` does not replace `config.yaml` as the canonical boot input.
+SQLite does not replace `config.yaml` as the canonical boot input.
 
 ### Observed runtime state
 
 Runtime truth comes from `bento-vmmon` when it is running.
 
-Manager metadata may cache last-known runtime state, but runtime liveness and readiness are observed from the running monitor and not inferred solely from `redb`.
+Manager metadata may cache last-known runtime state, but runtime liveness and readiness are observed from the running monitor and not inferred solely from SQLite.
 
 ## On-disk Layout
 
@@ -229,9 +225,9 @@ The default layout is:
 
 ```text
 ~/.local/share/bento/
-  state.redb
+  state.db
   instances/
-    <ulid>/
+    <uuid>/
       config.yaml
       vmmon.pid
       vmmon.sock
@@ -501,10 +497,9 @@ This shape is intentionally manager-facing and canonical. Backend-private derive
 ### Local ABI start flow
 
 ```text
-CLI/SDK -> libvm: Start(name or ulid)
-libvm -> redb: resolve name -> ulid
-libvm -> redb: mark starting
-libvm -> vmmon: spawn --data-dir ~/.local/share/bento/instances/<ulid> --startup-fd N
+CLI/SDK -> libvm: Start(name or uuid)
+libvm -> sqlite: resolve name -> uuid
+libvm -> vmmon: spawn --data-dir ~/.local/share/bento/instances/<uuid> --startup-fd N
 vmmon -> vmmon: parse args, init logging, build tokio runtime
 vmmon -> vmmon: daemonize
 vmmon -> config.yaml: load VmSpec
@@ -512,15 +507,14 @@ vmmon -> vmmon: bind monitor socket, write pidfile
 vmmon -> vmm: create VM
 vmmon -> vmm: start VM
 vmmon -> libvm: Started { vmmon_pid, socket_path, vm_pid? }
-libvm -> redb: record monitor metadata
 libvm -> CLI/SDK: success
 ```
 
 ### Graceful stop flow
 
 ```text
-CLI/SDK -> libvm: Stop(name or ulid)
-libvm -> redb: resolve name -> ulid
+CLI/SDK -> libvm: Stop(name or uuid)
+libvm -> sqlite: resolve name -> uuid
 libvm -> vmmon: SIGTERM
 vmmon -> vmmon: transition to stopping
 vmmon -> vmm: graceful stop
@@ -534,7 +528,7 @@ libvm -> CLI/SDK: stop requested
 ### Forced stop escalation
 
 ```text
-CLI/SDK -> libvm: Stop(name or ulid)
+CLI/SDK -> libvm: Stop(name or uuid)
 libvm -> vmmon: SIGTERM
 vmmon -> vmm: graceful stop
 ... timeout expires ...
@@ -559,7 +553,7 @@ vmmon -> vmmon: exit
 
 - add `bento-core`,
 - move shared domain types into it,
-- define ULID-backed machine identity types,
+- define UUID-backed machine identity types,
 - add serialization for `VmSpec`.
 
 ### Phase 3: introduce `bento-libvm`
@@ -571,11 +565,11 @@ vmmon -> vmmon: exit
 
 ### Phase 4: adopt manager state and layout
 
-- add `redb` at `~/.local/share/bento/state.redb`,
-- allocate ULIDs on create,
-- move instance directories to `~/.local/share/bento/instances/<ulid>/`,
+- add SQLite at `~/.local/share/bento/state.db`,
+- allocate UUIDs on create,
+- move instance directories to `~/.local/share/bento/instances/<uuid>/`,
 - write canonical `config.yaml`,
-- store name mappings and metadata in `redb`.
+- store name mappings and metadata in SQLite.
 
 ### Phase 5: rename and restructure monitor
 
@@ -610,19 +604,19 @@ vmmon -> vmmon: exit
 - One monitor per running VM creates a clear operational boundary.
 - Startup error propagation becomes explicit instead of pidfile- and socket-poll-based.
 - `config.yaml` remains human-inspectable and canonical.
-- ULID-backed machine identity gives stable manager identity while allowing mutable names.
+- UUID-backed machine identity gives stable manager identity while allowing mutable names.
 - Existing Negotiate behavior can be preserved while moving ownership to the right layers.
 
 ### Negative
 
 - The refactor will touch multiple crate boundaries.
 - Startup and shutdown become more explicitly structured and therefore require careful migration.
-- `redb` introduces a new source of manager state that must stay consistent with the filesystem.
+- SQLite introduces a new source of manager state that must stay consistent with the filesystem.
 - Temporary adapters may be needed while moving logic out of `bento-runtime` and the CLI.
 
 ## Open Questions
 
-- The exact `redb` table layout is still to be defined.
+- The exact SQLite schema is still to be defined.
 - The exact startup pipe wire format still needs to be finalized.
 - The exact forced-shutdown timeout and escalation behavior still needs to be finalized.
 - The exact `VmMonitorService::Inspect` payload still needs to be defined.

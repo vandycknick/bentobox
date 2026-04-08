@@ -1,10 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use bento_core::{NetworkMode as SpecNetworkMode, VmSpec};
-use bento_runtime::capabilities::{
+use bento_core::capabilities::{
     CapabilitiesConfig, DnsCapabilityConfig, ForwardCapabilityConfig, SshCapabilityConfig,
 };
-use bento_runtime::instance::{InstanceFile, NetworkMode};
+use bento_core::{InstanceFile, NetworkMode as SpecNetworkMode, VmSpec};
 
 #[derive(Debug, Clone)]
 pub(crate) struct VmContext {
@@ -55,11 +54,11 @@ impl VmContext {
             || self.spec.host.rosetta
     }
 
-    pub(crate) fn resolved_network_mode(&self) -> NetworkMode {
+    pub(crate) fn resolved_network_mode(&self) -> bento_vmm::NetworkMode {
         match self.spec.network.mode {
-            SpecNetworkMode::None => NetworkMode::None,
-            SpecNetworkMode::User => NetworkMode::VzNat,
-            SpecNetworkMode::Bridged => NetworkMode::Bridged,
+            SpecNetworkMode::None => bento_vmm::NetworkMode::None,
+            SpecNetworkMode::User => bento_vmm::NetworkMode::VzNat,
+            SpecNetworkMode::Bridged => bento_vmm::NetworkMode::Bridged,
         }
     }
 

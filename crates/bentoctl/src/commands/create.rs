@@ -1,12 +1,25 @@
 use bento_core::Mount;
 use bento_libvm::{CreateMachineRequest, LibVm};
-use bento_runtime::instance::{MountConfig, NetworkMode};
 use clap::Args;
 use eyre::Context;
 use std::{
     fmt::{Display, Formatter},
     path::{Path, PathBuf},
 };
+
+#[derive(Debug, Clone)]
+pub(crate) struct MountConfig {
+    pub location: PathBuf,
+    pub writable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NetworkMode {
+    VzNat,
+    None,
+    Bridged,
+    Cni,
+}
 
 #[derive(Args, Debug)]
 pub struct Cmd {

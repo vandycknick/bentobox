@@ -32,8 +32,8 @@ At the end of the migration:
 - `bento-libvm` owns machine lifecycle, machine inventory, state layout, image/profile/bootstrap policy, Negotiate client logic, and spawning `bento-vmmon`.
 - `bento-vmmon` owns per-VM supervision, Negotiate server logic, runtime state, serial/vsock/RPC upgrades, and signal-based shutdown.
 - `bento-vmm` remains the backend abstraction.
-- `config.yaml` in `~/.local/share/bento/instances/<ulid>/` is the canonical machine config.
-- `~/.local/share/bento/state.redb` stores machine metadata and name/ULID mappings.
+- `config.yaml` in `~/.local/share/bento/instances/<uuid>/` is the canonical machine config.
+- `~/.local/share/bento/state.db` (SQLite, WAL mode) stores machine metadata and name/UUID mappings.
 
 ## Current High-level Migration Strategy
 
@@ -42,7 +42,7 @@ The migration is split into seven phases:
 1. Define the architecture and migration plan.
 2. Introduce `bento-core` and canonical shared types.
 3. Introduce `bento-libvm` as the new engine crate.
-4. Adopt ULID identity, `redb`, and the new on-disk layout.
+4. Adopt UUID identity, SQLite, and the new on-disk layout.
 5. Rename and restructure `bento-instanced` into `bento-vmmon`.
 6. Split manager and monitor APIs, and move Negotiate ownership.
 7. Thin the CLI and remove obsolete seams.
@@ -105,7 +105,7 @@ The refactor needs a stable domain contract before storage, process supervision,
 
 - [x] Add `crates/bento-core/Cargo.toml`.
 - [x] Add `crates/bento-core/src/lib.rs`.
-- [x] Add ULID-backed machine identity type.
+- [x] Add UUID-backed machine identity type.
 - [x] Define the canonical `VmSpec`.
 - [x] Define supporting types used by `VmSpec`.
 - [x] Add serde derives and serialization support.
@@ -116,7 +116,7 @@ The refactor needs a stable domain contract before storage, process supervision,
 ### Detailed Steps
 
 1. Create the crate and add it to the workspace.
-2. Add a machine identity abstraction backed by ULID.
+2. Add a machine identity abstraction backed by UUID.
 3. Implement `VmSpec` and supporting enums/structs from the ADR.
 4. Keep the API narrow. Avoid adding storage helpers, path helpers, or process code here.
 5. Add serialization tests for `config.yaml` compatibility.
@@ -127,15 +127,15 @@ The refactor needs a stable domain contract before storage, process supervision,
 
 - `bento-core` compiles.
 - `VmSpec` exists and is serializable.
-- Machine identity type exists and is ULID-backed.
+- Machine identity type exists and is UUID-backed.
 - No behavior has moved yet.
 
 ### Status
 
-- `bento-core` has been added with `MachineId`, `VmSpec`, and supporting domain types.
+- `bento-core` has been added with `MachineId` (UUID-backed), `VmSpec`, and supporting domain types.
 - YAML round-trip tests are in place.
-- Workspace-wide `cargo clippy --all --benches --tests --examples --all-features` currently fails on macOS in the existing `netlink-sys` dependency path pulled by other crates, not in `bento-core`.
-- `cargo clippy -p bento-core --tests --all-features` passes.
+- `MachineId` uses UUID v4, displays as 32-char lowercase hex, accepts both dashed and undashed UUID in `FromStr`.
+- `MachineId::short()` returns the first 12 hex characters. `SHORT_ID_LEN` is the single source of truth for short ID length.
 
 ### Risks
 
@@ -164,7 +164,7 @@ The CLI must eventually stop owning business logic, and runtime policy must move
 - [x] Add `crates/bento-libvm/Cargo.toml`.
 - [x] Add `crates/bento-libvm/src/lib.rs`.
 - [x] Add top-level data-dir resolution helpers.
-- [x] Add instance-dir path helpers for ULID-backed paths.
+- [x] Add instance-dir path helpers for UUID-backed paths.
 - [x] Add manager-facing error types.
 - [x] Add machine lookup and identity resolution abstractions.
 - [x] Add initial create/start/stop/list/inspect API skeletons.
@@ -215,7 +215,7 @@ The CLI must eventually stop owning business logic, and runtime policy must move
 - Moving too much behavior at once will make failures hard to isolate.
 - Introducing `bento-libvm` without a clear compatibility layer can break the current CLI mid-migration.
 
-## Phase 4: Adopt ULID identity, `redb`, and new layout
+## Phase 4: Adopt UUID identity, SQLite, and new layout
 
 ### Goal
 
@@ -227,98 +227,64 @@ The architecture depends on stable machine identity, manager-owned metadata, and
 
 ### Deliverables
 
-- `redb` database at `~/.local/share/bento/state.redb`
-- ULID-based machine creation flow
-- `~/.local/share/bento/instances/<ulid>/` layout
+- SQLite database at `~/.local/share/bento/state.db`
+- UUID-based machine creation flow
+- `~/.local/share/bento/instances/<uuid>/` layout
 - Canonical `config.yaml` written from `bento-core::VmSpec`
 
 ### Tasks
 
-- [x] Add `redb` dependency to the appropriate crate.
-- [x] Define `redb` tables for machine identity and metadata.
-- [x] Store ULID to name mapping.
-- [x] Store name to ULID mapping.
+- [x] Add `rusqlite` dependency to the appropriate crate.
+- [x] Define SQLite tables for machine identity and metadata.
+- [x] Store UUID to name mapping.
+- [x] Store name to UUID mapping.
 - [x] Store instance directory path.
-- [ ] Store creation time, labels, restart policy, and related metadata.
-- [x] Change machine creation to allocate ULIDs.
-- [x] Change machine creation to create `instances/<ulid>/`.
+- [x] Store creation time.
+- [x] Change machine creation to allocate UUIDs.
+- [x] Change machine creation to create `instances/<uuid>/`.
 - [x] Write `config.yaml` as the canonical machine config.
-- [ ] Add migration or compatibility behavior for existing name-based instance directories if needed.
 
 ### Detailed Steps
 
-1. Add the `redb` schema for the minimum required manager records.
-2. Add a ULID allocation path during machine creation.
+1. Add the SQLite schema for the minimum required manager records.
+2. Add a UUID allocation path during machine creation.
 3. Resolve machine names through the database instead of assuming directory names are names.
-4. Create `instances/<ulid>/` directories.
+4. Create `instances/<uuid>/` directories.
 5. Write `config.yaml` from `bento-core::VmSpec`.
-6. Decide whether existing machines need migration, lazy compatibility lookup, or a one-time import path.
-7. Update the ADR if compatibility behavior changes the long-term model.
-8. Update this plan if legacy migration turns out to require its own dedicated phase.
 
 ### Exit Criteria
 
-- New machines are created with ULIDs.
-- New machines use `instances/<ulid>/config.yaml`.
-- `redb` stores the canonical name and ULID mappings.
+- New machines are created with UUIDs.
+- New machines use `instances/<uuid>/config.yaml`.
+- SQLite stores the canonical name and UUID mappings.
 - Manager lookup no longer depends on machine names as directory names.
 
 ### Status
 
-- `bento-libvm` now creates new machines with ULIDs.
-- New machine configs are written as canonical `VmSpec` YAML under `instances/<ulid>/config.yaml`.
-- `redb` now stores ULID-to-name, name-to-ULID, and instance-dir mappings for the new path.
-- Additional machine metadata such as creation time, labels, and restart policy are still pending.
-- Legacy instance migration behavior is still intentionally undefined.
+- `bento-libvm` now creates new machines with UUIDs.
+- New machine configs are written as canonical `VmSpec` YAML under `instances/<uuid>/config.yaml`.
+- SQLite (WAL mode, `busy_timeout(5s)`, `synchronous=NORMAL`) now stores UUID-to-name, name-to-UUID, instance-dir, and creation time.
+- `MachineRef::IdPrefix` supports partial UUID matching with ambiguity detection.
 
-### Risks
+### Notes
 
-- Existing machine compatibility may be trickier than expected.
-- Partial writes during create must be handled transactionally enough to avoid orphaned directories or DB records.
+- Phase 4 is complete.
 
 ## Phase 4.5: One-off local migration tool
 
 ### Goal
 
-Provide a one-off local tool that migrates existing old-world VMs into the new ULID, `VmSpec`, and `redb`-backed layout.
-
-### Why this phase exists
-
-The new architecture no longer treats the old name-based instance layout as a long-term compatibility target. Existing machines therefore need a one-time migration path rather than a permanent compatibility layer.
-
-### Deliverables
-
-- a one-off local migration tool in the workspace
-- dry-run support
-- per-VM or all-VM execution
-- explicit refusal to migrate running VMs
-
-### Tasks
-
-- [x] Add a one-off migration tool, likely as a small Rust workspace crate or internal bin.
-- [x] Discover old-world instance directories.
-- [x] Parse old `InstanceConfig` from old-world `config.yaml`.
-- [x] Convert old config into canonical `VmSpec`.
-- [x] Allocate a new ULID for each migrated VM.
-- [x] Move each VM into `~/.local/share/bento/instances/<ulid>/`.
-- [x] Rewrite `config.yaml` as canonical `VmSpec`.
-- [x] Insert name and ULID mappings into `~/.local/share/bento/state.redb`.
-- [x] Refuse to migrate any VM whose `id.pid` points to a live process.
-- [x] Support dry-run output before making changes.
+Provide a one-off local tool that migrates existing old-world VMs into the new UUID, `VmSpec`, and SQLite-backed layout.
 
 ### Status
 
-- A one-off migration tool crate now exists at `crates/bento-migrate-daemonless`.
-- The tool supports dry-run by default and `--execute` to apply migrations.
-- The tool supports `--all` or explicit VM names.
-- The tool refuses any VM whose `id.pid` points to a live process.
-- The tool migrates old-world configs into canonical `VmSpec`, moves the directory into the ULID-backed layout, and registers the migrated VM in `redb`.
+- A one-off migration tool crate was built at `crates/bento-migrate-daemonless`.
+- The tool was functional and tested.
+- The tool and its crate have since been removed from the workspace as no longer needed.
 
-### Exit Criteria
+### Notes
 
-- Existing stopped VMs can be migrated into the new layout.
-- Running VMs are refused explicitly and safely.
-- The tool is good enough for one-time local use and does not introduce a new compatibility layer.
+- Phase 4.5 is complete and the tool has been retired.
 
 ## Phase 5: Rename and restructure `bento-instanced` into `bento-vmmon`
 
@@ -379,13 +345,13 @@ Today the CLI still starts the monitor and the monitor still owns too much mixed
 - The package and Rust crate have been renamed to `bento-vmmon` / `bento_vmmon`.
 - A real `bento-vmmon` binary now exists with a single `main.rs` entrypoint that separates bootstrap from `run()`.
 - The generated monitor executable is now named `vmmon`.
-- `bentoctl` now launches the hidden `vmmon` subcommand, with `instanced` retained as a hidden alias during the transition.
+- The temporary hidden `vmmon`/`instanced` compatibility subcommand in `bentoctl` has been removed.
 - `vmmon` now accepts `--data-dir` as its startup contract and no longer has a legacy `--name` monitor path.
 - `bento-vmmon` now reads `config.yaml` from the instance directory and drives the data-dir path directly from `VmSpec`.
 - `bento-vmmon` now reports startup success or failure back to `bento-libvm` over a startup pipe.
 - `MonitorConfig` has been collapsed into a single `VmContext` for the data-dir-driven monitor path.
 - The old `VmSpec -> InstanceConfig` adapter has been deleted from `bento-vmmon`.
-- `vmmon` now daemonizes itself by re-execing a detached `--daemonized` child and forwarding the child startup result back through the original startup pipe.
+- `vmmon` now daemonizes itself. On macOS it uses re-exec via `Command::new(current_exe).pre_exec(setsid).spawn()` because Apple's Virtualization.framework is not fork-safe. On Linux it uses `fork()+setsid()`.
 - `vmmon` now supports hidden `--foreground` and `--daemonized` modes for debug versus detached operation.
 - `vmmon` now persists durable exit state to `exit.json` in the instance directory.
 - The on-disk crate directory is still `crates/bento-instanced/` for now to keep the diff narrow while the internal restructuring continues.
@@ -470,12 +436,12 @@ The migration is not complete until the CLI is thin and the old ownership paths 
 
 ### Tasks
 
-- [ ] Route CLI create/start/stop/list/status/shell/exec flows through `bento-libvm`.
+- [x] Route CLI create/start/stop/list/status/shell/exec flows through `bento-libvm`.
 - [ ] Remove hidden or direct monitor start commands from the CLI if no longer needed.
-- [ ] Remove direct CLI process spawning of the monitor.
-- [ ] Remove old pidfile and socket polling startup logic from the CLI.
-- [ ] Remove obsolete `bento-runtime` modules that were moved into `bento-libvm` or `bento-core`.
-- [ ] Clean up imports, old helpers, and dead code.
+- [x] Remove direct CLI process spawning of the monitor.
+- [x] Remove old pidfile and socket polling startup logic from the CLI.
+- [-] Remove obsolete `bento-runtime` modules that were moved into `bento-libvm` or `bento-core`.
+- [-] Clean up imports, old helpers, and dead code.
 - [ ] Update user docs if command behavior or output changes.
 
 ### Detailed Steps
@@ -498,12 +464,13 @@ The migration is not complete until the CLI is thin and the old ownership paths 
 
 - `bentoctl list` now reads machines through `bento-libvm`.
 - `bentoctl delete` now removes machines through `bento-libvm`.
-- `bentoctl create` now routes through `bento-libvm` and creates machines directly in the ULID, `VmSpec`, and `redb`-backed layout.
+- `bentoctl create` now routes through `bento-libvm` and creates machines directly in the UUID, `VmSpec`, and SQLite-backed layout.
 - `bentoctl create-raw` now routes through `bento-libvm` and creates raw machines directly in the new layout.
 - `bentoctl start` now routes through `bento-libvm`, which spawns `vmmon --data-dir ...`.
 - `bentoctl stop` now routes through `bento-libvm`, which signals `vmmon` by pidfile for the new path.
 - `bentoctl status`, `shell`, and `exec` now route through `bento-libvm` for monitor connection and Negotiate client behavior.
 - CLI-owned pidfile polling for startup has been removed from the new path.
+- Remaining `bento-runtime` removal is in progress.
 
 ### Risks
 
@@ -522,8 +489,8 @@ These are not standalone phases, but they must be handled throughout the migrati
 
 ### Testing
 
-- [ ] Add tests for `VmSpec` serialization and config compatibility.
-- [ ] Add tests for ULID-backed lookup and state persistence.
+- [x] Add tests for `VmSpec` serialization and config compatibility.
+- [x] Add tests for UUID-backed lookup and state persistence.
 - [ ] Add tests for startup pipe success and failure paths.
 - [ ] Add tests for signal-driven stop behavior.
 - [ ] Add tests for Negotiate upgrades after ownership moves.
@@ -532,7 +499,7 @@ These are not standalone phases, but they must be handled throughout the migrati
 
 - [x] Decide how existing name-based instance directories are discovered or migrated.
 - [x] Decide whether manager state can be lazily reconstructed from disk for legacy instances.
-- [ ] Decide the exact cutover point where old CLI ownership paths are removed.
+- [-] Decide the exact cutover point where old CLI ownership paths are removed.
 
 ### Error handling and observability
 
@@ -542,13 +509,14 @@ These are not standalone phases, but they must be handled throughout the migrati
 
 ## Suggested Immediate Next Steps
 
-The next implementation slice should be:
+The next implementation slice is deleting `bento-runtime` by extracting its remaining contents into their proper homes:
 
-1. Add the one-off local migration tool for existing old-world VMs.
-2. Move monitor connection and Negotiate client ownership into `bento-libvm`.
-3. Route `status`, `shell`, and `exec` through `bento-libvm`.
-
-That closes the remaining gap between the new manager/monitor lifecycle and the old CLI-owned monitor protocol path.
+1. Extract `negotiate.rs`, service/endpoint constants, and `ServiceDescriptor` into `bento-protocol`.
+2. Extract `capabilities.rs` into `bento-core` (shared by manager, monitor, and guest agent).
+3. Move `images/`, `global_config`, `host_user`, `ssh_keys`, `directories`, and profile policy into `bento-libvm`.
+4. Split `instance.rs`: move only the needed pieces into `bento-core`, `bento-libvm`, or `bento-vmmon`. Delete the rest.
+5. Rewrite `bentoctl images` to go through `bento-libvm` instead of reaching into runtime.
+6. Delete the `bento-runtime` crate and remove it from the workspace.
 
 ## Change Log
 
@@ -572,3 +540,5 @@ Add dated notes here whenever the migration plan changes materially.
 - 2026-04-06: Phase 6 progressed, client-side monitor connection and Negotiate usage moved from `bentoctl` into `bento-libvm`.
 - 2026-04-06: Phase 7 progressed, `bentoctl status`, `shell`, `exec`, and `shell-proxy` now route through `bento-libvm` for monitor connectivity.
 - 2026-04-06: Phase 4.5 started, `bento-migrate-daemonless` was added as a one-off local migration tool for old-world VMs.
+- 2026-04-07: Machine identity switched from ULID to UUID. Manager state switched from `redb` to SQLite (WAL mode). One-off migration tool removed.
+- 2026-04-08: Updated ADR and migration plan to reflect UUID/SQLite reality and current phase status.

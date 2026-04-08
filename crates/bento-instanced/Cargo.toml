@@ -12,7 +12,6 @@ bento-core = { path = "../bento-core" }
 bento-libvm = { path = "../bento-libvm" }
 bento-vmm = { path = "../bento-vmm" }
 bento-protocol = { path = "../bento-protocol" }
-bento-runtime = { path = "../bento-runtime" }
 clap = { version = "4.5.31", features = ["derive"] }
 eyre = "0.6.12"
 fatfs = "0.3.6"

@@ -4,11 +4,11 @@ use std::io::{self, Seek, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bento_runtime::capabilities::CapabilitiesConfig;
-use bento_runtime::global_config::{ensure_guest_agent_binary, GlobalConfig};
-use bento_runtime::host_user::{self, HostUser};
-use bento_runtime::instance::{resolve_mount_location, InstanceFile, NetworkMode};
-use bento_runtime::ssh_keys;
+use bento_core::capabilities::CapabilitiesConfig;
+use bento_core::{resolve_mount_location, InstanceFile};
+use bento_libvm::global_config::{ensure_guest_agent_binary, GlobalConfig};
+use bento_libvm::host_user::{self, HostUser};
+use bento_libvm::ssh_keys;
 use eyre::Context;
 use fatfs::{format_volume, FileSystem, FormatVolumeOptions, FsOptions};
 use serde::Serialize;
@@ -368,10 +368,14 @@ fn render_network_config() -> eyre::Result<String> {
 
 fn render_network_config_for_instance(config: &VmContext) -> eyre::Result<Option<String>> {
     match config.resolved_network_mode() {
-        NetworkMode::VzNat => render_network_config().map(Some),
-        NetworkMode::None => Ok(None),
-        NetworkMode::Bridged => Err(eyre::eyre!("network mode 'bridged' is not implemented yet")),
-        NetworkMode::Cni => Err(eyre::eyre!("network mode 'cni' is not implemented yet")),
+        bento_vmm::NetworkMode::VzNat => render_network_config().map(Some),
+        bento_vmm::NetworkMode::None => Ok(None),
+        bento_vmm::NetworkMode::Bridged => {
+            Err(eyre::eyre!("network mode 'bridged' is not implemented yet"))
+        }
+        bento_vmm::NetworkMode::Cni => {
+            Err(eyre::eyre!("network mode 'cni' is not implemented yet"))
+        }
     }
 }
 

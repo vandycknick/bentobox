@@ -4,8 +4,8 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bento_core::capabilities::{ForwardCapabilityConfig, UdsForwardConfig};
 use bento_protocol::v1::{EndpointDescriptor, EndpointKind, Port, PortEvent, PortEventType};
-use bento_runtime::capabilities::{ForwardCapabilityConfig, UdsForwardConfig};
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::{broadcast, Mutex};

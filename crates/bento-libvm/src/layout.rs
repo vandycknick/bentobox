@@ -65,6 +65,13 @@ impl Layout {
     }
 }
 
+pub fn resolve_config_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute());
+    home.map(|h| h.join(".config/bento"))
+}
+
 pub fn resolve_default_data_dir() -> Result<PathBuf, LibVmError> {
     let home = env_absolute_path("HOME")?;
     let data_home = env_absolute_path("XDG_DATA_HOME")?

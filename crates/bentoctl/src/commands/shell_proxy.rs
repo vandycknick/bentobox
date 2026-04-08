@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 
 use bento_libvm::{LibVm, MachineRef};
-use bento_runtime::profiles::ENDPOINT_SSH;
+use bento_protocol::services::ENDPOINT_SSH;
 use clap::Args;
 use eyre::Context;
 use tokio::io::AsyncWriteExt;

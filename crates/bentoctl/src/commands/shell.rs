@@ -64,7 +64,7 @@ impl Cmd {
                 let stream = libvm
                     .open_service_stream(
                         &MachineRef::Id(machine.id),
-                        bento_runtime::services::SERVICE_SERIAL,
+                        bento_protocol::services::ENDPOINT_SERIAL,
                         false,
                     )
                     .await?;
@@ -84,7 +84,7 @@ impl Cmd {
             let stream = libvm
                 .open_service_stream(
                     &MachineRef::Id(machine.id),
-                    bento_runtime::services::SERVICE_SERIAL,
+                    bento_protocol::services::ENDPOINT_SERIAL,
                     false,
                 )
                 .await?;

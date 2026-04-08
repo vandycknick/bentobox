@@ -1,3 +1,6 @@
+pub mod negotiate;
+pub mod services;
+
 pub mod v1 {
     tonic::include_proto!("bento.v1");
 

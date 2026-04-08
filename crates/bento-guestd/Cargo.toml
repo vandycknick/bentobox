@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bento-core = { path = "../bento-core" }
 bento-protocol = { path = "../bento-protocol" }
-bento-runtime = { path = "../bento-runtime" }
 eyre = "0.6.12"
 futures = "0.3.31"
 hickory-proto = "0.24.4"

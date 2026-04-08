@@ -2,12 +2,12 @@ use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::path::PathBuf;
 
-use bento_runtime::images::metadata::{
+use bento_core::InstanceFile;
+use bento_libvm::images::metadata::{
     host_arch, ImageMetadata, ImageMetadataBootstrap, ImageMetadataDefaults,
 };
-use bento_runtime::images::store::{human_size, image_size_bytes, ImageStore};
-use bento_runtime::instance::GuestOs;
-use bento_runtime::instance_store::InstanceStore;
+use bento_libvm::images::store::{human_size, image_size_bytes, ImageStore};
+use bento_libvm::{LibVm, MachineRef};
 use clap::{Args, Subcommand};
 use tabwriter::TabWriter;
 
@@ -85,31 +85,59 @@ impl Cmd {
                 println!("imported {}", rec.source_ref);
             }
             ImageSubcommand::Pack(cmd) => {
-                let store = InstanceStore::new();
-                let inst = store.inspect(&cmd.vm)?;
-                if inst.status() != bento_runtime::instance::InstanceStatus::Stopped {
-                    eyre::bail!("instance {} must be stopped before packing", inst.name);
+                let libvm =
+                    LibVm::from_env().map_err(|e| eyre::eyre!("initialize bento-libvm: {e}"))?;
+                let machine_ref = MachineRef::parse(cmd.vm.clone())?;
+                let machine = libvm.inspect(&machine_ref)?;
+                if machine.status.is_running() {
+                    eyre::bail!(
+                        "instance {} must be stopped before packing",
+                        machine.spec.name
+                    );
                 }
-                let root_disk = inst.root_disk()?.ok_or_else(|| {
-                    eyre::eyre!("instance {} has no root disk to pack", inst.name)
-                })?;
-                let boot_assets = (cmd.include_kernel || cmd.include_initrd)
-                    .then(|| inst.boot_assets())
-                    .transpose()?;
+
+                let root_disk_path = machine.dir.join(InstanceFile::RootDisk.as_str());
+                if !root_disk_path.is_file() {
+                    eyre::bail!("instance {} has no root disk to pack", machine.spec.name);
+                }
+
+                let kernel_path = if cmd.include_kernel {
+                    machine.spec.boot.kernel.as_ref().map(|k| {
+                        if k.is_absolute() {
+                            k.clone()
+                        } else {
+                            machine.dir.join(k)
+                        }
+                    })
+                } else {
+                    None
+                };
+                let initramfs_path = if cmd.include_initrd {
+                    machine.spec.boot.initramfs.as_ref().map(|i| {
+                        if i.is_absolute() {
+                            i.clone()
+                        } else {
+                            machine.dir.join(i)
+                        }
+                    })
+                } else {
+                    None
+                };
+
+                let os_str = match machine.spec.platform.guest_os {
+                    bento_core::GuestOs::Linux => "linux",
+                };
 
                 let metadata = ImageMetadata {
                     schema_version: 1,
-                    os: match inst.config.os.unwrap_or(GuestOs::Linux) {
-                        GuestOs::Linux => "linux".to_string(),
-                        GuestOs::Macos => "macos".to_string(),
-                    },
+                    os: os_str.to_string(),
                     arch: host_arch().to_string(),
                     defaults: ImageMetadataDefaults {
-                        cpu: inst.config.cpus.unwrap_or(1) as u8,
-                        memory_mib: inst.config.memory.unwrap_or(512) as u32,
+                        cpu: machine.spec.resources.cpus,
+                        memory_mib: machine.spec.resources.memory_mib,
                     },
                     bootstrap: ImageMetadataBootstrap {
-                        cidata_cloud_init: inst.uses_bootstrap(),
+                        cidata_cloud_init: machine.spec.boot.bootstrap.is_some(),
                     },
                 };
 
@@ -122,18 +150,10 @@ impl Cmd {
                 let mut image_store = ImageStore::open()?;
                 let pack_layout = ImageStore::build_pack_layout(
                     &cmd.reference,
-                    &root_disk.path,
+                    &root_disk_path,
                     &metadata,
-                    cmd.include_kernel
-                        .then(|| boot_assets.as_ref().map(|assets| assets.kernel.as_path()))
-                        .flatten(),
-                    cmd.include_initrd
-                        .then(|| {
-                            boot_assets
-                                .as_ref()
-                                .map(|assets| assets.initramfs.as_path())
-                        })
-                        .flatten(),
+                    kernel_path.as_deref(),
+                    initramfs_path.as_deref(),
                     annotations,
                 )?;
 

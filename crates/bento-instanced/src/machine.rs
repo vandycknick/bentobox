@@ -1,26 +1,18 @@
 use std::path::{Path, PathBuf};
 
-use bento_core::{Backend as SpecBackend, DiskKind, NetworkMode as SpecNetworkMode, VmSpec};
+use bento_core::{
+    resolve_mount_location, Backend as SpecBackend, DiskKind, InstanceFile,
+    NetworkMode as SpecNetworkMode, VmSpec,
+};
 use bento_vmm::{
     Backend, DiskImage, MachineIdentifier, NetworkMode, SharedDirectory, VmConfig, VmmError,
 };
 use thiserror::Error;
 
-use bento_runtime::directories::Directory;
-use bento_runtime::instance::{
-    resolve_mount_location, EngineType, Instance, InstanceFile, NetworkMode as InstanceNetworkMode,
-};
-
 #[derive(Debug, Error)]
 pub enum MachineSpecError {
     #[error(transparent)]
     Machine(#[from] VmmError),
-
-    #[error(transparent)]
-    InstanceDisk(#[from] bento_runtime::instance::InstanceDiskError),
-
-    #[error(transparent)]
-    InstanceBoot(#[from] bento_runtime::instance::InstanceBootError),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -44,83 +36,14 @@ pub(crate) struct VmSpecInputs<'a> {
     pub spec: &'a VmSpec,
 }
 
-pub fn prepare_instance(inst: &Instance) -> Result<(), MachineSpecError> {
-    let _ = instance_machine_config(inst)?;
-    Ok(())
-}
-
-pub(crate) fn instance_machine_config(
-    inst: &Instance,
-) -> Result<InstanceVmConfig, MachineSpecError> {
-    let engine = inst.engine();
-    let boot_assets = inst.boot_assets()?;
-    let machine_identifier = match engine {
-        EngineType::VZ => Some(load_machine_identifier(inst)?),
-        EngineType::Firecracker => None,
-        EngineType::CloudHypervisor => None,
-    };
-
-    let mut builder = VmConfig::builder(inst.name.as_str())
-        .base_directory(inst.dir().to_path_buf())
-        .network(map_network_mode(inst.resolved_network_mode()))
-        .nested_virtualization(inst.config.nested_virtualization.unwrap_or(false))
-        .rosetta(inst.config.rosetta.unwrap_or(false));
-
-    if let Some(machine_identifier) = machine_identifier.clone() {
-        builder = builder.machine_identifier(machine_identifier);
-    }
-
-    if let Some(cpus) = inst.config.cpus {
-        builder = builder.cpus(cpus as usize);
-    }
-
-    if let Some(memory) = inst.config.memory {
-        builder = builder.memory(memory as u64);
-    }
-
-    builder = builder
-        .kernel(boot_assets.kernel)
-        .initramfs(boot_assets.initramfs);
-
-    if let Some(disk) = inst.root_disk()? {
-        builder = builder.root_disk(DiskImage {
-            path: disk.path,
-            read_only: disk.read_only,
-        });
-    }
-
-    for disk in inst.data_disks()? {
-        builder = builder.disk(DiskImage {
-            path: disk.path,
-            read_only: disk.read_only,
-        });
-    }
-
-    for (index, mount) in inst.config.mounts.iter().enumerate() {
-        let host_path = resolve_mount_location(&mount.location)
-            .map_err(MachineSpecError::InvalidMountLocation)?;
-        builder = builder.mount(SharedDirectory {
-            host_path,
-            tag: format!("mount{index}"),
-            read_only: !mount.writable,
-        });
-    }
-
-    Ok(InstanceVmConfig {
-        config: builder.build(),
-        machine_identifier,
-    })
-}
-
 pub(crate) fn vm_spec_machine_config(
     inputs: VmSpecInputs<'_>,
 ) -> Result<InstanceVmConfig, MachineSpecError> {
-    let engine = backend_to_engine(inputs.spec.platform.backend);
     let boot_assets = vm_spec_boot_assets(&inputs)?;
-    let machine_identifier = match engine {
-        EngineType::VZ => Some(load_machine_identifier_from_dir(inputs.data_dir)?),
-        EngineType::Firecracker => None,
-        EngineType::CloudHypervisor => None,
+    let machine_identifier = if backend_needs_machine_identifier(inputs.spec.platform.backend) {
+        Some(load_machine_identifier_from_dir(inputs.data_dir)?)
+    } else {
+        None
     };
 
     let mut builder = VmConfig::builder(inputs.name)
@@ -180,21 +103,8 @@ pub(crate) fn vm_spec_machine_config(
     })
 }
 
-pub(crate) fn machine_identifier_path(inst: &Instance) -> std::path::PathBuf {
-    inst.file(InstanceFile::AppleMachineIdentifier)
-}
-
 pub(crate) fn machine_identifier_path_from_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(InstanceFile::AppleMachineIdentifier.as_str())
-}
-
-fn load_machine_identifier(inst: &Instance) -> Result<MachineIdentifier, MachineSpecError> {
-    let path = machine_identifier_path(inst);
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(MachineIdentifier::from_bytes(bytes)),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(MachineIdentifier::new()),
-        Err(err) => Err(err.into()),
-    }
 }
 
 fn load_machine_identifier_from_dir(
@@ -208,17 +118,29 @@ fn load_machine_identifier_from_dir(
     }
 }
 
-fn vm_spec_boot_assets(
-    inputs: &VmSpecInputs<'_>,
-) -> Result<bento_runtime::instance::BootAssets, MachineSpecError> {
-    let default_root = || {
-        Directory::with_prefix("kernels")
-            .get_data_home()
-            .ok_or(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "default kernel bundle root unavailable",
-            ))
-            .map(|path| path.join("default"))
+struct BootAssets {
+    kernel: PathBuf,
+    initramfs: PathBuf,
+}
+
+fn vm_spec_boot_assets(inputs: &VmSpecInputs<'_>) -> Result<BootAssets, MachineSpecError> {
+    let default_root = || -> Result<PathBuf, std::io::Error> {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute());
+        let data_home = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| home.map(|h| h.join(".local/share")));
+
+        data_home
+            .map(|d| d.join("bento/kernels/default"))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "default kernel bundle root unavailable",
+                )
+            })
     };
 
     let kernel = match inputs.spec.boot.kernel.as_ref() {
@@ -246,7 +168,7 @@ fn vm_spec_boot_assets(
         .into());
     }
 
-    Ok(bento_runtime::instance::BootAssets { kernel, initramfs })
+    Ok(BootAssets { kernel, initramfs })
 }
 
 fn resolve_spec_path(data_dir: &Path, path: &Path) -> PathBuf {
@@ -257,12 +179,8 @@ fn resolve_spec_path(data_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn backend_to_engine(backend: SpecBackend) -> EngineType {
-    match backend {
-        SpecBackend::Auto | SpecBackend::Vz => EngineType::VZ,
-        SpecBackend::Firecracker => EngineType::Firecracker,
-        SpecBackend::CloudHypervisor => EngineType::CloudHypervisor,
-    }
+fn backend_needs_machine_identifier(backend: SpecBackend) -> bool {
+    matches!(backend, SpecBackend::Auto | SpecBackend::Vz)
 }
 
 pub(crate) fn machine_backend_from_vm_spec(spec: &VmSpec) -> Result<Backend, VmmError> {
@@ -278,15 +196,6 @@ fn map_vm_spec_network_mode(mode: SpecNetworkMode) -> NetworkMode {
         SpecNetworkMode::None => NetworkMode::None,
         SpecNetworkMode::User => NetworkMode::VzNat,
         SpecNetworkMode::Bridged => NetworkMode::Bridged,
-    }
-}
-
-fn map_network_mode(mode: InstanceNetworkMode) -> NetworkMode {
-    match mode {
-        InstanceNetworkMode::VzNat => NetworkMode::VzNat,
-        InstanceNetworkMode::None => NetworkMode::None,
-        InstanceNetworkMode::Bridged => NetworkMode::Bridged,
-        InstanceNetworkMode::Cni => NetworkMode::Cni,
     }
 }
 

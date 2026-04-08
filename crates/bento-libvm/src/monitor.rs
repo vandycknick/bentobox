@@ -3,14 +3,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bento_protocol::negotiate::{ClientUpgradeStreamError, Negotiate, RejectCode, Upgrade};
+use bento_protocol::services::{ServiceDescriptor, ENDPOINT_DOCKER, ENDPOINT_SERIAL, ENDPOINT_SSH};
 use bento_protocol::v1::vm_monitor_service_client::VmMonitorServiceClient;
 use bento_protocol::v1::{
     InspectRequest, InspectResponse, PingRequest, PingResponse, WatchStatusRequest,
 };
-use bento_runtime::negotiate::{ClientUpgradeStreamError, Negotiate, RejectCode, Upgrade};
-use bento_runtime::profiles::ENDPOINT_SSH;
-use bento_runtime::profiles::{ENDPOINT_DOCKER, ENDPOINT_SERIAL};
-use bento_runtime::services::ServiceDescriptor;
 use hyper_util::rt::TokioIo;
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -148,7 +146,7 @@ pub(crate) async fn open_service_stream(
         stream,
         Upgrade::Proxy {
             service: service.to_string(),
-            mode: bento_runtime::negotiate::ProxyMode::ReadWrite,
+            mode: bento_protocol::negotiate::ProxyMode::ReadWrite,
         },
     )
     .await

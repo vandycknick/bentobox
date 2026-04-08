@@ -9,7 +9,6 @@ pub mod create_raw;
 pub mod delete;
 pub mod exec;
 pub mod images;
-pub mod instanced;
 pub mod list;
 pub mod shell;
 pub mod shell_proxy;
@@ -44,8 +43,6 @@ pub enum Command {
     Delete(delete::Cmd),
     List(list::Cmd),
     Status(status::Cmd),
-    #[command(name = "vmmon", alias = "instanced", hide = true)]
-    Instanced(instanced::Cmd),
     #[command(name = "images", alias = "image")]
     Images(images::Cmd),
     #[command(hide = true)]
@@ -65,7 +62,6 @@ impl Display for Command {
             Command::Delete(cmd) => write!(f, "delete {}", cmd),
             Command::List(_) => write!(f, "list"),
             Command::Status(cmd) => write!(f, "status {}", cmd),
-            Command::Instanced(cmd) => write!(f, "instanced {}", cmd),
             Command::Images(cmd) => write!(f, "images {}", cmd),
             Command::ShellProxy(cmd) => write!(f, "shell-proxy {}", cmd),
         }
@@ -119,8 +115,6 @@ impl BentoCtlCmd {
                 let libvm = libvm()?;
                 cmd.run(&libvm).await
             }
-
-            Command::Instanced(cmd) => cmd.run().await,
 
             Command::Images(cmd) => cmd.run().await,
             Command::ShellProxy(cmd) => {

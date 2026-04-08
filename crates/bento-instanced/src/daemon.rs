@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bento_core::capabilities::CapabilitiesConfig;
+use bento_core::InstanceFile;
 use bento_core::VmSpec;
+use bento_libvm::profiles::{resolve_profiles, validate_capabilities};
 use bento_protocol::v1::{CapabilityStatus, EndpointKind, EndpointStatus, LifecycleState};
-use bento_runtime::capabilities::CapabilitiesConfig;
-use bento_runtime::instance::InstanceFile;
-use bento_runtime::profiles::{resolve_profiles, validate_capabilities};
 use bento_vmm::{VmExit, Vmm};
 use eyre::Context;
 use tokio::signal::unix::signal;

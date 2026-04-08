@@ -2,10 +2,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_runtime::negotiate::{
+use bento_protocol::negotiate::{
     Accept, Negotiate, ProxyMode, Reject, RejectCode, Response, Upgrade, NEGOTIATE_PROTOCOL_VERSION,
 };
-use bento_runtime::profiles::ENDPOINT_SERIAL;
+use bento_protocol::services::ENDPOINT_SERIAL;
 use bento_vmm::{spawn_serial_tunnel, SerialAccess, SerialConsole, VirtualMachine};
 use eyre::Context;
 use tokio::net::{UnixListener, UnixStream};

@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::runtime::Builder;
 
-use crate::directories::Directory;
 use crate::images::metadata::ImageMetadata;
+use crate::layout::resolve_default_data_dir;
 
 const REGISTRY_INDEX_VERSION: u32 = 1;
 const REGISTRY_FILE_NAME: &str = "registry.json";
@@ -248,9 +248,9 @@ pub enum ImageStoreError {
 
 impl ImageStore {
     pub fn open() -> Result<Self, ImageStoreError> {
-        let root = Directory::with_prefix("images")
-            .get_data_home()
-            .ok_or(ImageStoreError::StoreRootUnavailable)?;
+        let root = resolve_default_data_dir()
+            .map(|d| d.join("images"))
+            .map_err(|_| ImageStoreError::StoreRootUnavailable)?;
         fs::create_dir_all(&root)?;
 
         let registry_path = root.join(REGISTRY_FILE_NAME);

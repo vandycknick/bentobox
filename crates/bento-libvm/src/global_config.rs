@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use eyre::Context;
 use serde::Deserialize;
 
-use crate::directories::Directory;
+use crate::layout::resolve_config_dir;
 
 const CONFIG_FILE_NAME: &str = "config.yaml";
 
@@ -28,8 +28,7 @@ impl GlobalConfig {
 }
 
 fn config_path() -> eyre::Result<PathBuf> {
-    Directory::with_prefix("")
-        .get_config_home()
+    resolve_config_dir()
         .map(|base| base.join(CONFIG_FILE_NAME))
         .ok_or_else(|| eyre::eyre!("resolve ~/.config/bento path"))
 }

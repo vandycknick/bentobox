@@ -4,13 +4,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use bento_core::capabilities::{
+    CapabilitiesConfig, CAPABILITY_DNS, CAPABILITY_FORWARD, CAPABILITY_SSH,
+};
 use bento_protocol::v1::agent_service_server::{AgentService, AgentServiceServer};
 use bento_protocol::v1::{
     AgentPingRequest, AgentPingResponse, CapabilityStatus, Empty, EndpointDescriptor,
     ListCapabilitiesResponse, ListEndpointsResponse, PortEvent, SystemInfo, WatchPortsRequest,
-};
-use bento_runtime::capabilities::{
-    CapabilitiesConfig, CAPABILITY_DNS, CAPABILITY_FORWARD, CAPABILITY_SSH,
 };
 use futures::stream::{self, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};

@@ -1,4 +1,4 @@
-use bento_runtime::capabilities::CapabilitiesConfig;
+use bento_core::capabilities::CapabilitiesConfig;
 use serde::Deserialize;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/bento/guestd.yaml";

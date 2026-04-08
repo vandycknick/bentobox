@@ -8,9 +8,7 @@ default-run = "bentoctl"
 bento-core = { path = "../bento-core" }
 bento-libvm = { path = "../bento-libvm" }
 anyhow = "1.0.89"
-bento-vmmon = { path = "../bento-instanced" }
 bento-protocol = { path = "../bento-protocol" }
-bento-runtime = { path = "../bento-runtime" }
 clap = { version = "4.5.31", features = ["derive"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.149"

@@ -2,7 +2,7 @@ use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use bento_runtime::instance::InstanceFile;
+use bento_core::InstanceFile;
 use bento_vmmon::daemon::VmMon;
 use bento_vmmon::StartupReporter;
 use clap::Parser;

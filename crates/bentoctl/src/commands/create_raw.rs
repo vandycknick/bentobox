@@ -1,6 +1,7 @@
 use bento_core::Mount;
 use bento_libvm::{CreateRawMachineRequest, LibVm};
-use bento_runtime::instance::{MountConfig, NetworkMode};
+
+use crate::commands::create::{MountConfig, NetworkMode};
 use clap::Args;
 use eyre::Context;
 use std::fmt::{Display, Formatter};
