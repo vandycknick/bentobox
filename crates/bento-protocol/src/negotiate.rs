@@ -6,22 +6,15 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const NEGOTIATE_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_NEGOTIATE_FRAME_BYTES: usize = 16 * 1024;
-pub const MAX_SERVICE_NAME_BYTES: usize = 256;
 pub const MAX_MESSAGE_BYTES: usize = 1024;
 pub const MAX_AUTH_TOKEN_BYTES: usize = 4096;
 pub const NEGOTIATE_STREAM_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ProxyMode {
-    ReadOnly,
-    ReadWrite,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Upgrade {
-    Proxy { service: String, mode: ProxyMode },
-    VmMonitor { api_version: u32 },
+    Serial,
+    Shell,
+    Api { api_version: u32 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -93,22 +86,6 @@ impl Negotiate {
     }
 
     pub fn validate(&self) -> io::Result<()> {
-        if let Upgrade::Proxy { service, .. } = &self.upgrade {
-            if service.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "proxy service cannot be empty",
-                ));
-            }
-
-            if service.len() > MAX_SERVICE_NAME_BYTES {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "proxy service exceeded max length",
-                ));
-            }
-        }
-
         if let Some(token) = &self.auth_token {
             if token.len() > MAX_AUTH_TOKEN_BYTES {
                 return Err(io::Error::new(
@@ -422,8 +399,7 @@ mod tests {
             });
 
             let result =
-                Negotiate::client_upgrade_stream_v1(client, Upgrade::VmMonitor { api_version: 1 })
-                    .await;
+                Negotiate::client_upgrade_stream_v1(client, Upgrade::Api { api_version: 1 }).await;
 
             server_task.await.expect("server task join");
             assert!(result.is_ok());
@@ -458,8 +434,7 @@ mod tests {
             });
 
             let result =
-                Negotiate::client_upgrade_stream_v1(client, Upgrade::VmMonitor { api_version: 1 })
-                    .await;
+                Negotiate::client_upgrade_stream_v1(client, Upgrade::Api { api_version: 1 }).await;
 
             server_task.await.expect("server task join");
             match result {

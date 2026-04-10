@@ -6,7 +6,7 @@ use crate::server::{RunningServer, VsockServer};
 
 pub fn start_guest_service(service: &GuestServiceConfig) -> eyre::Result<Option<RunningServer>> {
     match service.kind {
-        GuestServiceKind::Ssh => Ok(None),
+        GuestServiceKind::Shell => Ok(None),
         GuestServiceKind::UnixSocketForward => start_guest_uds_forwarder(service).map(Some),
     }
 }

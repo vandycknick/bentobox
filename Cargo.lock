@@ -339,6 +339,7 @@ dependencies = [
  "bento-protocol",
  "chrono",
  "eyre",
+ "fatfs",
  "flate2",
  "getrandom 0.3.4",
  "hyper-util",
@@ -401,12 +402,10 @@ name = "bento-vmmon"
 version = "0.1.0"
 dependencies = [
  "bento-core",
- "bento-libvm",
  "bento-protocol",
  "bento-vmm",
  "clap",
  "eyre",
- "fatfs",
  "futures",
  "hyper-util",
  "libc",

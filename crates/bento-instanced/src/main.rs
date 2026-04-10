@@ -5,18 +5,13 @@ use std::process::{Command, Stdio};
 use bento_core::InstanceFile;
 use clap::Parser;
 
-mod background;
-mod bootstrap;
 mod context;
 mod guest;
 mod guest_control;
-mod host_export;
 mod machine;
-mod monitor_config;
+mod net;
 mod pid_guard;
 mod runtime;
-mod server;
-mod service_config;
 mod services;
 mod shutdown;
 mod startup;
@@ -32,9 +27,6 @@ use crate::startup_reporter::StartupReporter;
 struct Args {
     #[arg(long = "data-dir")]
     data_dir: PathBuf,
-
-    #[arg(long = "profile", value_name = "PROFILE")]
-    profiles: Vec<String>,
 
     #[arg(long = "startup-fd")]
     startup_fd: Option<i32>,
@@ -88,10 +80,11 @@ fn main() -> eyre::Result<()> {
 
 async fn run(args: Args, startup_reporter: StartupReporter) -> eyre::Result<()> {
     let mut startup_reporter = startup_reporter;
-    let ctx = startup::init(args.data_dir.clone(), args.profiles).await?;
-
-    let result = match background::start(&ctx, &mut startup_reporter).await {
-        Ok(handles) => shutdown::run(ctx, handles).await,
+    let result = match startup::init(args.data_dir.clone()).await {
+        Ok(ctx) => match services::start_services(&ctx, &mut startup_reporter).await {
+            Ok(handles) => shutdown::run(ctx, handles).await,
+            Err(err) => Err(err),
+        },
         Err(err) => Err(err),
     };
 
@@ -123,10 +116,6 @@ fn daemonize(args: &Args) -> eyre::Result<()> {
         nix::fcntl::fcntl(borrowed, nix::fcntl::FcntlArg::F_SETFD(fd_flags))
             .map_err(|err| eyre::eyre!("fcntl F_SETFD: {err}"))?;
     }
-    for profile in &args.profiles {
-        cmd.arg("--profile").arg(profile);
-    }
-
     unsafe {
         cmd.pre_exec(|| {
             nix::unistd::setsid()

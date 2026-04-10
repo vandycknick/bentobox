@@ -148,18 +148,18 @@ async fn dns_health(config: &GuestRuntimeConfig) -> (bool, String, Vec<String>) 
 
 async fn probe_service(service: &GuestServiceConfig) -> ServiceHealth {
     match service.kind {
-        GuestServiceKind::Ssh => probe_ssh(service).await,
+        GuestServiceKind::Shell => probe_shell(service).await,
         GuestServiceKind::UnixSocketForward => probe_unix_socket_forward(service).await,
     }
 }
 
-async fn probe_ssh(service: &GuestServiceConfig) -> ServiceHealth {
+async fn probe_shell(service: &GuestServiceConfig) -> ServiceHealth {
     let healthy = TcpStream::connect("127.0.0.1:22").await.is_ok();
     let (summary, problems) = if healthy {
-        (String::from("ssh is reachable"), Vec::new())
+        (String::from("shell is reachable"), Vec::new())
     } else {
         (
-            String::from("ssh is not reachable"),
+            String::from("shell is not reachable"),
             vec![String::from("failed to connect to 127.0.0.1:22")],
         )
     };

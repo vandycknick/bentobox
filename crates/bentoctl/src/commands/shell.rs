@@ -7,7 +7,7 @@ use crate::terminal;
 
 #[derive(Copy, Clone, Debug, ValueEnum, Eq, PartialEq)]
 pub enum AttachMode {
-    Ssh,
+    Shell,
     Serial,
 }
 
@@ -38,7 +38,7 @@ impl Display for Cmd {
 impl Display for AttachMode {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            AttachMode::Ssh => write!(f, "ssh"),
+            AttachMode::Shell => write!(f, "shell"),
             AttachMode::Serial => write!(f, "serial"),
         }
     }
@@ -62,31 +62,23 @@ impl Cmd {
                     eprintln!("[bentoctl] --user is ignored for serial attach");
                 }
                 let stream = libvm
-                    .open_service_stream(
-                        &MachineRef::Id(machine.id),
-                        bento_protocol::services::ENDPOINT_SERIAL,
-                        false,
-                    )
+                    .open_serial_stream(&MachineRef::Id(machine.id))
                     .await?;
                 return terminal::attach_serial_stream(stream).await;
             }
-            Some(AttachMode::Ssh) => {
+            Some(AttachMode::Shell) => {
                 return ssh::exec_remote_shell(&self.name, self.user.as_deref());
             }
             None => {}
         }
 
-        if !machine.spec.guest.capabilities.ssh {
+        if !machine.spec.settings.guest_enabled {
             if self.user.is_some() {
                 eprintln!("[bentoctl] --user is ignored for serial attach");
             }
-            eprintln!("[bentoctl] instance has no ssh capability, using serial attach");
+            eprintln!("[bentoctl] instance has no guest shell, using serial attach");
             let stream = libvm
-                .open_service_stream(
-                    &MachineRef::Id(machine.id),
-                    bento_protocol::services::ENDPOINT_SERIAL,
-                    false,
-                )
+                .open_serial_stream(&MachineRef::Id(machine.id))
                 .await?;
             return terminal::attach_serial_stream(stream).await;
         }

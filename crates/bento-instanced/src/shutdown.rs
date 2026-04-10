@@ -4,7 +4,8 @@ use bento_protocol::v1::LifecycleState;
 use bento_vmm::VmExit;
 use tokio::signal;
 
-use crate::context::{DaemonContext, ServiceHandles};
+use crate::context::DaemonContext;
+use crate::services::ServiceHandles;
 use crate::state::{select_current_inspect, Action};
 
 const VM_STOP_TIMEOUT: Duration = Duration::from_secs(45);
@@ -89,18 +90,6 @@ async fn drain(handles: &mut ServiceHandles) {
         }
     }
 
-    while let Some(result) = handles.host_exports.join_next().await {
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                tracing::error!(error = %err, "host export exited with error during shutdown");
-            }
-            Err(err) => {
-                tracing::error!(error = %err, "host export task failed during shutdown");
-            }
-        }
-    }
-
     handles.serial_log.abort();
     let _ = (&mut handles.serial_log).await;
 }
@@ -121,10 +110,6 @@ async fn wait_for_machine_stop(
 }
 
 async fn cleanup(ctx: &DaemonContext) -> eyre::Result<()> {
-    for export in &ctx.host_socket_exports {
-        let _ = std::fs::remove_file(&export.host_path);
-    }
-
     let snapshot = ctx.store.snapshot().unwrap_or_default();
     let inspect = select_current_inspect(&snapshot);
     tracing::debug!(summary = %inspect.summary, "final vmmon status snapshot");

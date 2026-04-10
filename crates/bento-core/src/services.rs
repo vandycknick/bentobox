@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::capabilities::DnsCapabilityConfig;
 
 pub const DEFAULT_AGENT_CONTROL_PORT: u32 = 1027;
-pub const RESERVED_SSH_PORT: u32 = 2000;
+pub const RESERVED_SHELL_PORT: u32 = 2000;
 pub const RESERVED_FORWARD_PORT_START: u32 = 2001;
-pub const SERVICE_ID_SSH: &str = "ssh";
+pub const SERVICE_ID_SHELL: &str = "shell";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GuestRuntimeConfig {
@@ -29,7 +29,7 @@ impl Default for GuestRuntimeConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GuestServiceKind {
-    Ssh,
+    Shell,
     UnixSocketForward,
 }
 

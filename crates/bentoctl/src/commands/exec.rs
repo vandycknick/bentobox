@@ -43,8 +43,8 @@ impl Cmd {
             .into());
         }
 
-        if !machine.spec.guest.capabilities.ssh {
-            bail!("instance has no ssh capability, cannot run remote commands")
+        if !machine.spec.settings.guest_enabled {
+            bail!("instance has no guest shell, cannot run remote commands")
         }
 
         let status = ssh::run_remote_command(&self.name, self.user.as_deref(), &self.command)?;

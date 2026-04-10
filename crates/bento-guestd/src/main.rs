@@ -16,7 +16,7 @@ mod server;
 
 use std::io;
 
-use bento_core::services::{GuestServiceKind, SERVICE_ID_SSH};
+use bento_core::services::{GuestServiceKind, SERVICE_ID_SHELL};
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
 
@@ -58,9 +58,9 @@ async fn main() -> eyre::Result<()> {
 
     for service in &guestd_config.services {
         match service.kind {
-            GuestServiceKind::Ssh => {
-                let ssh_port = service.port;
-                let ssh_server = VsockServer::create(|mut stream| async move {
+            GuestServiceKind::Shell => {
+                let shell_port = service.port;
+                let shell_server = VsockServer::create(|mut stream| async move {
                     let mut ssh = TcpStream::connect("127.0.0.1:22").await?;
                     let _ = copy_bidirectional(&mut stream, &mut ssh).await?;
                     Ok(())
@@ -68,10 +68,10 @@ async fn main() -> eyre::Result<()> {
                 .with_concurrency(256)
                 .with_tracing(tracing::info_span!(
                     "vsock_server",
-                    service = SERVICE_ID_SSH
+                    service = SERVICE_ID_SHELL
                 ))
-                .listen(Some(ssh_port))?;
-                running_servers.push(ssh_server);
+                .listen(Some(shell_port))?;
+                running_servers.push(shell_server);
             }
             GuestServiceKind::UnixSocketForward => {
                 if let Some(server) = crate::port_forward::start_guest_service(service)? {

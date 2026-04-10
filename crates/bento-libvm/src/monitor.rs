@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bento_protocol::negotiate::{ClientUpgradeStreamError, Negotiate, RejectCode, Upgrade};
-use bento_protocol::services::{ServiceDescriptor, ENDPOINT_DOCKER, ENDPOINT_SERIAL, ENDPOINT_SSH};
 use bento_protocol::v1::vm_monitor_service_client::VmMonitorServiceClient;
 use bento_protocol::v1::{
     InspectRequest, InspectResponse, PingRequest, PingResponse, WatchStatusRequest,
@@ -15,22 +14,22 @@ use tokio::sync::Mutex;
 use tonic::transport::Endpoint;
 use tower::service_fn;
 
-pub const DEFAULT_SERVICE_READINESS_TIMEOUT: Duration = Duration::from_secs(60 * 5);
+pub const DEFAULT_GUEST_READINESS_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 
-pub(crate) async fn wait_for_services_with_timeout(
+pub(crate) async fn wait_for_shell_with_timeout(
     socket_path: &Path,
     timeout: Duration,
     poll_interval: Duration,
-) -> Result<Vec<ServiceDescriptor>, String> {
+) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
 
     loop {
-        match probe_vm_monitor_once(socket_path).await {
-            Ok(services) => return Ok(services),
+        match probe_shell_once(socket_path).await {
+            Ok(()) => return Ok(()),
             Err(ProbeError::Retryable(message)) => {
                 if Instant::now() >= deadline {
                     return Err(format!(
-                        "timed out waiting {:?} for guest service readiness via vm monitor (last error: {})",
+                        "timed out waiting {:?} for guest shell readiness via vm monitor (last error: {})",
                         timeout, message
                     ));
                 }
@@ -123,9 +122,18 @@ pub(crate) async fn get_vm_monitor_inspect(socket_path: &Path) -> Result<Inspect
     Ok(response.into_inner())
 }
 
-pub(crate) async fn open_service_stream(
+pub(crate) async fn open_serial_stream(socket_path: &Path) -> Result<UnixStream, String> {
+    connect_upgrade_stream(socket_path, Upgrade::Serial, "serial").await
+}
+
+pub(crate) async fn open_shell_stream(socket_path: &Path) -> Result<UnixStream, String> {
+    connect_upgrade_stream(socket_path, Upgrade::Shell, "shell").await
+}
+
+async fn connect_upgrade_stream(
     socket_path: &Path,
-    service: &str,
+    upgrade: Upgrade,
+    label: &str,
 ) -> Result<UnixStream, String> {
     let stream = UnixStream::connect(socket_path).await.map_err(|err| {
         if err.kind() == io::ErrorKind::NotFound {
@@ -142,21 +150,13 @@ pub(crate) async fn open_service_stream(
         }
     })?;
 
-    match Negotiate::client_upgrade_stream_v1(
-        stream,
-        Upgrade::Proxy {
-            service: service.to_string(),
-            mode: bento_protocol::negotiate::ProxyMode::ReadWrite,
-        },
-    )
-    .await
-    {
+    match Negotiate::client_upgrade_stream_v1(stream, upgrade).await {
         Ok(stream) => Ok(stream),
         Err(ClientUpgradeStreamError::Reject(reject)) => {
             Err(render_reject_error(reject.code, &reject.message))
         }
         Err(ClientUpgradeStreamError::Io(err)) => {
-            Err(format!("negotiate proxy stream failed: {err}"))
+            Err(format!("negotiate {label} stream failed: {err}"))
         }
     }
 }
@@ -166,19 +166,25 @@ enum ProbeError {
     Fatal(String),
 }
 
-async fn probe_vm_monitor_once(socket_path: &Path) -> Result<Vec<ServiceDescriptor>, ProbeError> {
+async fn probe_shell_once(socket_path: &Path) -> Result<(), ProbeError> {
     let stream = UnixStream::connect(socket_path)
         .await
         .map_err(|err| classify_io_error("connect Negotiate socket", err))?;
 
-    match Negotiate::client_upgrade_stream_v1(stream, Upgrade::VmMonitor { api_version: 1 }).await {
+    match Negotiate::client_upgrade_stream_v1(stream, Upgrade::Api { api_version: 1 }).await {
         Ok(stream) => {
             let ping = call_vm_monitor_ping(stream).await?;
             if ping.ok {
                 let status = get_vm_monitor_inspect(socket_path).await.map_err(|err| {
                     ProbeError::Retryable(format!("get vm monitor inspect failed: {err}"))
                 })?;
-                Ok(services_from_status(&status))
+                if shell_available(&status) {
+                    Ok(())
+                } else {
+                    Err(ProbeError::Fatal(String::from(
+                        "unsupported_service: guest is ready but shell is not supported",
+                    )))
+                }
             } else {
                 let message = if ping.message.is_empty() {
                     "vm monitor ping failed".to_string()
@@ -189,7 +195,7 @@ async fn probe_vm_monitor_once(socket_path: &Path) -> Result<Vec<ServiceDescript
             }
         }
         Err(ClientUpgradeStreamError::Io(err)) => {
-            Err(classify_io_error("negotiate vm_monitor stream", err))
+            Err(classify_io_error("negotiate api stream", err))
         }
         Err(ClientUpgradeStreamError::Reject(reject)) => match reject.code {
             RejectCode::ServiceStarting | RejectCode::ServiceUnavailable => {
@@ -226,11 +232,11 @@ async fn connect_vm_monitor_stream(socket_path: &Path) -> Result<UnixStream, Str
         .await
         .map_err(|err| format!("connect Negotiate socket failed: {err}"))?;
 
-    Negotiate::client_upgrade_stream_v1(stream, Upgrade::VmMonitor { api_version: 1 })
+    Negotiate::client_upgrade_stream_v1(stream, Upgrade::Api { api_version: 1 })
         .await
         .map_err(|err| match err {
             ClientUpgradeStreamError::Io(io_err) => {
-                format!("negotiate vm_monitor stream failed: {io_err}")
+                format!("negotiate api stream failed: {io_err}")
             }
             ClientUpgradeStreamError::Reject(reject) => {
                 format!("{}: {}", reject_code_label(reject.code), reject.message)
@@ -265,32 +271,13 @@ async fn vm_monitor_client(
     Ok(VmMonitorServiceClient::new(channel))
 }
 
-fn services_from_status(status: &InspectResponse) -> Vec<ServiceDescriptor> {
-    let mut services = vec![ServiceDescriptor {
-        name: ENDPOINT_SERIAL.to_string(),
-    }];
-
-    for endpoint in &status.endpoints {
-        if !endpoint.active {
-            continue;
-        }
-
-        match endpoint.name.as_str() {
-            ENDPOINT_SSH => services.push(ServiceDescriptor {
-                name: ENDPOINT_SSH.to_string(),
-            }),
-            ENDPOINT_DOCKER => services.push(ServiceDescriptor {
-                name: ENDPOINT_DOCKER.to_string(),
-            }),
-            _ => services.push(ServiceDescriptor {
-                name: endpoint.name.clone(),
-            }),
-        }
-    }
-
-    services.sort_by(|a, b| a.name.cmp(&b.name));
-    services.dedup_by(|a, b| a.name == b.name);
-    services
+fn shell_available(status: &InspectResponse) -> bool {
+    status
+        .services
+        .iter()
+        .find(|service| service.name == "shell")
+        .map(|service| service.healthy)
+        .unwrap_or(false)
 }
 
 fn classify_io_error(context: &str, err: io::Error) -> ProbeError {
@@ -335,10 +322,10 @@ fn render_reject_error(code: RejectCode, message: &str) -> String {
     match code {
         RejectCode::ServiceStarting => format!("service_starting: {message}"),
         RejectCode::ServiceUnavailable => {
-            format!("service_unavailable: {message}. ensure guest service is running")
+            format!("service_unavailable: {message}. ensure the guest endpoint is running")
         }
         RejectCode::UnsupportedService => {
-            format!("unknown_service: {message}. try a supported service like 'ssh'")
+            format!("unknown_service: {message}. try a supported endpoint like 'shell'")
         }
         RejectCode::UnsupportedProtocol => {
             format!("unsupported_protocol: {message}. update bentoctl/vmmon to matching versions")

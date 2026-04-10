@@ -6,13 +6,12 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::images::store::ImageStore;
-use bento_core::capabilities::CapabilitiesConfig;
+use crate::launch::prepare_instance_runtime;
 use bento_core::InstanceFile;
 use bento_core::{
-    Architecture, Backend, Boot, Bootstrap, Capabilities, Disk, DiskKind, Guest, GuestOs, Host,
-    MachineId, Mount, Network, NetworkMode, Platform, Resources, Storage, VmSpec,
+    Architecture, Backend, Boot, Bootstrap, Disk, DiskKind, GuestOs, MachineId, Mount, Network,
+    NetworkMode, Platform, Resources, Settings, Storage, VmSpec,
 };
-use bento_protocol::services::ENDPOINT_SSH;
 use bento_protocol::v1::InspectResponse;
 use nix::{
     sys::signal::Signal,
@@ -138,18 +137,15 @@ impl LibVm {
             None => image_store.pull(&request.image_ref, None)?,
         };
 
-        let capabilities = default_capabilities();
-        let bootstrap = (userdata_path.is_some()
-            || capabilities.requires_bootstrap()
-            || request.rosetta)
-            .then(|| Bootstrap {
-                cloud_init: userdata_path.clone(),
-            });
+        let bootstrap = (userdata_path.is_some() || request.rosetta).then(|| Bootstrap {
+            cloud_init: userdata_path.clone(),
+        });
+        let guest_enabled = bootstrap.is_some();
 
         if bootstrap.is_some() && !selected_image.metadata.bootstrap.cidata_cloud_init {
             return Err(LibVmError::InvalidCreateRequest {
                 name: request.name,
-                reason: "instance requires bootstrap for userdata or resolved capabilities, but the selected image does not advertise bootstrap support".to_string(),
+                reason: "instance requires bootstrap for userdata or rosetta, but the selected image does not advertise bootstrap support".to_string(),
             });
         }
 
@@ -197,13 +193,10 @@ impl LibVm {
             network: Network {
                 mode: request.network.unwrap_or(NetworkMode::User),
             },
-            guest: Guest {
-                profiles: request.profiles,
-                capabilities: capabilities_to_spec(&capabilities),
-            },
-            host: Host {
+            settings: Settings {
                 nested_virtualization: request.nested_virtualization,
                 rosetta: request.rosetta,
+                guest_enabled,
             },
         };
 
@@ -241,9 +234,8 @@ impl LibVm {
         let rootfs_path = canonicalize_optional_existing_path(request.rootfs.as_deref(), "rootfs")?;
         let disk_paths = canonicalize_existing_paths(&request.disks, "disk")?;
 
-        let capabilities = default_capabilities();
-        let bootstrap = (capabilities.requires_bootstrap() || request.rosetta)
-            .then_some(Bootstrap { cloud_init: None });
+        let bootstrap = request.rosetta.then_some(Bootstrap { cloud_init: None });
+        let guest_enabled = bootstrap.is_some();
 
         let mut disks = Vec::new();
         if let Some(path) = rootfs_path.clone() {
@@ -288,13 +280,10 @@ impl LibVm {
             network: Network {
                 mode: request.network.unwrap_or(NetworkMode::User),
             },
-            guest: Guest {
-                profiles: request.profiles,
-                capabilities: capabilities_to_spec(&capabilities),
-            },
-            host: Host {
+            settings: Settings {
                 nested_virtualization: request.nested_virtualization,
                 rosetta: request.rosetta,
+                guest_enabled,
             },
         };
 
@@ -360,6 +349,14 @@ impl LibVm {
 
     pub fn remove(&self, machine: &MachineRef) -> Result<(), LibVmError> {
         let metadata = self.resolve_metadata(machine)?;
+        let pid_path = self.layout.monitor_pid_path(metadata.id);
+
+        if pid_path.exists() {
+            return Err(LibVmError::MachineAlreadyRunning {
+                reference: metadata.name.clone(),
+            });
+        }
+
         match fs::remove_dir_all(&metadata.instance_dir) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -383,7 +380,14 @@ impl LibVm {
             });
         }
 
-        let startup_pipe = spawn_vmmon(Path::new(&metadata.instance_dir), profiles)?;
+        prepare_instance_runtime(Path::new(&metadata.instance_dir), profiles).map_err(|err| {
+            LibVmError::InstancePreparationFailed {
+                reference: metadata.name.clone(),
+                message: err.to_string(),
+            }
+        })?;
+
+        let startup_pipe = spawn_vmmon(Path::new(&metadata.instance_dir))?;
         wait_for_monitor_start(startup_pipe, &self.layout.monitor_trace_path(metadata.id)).await?;
         self.machine_record(metadata)
     }
@@ -428,10 +432,30 @@ impl LibVm {
             })
     }
 
-    pub async fn open_service_stream(
+    pub async fn open_serial_stream(
         &self,
         machine: &MachineRef,
-        service: &str,
+    ) -> Result<tokio::net::UnixStream, LibVmError> {
+        let metadata = self.resolve_metadata(machine)?;
+        let socket_path = self.layout.monitor_socket_path(metadata.id);
+
+        if !self.layout.monitor_pid_path(metadata.id).exists() {
+            return Err(LibVmError::MachineNotRunning {
+                reference: metadata.name.clone(),
+            });
+        }
+
+        monitor::open_serial_stream(&socket_path)
+            .await
+            .map_err(|message| LibVmError::MonitorProtocol {
+                reference: metadata.name,
+                message,
+            })
+    }
+
+    pub async fn open_shell_stream(
+        &self,
+        machine: &MachineRef,
         wait_for_guest_readiness: bool,
     ) -> Result<tokio::net::UnixStream, LibVmError> {
         let metadata = self.resolve_metadata(machine)?;
@@ -445,13 +469,12 @@ impl LibVm {
 
         if wait_for_guest_readiness {
             let machine_record = self.machine_record(metadata.clone())?;
-            let should_wait =
-                machine_record.spec.boot.bootstrap.is_some() && service == ENDPOINT_SSH;
+            let should_wait = machine_record.spec.settings.guest_enabled;
 
             if should_wait {
-                let services = monitor::wait_for_services_with_timeout(
+                monitor::wait_for_shell_with_timeout(
                     &socket_path,
-                    monitor::DEFAULT_SERVICE_READINESS_TIMEOUT,
+                    monitor::DEFAULT_GUEST_READINESS_TIMEOUT,
                     std::time::Duration::from_secs(1),
                 )
                 .await
@@ -459,33 +482,10 @@ impl LibVm {
                     reference: metadata.name.clone(),
                     message,
                 })?;
-
-                if service == ENDPOINT_SSH
-                    && services
-                        .iter()
-                        .all(|descriptor| descriptor.name != ENDPOINT_SSH)
-                {
-                    let available = if services.is_empty() {
-                        "none".to_string()
-                    } else {
-                        services
-                            .iter()
-                            .map(|descriptor| descriptor.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    };
-
-                    return Err(LibVmError::MonitorProtocol {
-                        reference: metadata.name,
-                        message: format!(
-                            "unsupported_service: guest discovery is ready but ssh is not supported (available endpoints: {available})"
-                        ),
-                    });
-                }
             }
         }
 
-        monitor::open_service_stream(&socket_path, service)
+        monitor::open_shell_stream(&socket_path)
             .await
             .map_err(|message| LibVmError::MonitorProtocol {
                 reference: metadata.name,
@@ -574,19 +574,6 @@ impl LibVm {
     }
 }
 
-fn default_capabilities() -> CapabilitiesConfig {
-    CapabilitiesConfig::default()
-}
-
-fn capabilities_to_spec(capabilities: &CapabilitiesConfig) -> Capabilities {
-    Capabilities {
-        ssh: capabilities.ssh.enabled,
-        docker: false,
-        dns: capabilities.dns.enabled,
-        forward: capabilities.forward.enabled,
-    }
-}
-
 fn assign_mount_tags(mounts: Vec<Mount>) -> Vec<Mount> {
     mounts
         .into_iter()
@@ -665,7 +652,7 @@ fn canonicalize_existing_path(path: &Path, kind: &str) -> Result<PathBuf, LibVmE
     })
 }
 
-fn spawn_vmmon(instance_dir: &Path, profiles: &[String]) -> Result<OwnedFd, LibVmError> {
+fn spawn_vmmon(instance_dir: &Path) -> Result<OwnedFd, LibVmError> {
     let (read_fd, write_fd) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
 
     let mut command = Command::new(resolve_vmmon_executable()?);
@@ -673,9 +660,6 @@ fn spawn_vmmon(instance_dir: &Path, profiles: &[String]) -> Result<OwnedFd, LibV
     command
         .arg("--startup-fd")
         .arg(write_fd.as_raw_fd().to_string());
-    for profile in profiles {
-        command.arg("--profile").arg(profile);
-    }
 
     // vmmon handles its own daemonization via double-fork internally,
     // so we just need to make sure the write end of the startup pipe
@@ -898,10 +882,10 @@ fn create_staging_dir(layout: &Layout) -> Result<PathBuf, LibVmError> {
 #[cfg(test)]
 mod tests {
     use super::{LibVm, MachineStatus};
-    use crate::{Layout, MachineRef};
+    use crate::{Layout, LibVmError, MachineRef};
     use bento_core::{
-        Architecture, Backend, Boot, Capabilities, Guest, GuestOs, Host, Network, NetworkMode,
-        Platform, Resources, Storage, VmSpec,
+        Architecture, Backend, Boot, GuestOs, Network, NetworkMode, Platform, Resources, Settings,
+        Storage, VmSpec,
     };
 
     fn sample_vm_spec(name: &str) -> VmSpec {
@@ -928,18 +912,10 @@ mod tests {
             network: Network {
                 mode: NetworkMode::User,
             },
-            guest: Guest {
-                profiles: vec!["default".to_string()],
-                capabilities: Capabilities {
-                    ssh: true,
-                    docker: false,
-                    dns: true,
-                    forward: true,
-                },
-            },
-            host: Host {
+            settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
+                guest_enabled: true,
             },
         }
     }
@@ -1007,5 +983,31 @@ mod tests {
 
         assert!(!machine.dir.exists());
         assert!(libvm.list().expect("list machines").is_empty());
+    }
+
+    #[test]
+    fn remove_refuses_running_machine_when_pid_file_exists() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let libvm = LibVm::new(Layout::new(temp.path().join("bento"))).expect("create libvm");
+
+        let machine = libvm
+            .create_pending(sample_vm_spec("devbox"))
+            .expect("create pending machine")
+            .commit(&libvm)
+            .expect("commit machine");
+
+        let pid_path = libvm.layout().monitor_pid_path(machine.id);
+        std::fs::write(&pid_path, b"12345\n").expect("write pid file");
+
+        let err = libvm
+            .remove(&MachineRef::parse(machine.id.to_string()).expect("parse machine ref"))
+            .expect_err("removing running machine should fail");
+
+        assert!(matches!(
+            err,
+            LibVmError::MachineAlreadyRunning { ref reference } if reference == "devbox"
+        ));
+        assert!(machine.dir.exists());
+        assert_eq!(libvm.list().expect("list machines").len(), 1);
     }
 }

@@ -1,8 +1,7 @@
 use std::sync::Mutex;
 
 use bento_protocol::v1::{
-    EndpointStatus, InspectResponse, LifecycleState, PingResponse, ServiceHealth, StatusSource,
-    StatusUpdate,
+    InspectResponse, LifecycleState, PingResponse, ServiceHealth, StatusSource, StatusUpdate,
 };
 use tokio::sync::broadcast;
 
@@ -90,8 +89,6 @@ pub(crate) struct InstanceState {
     guest: LifecycleState,
     guest_message: String,
     services: Vec<ServiceHealth>,
-    static_endpoints: Vec<EndpointStatus>,
-    dynamic_endpoints: Vec<EndpointStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,12 +103,6 @@ pub(crate) enum Action {
     },
     SetServices {
         services: Vec<ServiceHealth>,
-    },
-    SetStaticEndpoints {
-        endpoints: Vec<EndpointStatus>,
-    },
-    SetDynamicEndpoints {
-        endpoints: Vec<EndpointStatus>,
     },
 }
 
@@ -154,14 +145,6 @@ impl Action {
     pub(crate) fn set_services(services: Vec<ServiceHealth>) -> Self {
         Self::SetServices { services }
     }
-
-    pub(crate) fn set_static_endpoints(endpoints: Vec<EndpointStatus>) -> Self {
-        Self::SetStaticEndpoints { endpoints }
-    }
-
-    pub(crate) fn set_dynamic_endpoints(endpoints: Vec<EndpointStatus>) -> Self {
-        Self::SetDynamicEndpoints { endpoints }
-    }
 }
 
 pub(crate) type InstanceStore = Store<InstanceState, Action, StatusUpdate>;
@@ -190,12 +173,7 @@ pub(crate) fn select_current_inspect(state: &InstanceState) -> InspectResponse {
         ready: state.vm == LifecycleState::Running && state.guest == LifecycleState::Running,
         summary: status_summary(state),
         services: state.services.clone(),
-        endpoints: state
-            .static_endpoints
-            .iter()
-            .cloned()
-            .chain(state.dynamic_endpoints.iter().cloned())
-            .collect(),
+        endpoints: Vec::new(),
     }
 }
 
@@ -217,6 +195,16 @@ pub(crate) fn select_current_events(state: &InstanceState) -> Vec<StatusUpdate> 
     events
 }
 
+pub(crate) fn guest_shell_ready(state: &InstanceState) -> bool {
+    state.guest == LifecycleState::Running
+        && state
+            .services
+            .iter()
+            .find(|service| service.name == "shell")
+            .map(|service| service.healthy)
+            .unwrap_or(false)
+}
+
 fn reduce_instance_state(current: &InstanceState, action: &Action) -> InstanceState {
     let mut next = current.clone();
 
@@ -230,12 +218,6 @@ fn reduce_instance_state(current: &InstanceState, action: &Action) -> InstanceSt
         }
         Action::SetServices { services } => {
             next.services = services.clone();
-        }
-        Action::SetStaticEndpoints { endpoints } => {
-            next.static_endpoints = endpoints.clone();
-        }
-        Action::SetDynamicEndpoints { endpoints } => {
-            next.dynamic_endpoints = endpoints.clone();
         }
     }
 
@@ -252,9 +234,7 @@ fn project_status_update(action: &Action) -> Option<StatusUpdate> {
             *state,
             message.clone(),
         )),
-        Action::SetServices { .. }
-        | Action::SetStaticEndpoints { .. }
-        | Action::SetDynamicEndpoints { .. } => None,
+        Action::SetServices { .. } => None,
     }
 }
 

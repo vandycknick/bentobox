@@ -1,19 +1,26 @@
 use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Seek, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bento_core::services::GuestRuntimeConfig;
-use bento_core::{resolve_mount_location, InstanceFile};
-use bento_libvm::global_config::{ensure_guest_agent_binary, GlobalConfig};
-use bento_libvm::host_user::{self, HostUser};
-use bento_libvm::ssh_keys;
+use bento_core::capabilities::{
+    CapabilitiesConfig, DnsCapabilityConfig, ForwardCapabilityConfig, SshCapabilityConfig,
+};
+use bento_core::services::{
+    GuestRuntimeConfig, GuestServiceConfig, GuestServiceKind, RESERVED_FORWARD_PORT_START,
+    RESERVED_SHELL_PORT, SERVICE_ID_SHELL,
+};
+use bento_core::{resolve_mount_location, InstanceFile, NetworkMode as SpecNetworkMode, VmSpec};
 use eyre::Context;
 use fatfs::{format_volume, FileSystem, FormatVolumeOptions, FsOptions};
 use serde::Serialize;
 
-use crate::monitor_config::VmContext;
+use crate::global_config::{ensure_guest_agent_binary, GlobalConfig};
+use crate::host_user::{self, HostUser};
+use crate::profiles::{resolve_profiles, validate_capabilities};
+use crate::ssh_keys;
 
 const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-guestd";
 const GUEST_AGENT_INSTALL_SCRIPT_ENTRY: &str = "bento-install-guest-agent.sh";
@@ -34,12 +41,107 @@ struct CidataEntry {
     contents: Vec<u8>,
 }
 
-pub(crate) fn rebuild_bootstrap(
-    config: &VmContext,
+#[derive(Debug, Clone)]
+struct MonitorMount {
+    source: PathBuf,
+    tag: String,
+    writable: bool,
+}
+
+pub(crate) fn prepare_instance_runtime(
+    instance_dir: &Path,
+    profiles: &[String],
+) -> eyre::Result<()> {
+    let spec = read_vm_spec_from_dir(instance_dir)?;
+    let capabilities = resolve_startup_capabilities(profiles)?;
+    let guest_runtime = resolve_guest_runtime_config(&capabilities)?;
+
+    rebuild_bootstrap(instance_dir, &spec, &guest_runtime)?;
+    Ok(())
+}
+
+fn read_vm_spec_from_dir(instance_dir: &Path) -> eyre::Result<VmSpec> {
+    let config_path = instance_dir.join(InstanceFile::Config.as_str());
+    let raw = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("read vm spec at {}", config_path.display()))?;
+    serde_yaml_ng::from_str(&raw)
+        .map_err(|err| eyre::eyre!("parse vm spec at {}: {}", config_path.display(), err))
+}
+
+fn resolve_startup_capabilities(start_profiles: &[String]) -> eyre::Result<CapabilitiesConfig> {
+    let base = default_guest_capabilities();
+    let capabilities = resolve_profiles(&base, start_profiles)?;
+    validate_capabilities(&capabilities)?;
+    Ok(capabilities)
+}
+
+fn default_guest_capabilities() -> CapabilitiesConfig {
+    CapabilitiesConfig {
+        ssh: SshCapabilityConfig { enabled: true },
+        dns: DnsCapabilityConfig {
+            enabled: false,
+            ..DnsCapabilityConfig::default()
+        },
+        forward: ForwardCapabilityConfig {
+            enabled: false,
+            ..ForwardCapabilityConfig::default()
+        },
+    }
+}
+
+fn resolve_guest_runtime_config(
+    capabilities: &CapabilitiesConfig,
+) -> eyre::Result<GuestRuntimeConfig> {
+    if capabilities.forward.tcp.auto_discover {
+        return Err(eyre::eyre!(
+            "forward.tcp.auto_discover is not supported with static vmmon service ports"
+        ));
+    }
+
+    let mut guest_services = Vec::new();
+
+    if capabilities.ssh.enabled {
+        guest_services.push(GuestServiceConfig {
+            id: SERVICE_ID_SHELL.to_string(),
+            kind: GuestServiceKind::Shell,
+            port: RESERVED_SHELL_PORT,
+            startup_required: true,
+            target: String::from("127.0.0.1:22"),
+        });
+    }
+
+    for (index, forward) in capabilities.forward.uds.iter().enumerate() {
+        let port = RESERVED_FORWARD_PORT_START + index as u32;
+        guest_services.push(GuestServiceConfig {
+            id: forward.name.clone(),
+            kind: GuestServiceKind::UnixSocketForward,
+            port,
+            startup_required: false,
+            target: forward.guest_path.clone(),
+        });
+    }
+
+    Ok(GuestRuntimeConfig {
+        dns: capabilities.dns.clone(),
+        services: guest_services,
+        ..GuestRuntimeConfig::default()
+    })
+}
+
+fn requires_bootstrap(spec: &VmSpec, guest_runtime: &GuestRuntimeConfig) -> bool {
+    spec.boot.bootstrap.is_some()
+        || !guest_runtime.services.is_empty()
+        || guest_runtime.dns.enabled
+        || spec.settings.rosetta
+}
+
+fn rebuild_bootstrap(
+    instance_dir: &Path,
+    spec: &VmSpec,
     guest_runtime: &GuestRuntimeConfig,
 ) -> eyre::Result<()> {
-    if !config.requires_bootstrap_for(guest_runtime) {
-        let iso_path = config.file(InstanceFile::CidataDisk);
+    let iso_path = instance_dir.join(InstanceFile::CidataDisk.as_str());
+    if !requires_bootstrap(spec, guest_runtime) {
         if iso_path.exists() {
             std::fs::remove_file(&iso_path)
                 .with_context(|| format!("remove stale cidata {}", iso_path.display()))?;
@@ -51,7 +153,8 @@ pub(crate) fn rebuild_bootstrap(
     let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure user SSH keys")?;
 
     build_cidata_disk(
-        config,
+        instance_dir,
+        spec,
         &host_user,
         &user_keys.public_key_openssh,
         guest_runtime,
@@ -59,7 +162,8 @@ pub(crate) fn rebuild_bootstrap(
 }
 
 fn build_cidata_disk(
-    config: &VmContext,
+    instance_dir: &Path,
+    spec: &VmSpec,
     host_user: &HostUser,
     ssh_public_key: &str,
     guest_runtime: &GuestRuntimeConfig,
@@ -69,13 +173,12 @@ fn build_cidata_disk(
     let guest_agent_binary = std::fs::read(agent_binary_path)
         .with_context(|| format!("read guest agent binary {}", agent_binary_path.display()))?;
 
-    let desired_state = desired_guestd_state(guest_runtime)?;
-    let user_data = render_user_data(config, host_user, ssh_public_key, &desired_state)?;
-    let meta_data = render_meta_data(config)?;
-    let network_config = render_network_config_for_instance(config)?;
-    let guestd_config = render_guestd_config(&desired_state)?;
-    let config_env = render_config_env(config, &desired_state)?;
-    let iso_path = config.file(InstanceFile::CidataDisk);
+    let user_data = render_user_data(spec, host_user, ssh_public_key)?;
+    let meta_data = render_meta_data(&spec.name)?;
+    let network_config = render_network_config_for_instance(spec)?;
+    let guestd_config = render_guestd_config(guest_runtime)?;
+    let config_env = render_config_env(spec)?;
+    let iso_path = instance_dir.join(InstanceFile::CidataDisk.as_str());
 
     let mut files = vec![
         CidataEntry {
@@ -108,7 +211,7 @@ fn build_cidata_disk(
         },
     ];
 
-    if config.rosetta_enabled() {
+    if spec.settings.rosetta {
         files.push(CidataEntry {
             name: "tasks/20-setup-rosetta.sh".to_string(),
             contents: TASK_SETUP_ROSETTA_CONTENT.as_bytes().to_vec(),
@@ -138,8 +241,6 @@ fn write_cidata_fat_image(output_path: &Path, entries: &[CidataEntry]) -> eyre::
             .with_context(|| format!("remove existing output {}", output_path.display()))?;
     }
 
-    // Use a VFAT volume with the NoCloud `CIDATA` label so the same bootstrap media works on
-    // both VZ and Firecracker without depending on host-specific ISO tooling.
     let mut image = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -170,8 +271,6 @@ fn write_cidata_fat_image(output_path: &Path, entries: &[CidataEntry]) -> eyre::
 }
 
 fn cidata_image_size(entries: &[CidataEntry]) -> u64 {
-    // Keep the image comfortably larger than the payload so FAT metadata and directory growth do
-    // not force fragile exact sizing logic.
     let payload_bytes = entries
         .iter()
         .map(|entry| entry.contents.len() as u64 + entry.name.len() as u64)
@@ -261,7 +360,7 @@ struct MetaData {
 #[derive(Serialize)]
 struct NetworkConfigV2 {
     version: u8,
-    ethernets: std::collections::BTreeMap<String, EthernetConfigV2>,
+    ethernets: BTreeMap<String, EthernetConfigV2>,
 }
 
 #[derive(Serialize)]
@@ -270,55 +369,48 @@ struct EthernetConfigV2 {
     dhcp6: bool,
 }
 
-fn desired_guestd_state(guest_runtime: &GuestRuntimeConfig) -> eyre::Result<GuestRuntimeConfig> {
-    Ok(guest_runtime.clone())
-}
-
 fn render_user_data(
-    config: &VmContext,
+    spec: &VmSpec,
     host_user: &HostUser,
     ssh_public_key: &str,
-    _guest_runtime: &GuestRuntimeConfig,
 ) -> eyre::Result<String> {
-    let timezone = resolve_host_timezone();
-    let locale = resolve_host_locale();
-
-    let user = CloudUser {
-        name: host_user.name.clone(),
-        uid: host_user.uid,
-        gecos: host_user.gecos.clone(),
-        homedir: format!("/home/{}", host_user.name),
-        shell: "/bin/bash".to_string(),
-        sudo: "ALL=(ALL) NOPASSWD:ALL".to_string(),
-        lock_passwd: true,
-        ssh_authorized_keys: vec![ssh_public_key.trim().to_string()],
-    };
-
-    let write_files = vec![WriteFile {
-        path: GUEST_AGENT_BOOTSTRAP_SCRIPT.to_string(),
-        owner: "root:root".to_string(),
-        permissions: "0755".to_string(),
-        content: GUEST_BOOTSTRAP_SCRIPT_CONTENT.to_string(),
-    }];
-
     let cloud_config = CloudConfig {
-        users: vec![user],
+        users: vec![CloudUser {
+            name: host_user.name.clone(),
+            uid: host_user.uid,
+            gecos: host_user.gecos.clone(),
+            homedir: format!("/home/{}", host_user.name),
+            shell: "/bin/bash".to_string(),
+            sudo: "ALL=(ALL) NOPASSWD:ALL".to_string(),
+            lock_passwd: true,
+            ssh_authorized_keys: vec![ssh_public_key.trim().to_string()],
+        }],
         growpart: GrowpartConfig {
             mode: "auto".to_string(),
             devices: vec!["/".to_string()],
         },
         resize_rootfs: true,
-        timezone,
-        locale,
-        mounts: cloud_mount_entries(config),
-        write_files,
+        timezone: resolve_host_timezone(),
+        locale: resolve_host_locale(),
+        mounts: cloud_mount_entries(spec),
+        write_files: vec![WriteFile {
+            path: GUEST_AGENT_BOOTSTRAP_SCRIPT.to_string(),
+            owner: "root:root".to_string(),
+            permissions: "0755".to_string(),
+            content: GUEST_BOOTSTRAP_SCRIPT_CONTENT.to_string(),
+        }],
     };
     let mut bento_yaml = String::from("#cloud-config\n");
     bento_yaml.push_str(
         &serde_yaml_ng::to_string(&cloud_config).context("serialize cloud-init user-data")?,
     );
 
-    if let Some(userdata_path) = config.userdata_path() {
+    if let Some(userdata_path) = spec
+        .boot
+        .bootstrap
+        .as_ref()
+        .and_then(|bootstrap| bootstrap.cloud_init.as_deref())
+    {
         let user_data = std::fs::read_to_string(userdata_path)
             .with_context(|| format!("read userdata {}", userdata_path.display()))?;
         return Ok(render_multipart_user_data(&bento_yaml, &user_data));
@@ -350,7 +442,7 @@ fn detect_userdata_content_type(user_data: &str) -> &'static str {
 }
 
 fn render_network_config() -> eyre::Result<String> {
-    let mut ethernets = std::collections::BTreeMap::new();
+    let mut ethernets = BTreeMap::new();
     ethernets.insert(
         "enp0s1".to_string(),
         EthernetConfigV2 {
@@ -366,40 +458,36 @@ fn render_network_config() -> eyre::Result<String> {
     serde_yaml_ng::to_string(&cfg).context("serialize cloud-init network-config")
 }
 
-fn render_network_config_for_instance(config: &VmContext) -> eyre::Result<Option<String>> {
-    match config.resolved_network_mode() {
-        bento_vmm::NetworkMode::VzNat => render_network_config().map(Some),
-        bento_vmm::NetworkMode::None => Ok(None),
-        bento_vmm::NetworkMode::Bridged => {
+fn render_network_config_for_instance(spec: &VmSpec) -> eyre::Result<Option<String>> {
+    match spec.network.mode {
+        SpecNetworkMode::User => render_network_config().map(Some),
+        SpecNetworkMode::None => Ok(None),
+        SpecNetworkMode::Bridged => {
             Err(eyre::eyre!("network mode 'bridged' is not implemented yet"))
-        }
-        bento_vmm::NetworkMode::Cni => {
-            Err(eyre::eyre!("network mode 'cni' is not implemented yet"))
         }
     }
 }
 
-fn render_meta_data(config: &VmContext) -> eyre::Result<String> {
+fn render_meta_data(name: &str) -> eyre::Result<String> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
 
     let mut hasher = DefaultHasher::new();
-    config.name.hash(&mut hasher);
+    name.hash(&mut hasher);
     nonce.hash(&mut hasher);
     let hash = hasher.finish();
 
     let metadata = MetaData {
         instance_id: format!("bento-{:08x}", (hash >> 32) as u32),
-        local_hostname: config.name.clone(),
+        local_hostname: name.to_string(),
     };
     serde_yaml_ng::to_string(&metadata).context("serialize cloud-init meta-data")
 }
 
-fn cloud_mount_entries(config: &VmContext) -> Vec<[String; 6]> {
-    config
-        .mounts()
+fn cloud_mount_entries(spec: &VmSpec) -> Vec<[String; 6]> {
+    mounts(spec)
         .iter()
         .map(|mount| {
             let path = resolve_mount_location(&mount.source)
@@ -422,25 +510,33 @@ fn cloud_mount_entries(config: &VmContext) -> Vec<[String; 6]> {
         .collect()
 }
 
+fn mounts(spec: &VmSpec) -> Vec<MonitorMount> {
+    spec.mounts
+        .iter()
+        .map(|mount| MonitorMount {
+            source: mount.source.clone(),
+            tag: mount.tag.clone(),
+            writable: !mount.read_only,
+        })
+        .collect()
+}
+
 fn render_guestd_config(guest_runtime: &GuestRuntimeConfig) -> eyre::Result<String> {
     serde_yaml_ng::to_string(guest_runtime).context("serialize guestd config")
 }
 
-fn render_config_env(
-    config: &VmContext,
-    _guest_runtime: &GuestRuntimeConfig,
-) -> eyre::Result<String> {
+fn render_config_env(spec: &VmSpec) -> eyre::Result<String> {
     let mut env = String::new();
 
     env.push_str(&format!(
         "BENTO_INSTANCE_NAME={}\n",
-        shell_quote(&config.name)
+        shell_quote(&spec.name)
     ));
     env.push_str("BENTO_GUESTD_BINARY_PATH=/usr/local/bin/bento-guestd\n");
     env.push_str("BENTO_GUESTD_CONFIG_PATH=/etc/bento/guestd.yaml\n");
     env.push_str(&format!(
         "BENTO_ROSETTA={}\n",
-        if config.rosetta_enabled() {
+        if spec.settings.rosetta {
             "true"
         } else {
             "false"
@@ -482,7 +578,6 @@ fn resolve_host_timezone() -> String {
         }
     }
 
-    tracing::warn!("unable to determine host timezone, defaulting guest timezone to UTC");
     "UTC".to_string()
 }
 
@@ -496,6 +591,5 @@ fn resolve_host_locale() -> String {
         }
     }
 
-    tracing::warn!("unable to determine host locale, defaulting guest locale to en_US.UTF-8");
     "en_US.UTF-8".to_string()
 }

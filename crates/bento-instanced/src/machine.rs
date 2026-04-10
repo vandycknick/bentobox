@@ -49,8 +49,8 @@ pub(crate) fn vm_spec_machine_config(
     let mut builder = VmConfig::builder(inputs.name)
         .base_directory(inputs.data_dir.to_path_buf())
         .network(map_vm_spec_network_mode(inputs.spec.network.mode))
-        .nested_virtualization(inputs.spec.host.nested_virtualization)
-        .rosetta(inputs.spec.host.rosetta);
+        .nested_virtualization(inputs.spec.settings.nested_virtualization)
+        .rosetta(inputs.spec.settings.rosetta);
 
     if let Some(machine_identifier) = machine_identifier.clone() {
         builder = builder.machine_identifier(machine_identifier);
@@ -203,8 +203,8 @@ fn map_vm_spec_network_mode(mode: SpecNetworkMode) -> NetworkMode {
 mod tests {
     use super::machine_backend_from_vm_spec;
     use bento_core::{
-        Architecture, Backend as SpecBackend, Boot, Capabilities, Guest, GuestOs, Host, Network,
-        NetworkMode as SpecNetworkMode, Platform, Resources, Storage, VmSpec,
+        Architecture, Backend as SpecBackend, Boot, GuestOs, Network,
+        NetworkMode as SpecNetworkMode, Platform, Resources, Settings, Storage, VmSpec,
     };
     use bento_vmm::Backend;
 
@@ -233,18 +233,10 @@ mod tests {
             network: Network {
                 mode: SpecNetworkMode::None,
             },
-            guest: Guest {
-                profiles: Vec::new(),
-                capabilities: Capabilities {
-                    ssh: false,
-                    docker: false,
-                    dns: false,
-                    forward: false,
-                },
-            },
-            host: Host {
+            settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
+                guest_enabled: false,
             },
         };
         let backend = machine_backend_from_vm_spec(&spec).expect("backend should resolve");

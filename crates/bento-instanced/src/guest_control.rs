@@ -11,14 +11,19 @@ use tokio::sync::Mutex;
 use tonic::transport::Endpoint;
 use tower::service_fn;
 
-pub(crate) async fn health(machine: &VirtualMachine) -> eyre::Result<HealthResponse> {
+pub(crate) async fn probe(machine: &VirtualMachine) -> eyre::Result<HealthResponse> {
     let mut client = connect_guest_client(machine).await?;
     client
         .ping(AgentPingRequest {
             message: String::new(),
         })
-        .await?;
-    Ok(client.health(HealthRequest {}).await?.into_inner())
+        .await
+        .context("guest ping failed")?;
+    client
+        .health(HealthRequest {})
+        .await
+        .map(|response| response.into_inner())
+        .context("guest health failed")
 }
 
 async fn connect_guest_client(

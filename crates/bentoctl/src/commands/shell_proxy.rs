@@ -1,7 +1,6 @@
 use std::fmt::{Display, Formatter};
 
 use bento_libvm::{LibVm, MachineRef};
-use bento_protocol::services::ENDPOINT_SSH;
 use clap::Args;
 use eyre::Context;
 use tokio::io::AsyncWriteExt;
@@ -11,27 +10,20 @@ use tokio::io::AsyncWriteExt;
 pub struct Cmd {
     #[arg(long)]
     pub name: String,
-
-    #[arg(long, default_value = ENDPOINT_SSH)]
-    pub service: String,
 }
 
 impl Display for Cmd {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "--name {} --service {}", self.name, self.service)
+        write!(f, "--name {}", self.name)
     }
 }
 
 impl Cmd {
     pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
         let stream = libvm
-            .open_service_stream(
-                &MachineRef::parse(self.name.clone())?,
-                &self.service,
-                self.service == ENDPOINT_SSH,
-            )
+            .open_shell_stream(&MachineRef::parse(self.name.clone())?, true)
             .await
-            .context("open negotiated monitor proxy stream")?;
+            .context("open negotiated shell stream")?;
         proxy_stdio(stream).await
     }
 }

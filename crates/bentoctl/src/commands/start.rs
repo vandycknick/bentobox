@@ -21,11 +21,11 @@ impl Cmd {
         let machine_ref = MachineRef::parse(self.name.clone())?;
         let machine = libvm.start(&machine_ref, &self.profiles).await?;
 
-        if requires_guest_readiness(&machine, &self.profiles) {
+        if requires_guest_readiness(&machine) {
             libvm
                 .wait_for_guest_running(
                     &MachineRef::Id(machine.id),
-                    bento_libvm::DEFAULT_SERVICE_READINESS_TIMEOUT,
+                    bento_libvm::DEFAULT_GUEST_READINESS_TIMEOUT,
                 )
                 .await
                 .map_err(|err| eyre::eyre!("guest capability readiness check failed: {err}"))?;
@@ -35,15 +35,6 @@ impl Cmd {
     }
 }
 
-fn requires_guest_readiness(machine: &MachineRecord, extra_profiles: &[String]) -> bool {
-    let capabilities = &machine.spec.guest.capabilities;
-
-    machine.spec.boot.bootstrap.is_some()
-        || machine.spec.host.rosetta
-        || !machine.spec.guest.profiles.is_empty()
-        || !extra_profiles.is_empty()
-        || capabilities.ssh
-        || capabilities.dns
-        || capabilities.forward
-        || capabilities.docker
+fn requires_guest_readiness(machine: &MachineRecord) -> bool {
+    machine.spec.settings.guest_enabled
 }

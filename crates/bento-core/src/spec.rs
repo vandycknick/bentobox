@@ -13,8 +13,7 @@ pub struct VmSpec {
     #[serde(default)]
     pub mounts: Vec<Mount>,
     pub network: Network,
-    pub guest: Guest,
-    pub host: Host,
+    pub settings: Settings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,16 +77,10 @@ pub struct Network {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Guest {
-    #[serde(default)]
-    pub profiles: Vec<String>,
-    pub capabilities: Capabilities,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Host {
+pub struct Settings {
     pub nested_virtualization: bool,
     pub rosetta: bool,
+    pub guest_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,19 +113,11 @@ pub enum NetworkMode {
     Bridged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Capabilities {
-    pub ssh: bool,
-    pub docker: bool,
-    pub dns: bool,
-    pub forward: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        Architecture, Backend, Boot, Bootstrap, Capabilities, Disk, DiskKind, Guest, GuestOs, Host,
-        Mount, Network, NetworkMode, Platform, Resources, Storage, VmSpec,
+        Architecture, Backend, Boot, Bootstrap, Disk, DiskKind, GuestOs, Mount, Network,
+        NetworkMode, Platform, Resources, Settings, Storage, VmSpec,
     };
     use std::path::PathBuf;
 
@@ -179,18 +164,10 @@ mod tests {
             network: Network {
                 mode: NetworkMode::User,
             },
-            guest: Guest {
-                profiles: vec!["default".to_string(), "docker".to_string()],
-                capabilities: Capabilities {
-                    ssh: true,
-                    docker: true,
-                    dns: true,
-                    forward: true,
-                },
-            },
-            host: Host {
+            settings: Settings {
                 nested_virtualization: false,
                 rosetta: true,
+                guest_enabled: true,
             },
         }
     }
