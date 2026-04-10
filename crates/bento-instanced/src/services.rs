@@ -1,5 +1,6 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bento_core::services::RESERVED_SHELL_PORT;
 use bento_protocol::negotiate::Upgrade;
@@ -13,17 +14,20 @@ use futures::stream::{self, Stream, StreamExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
-use crate::context::DaemonContext;
-use crate::guest;
+use crate::agent::AgentClient;
+use crate::context::{DaemonContext, RuntimeContext};
 use crate::net::server::NegotiateServer;
-use crate::startup_reporter::StartupReporter;
+use crate::net::tunnel::spawn_tunnel;
+use crate::startup::StartupReporter;
 use crate::state::{
     guest_shell_ready as state_guest_shell_ready, select_current_events, select_current_inspect,
     select_current_ping, Action, InstanceStore,
 };
-use crate::tunnel::spawn_tunnel;
+
+const GUEST_HEALTH_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 
 type WatchStatusStream = Pin<Box<dyn Stream<Item = Result<StatusUpdate, Status>> + Send>>;
 
@@ -93,10 +97,11 @@ impl VmMonitorService for VmMonitorSvc {
 }
 
 pub async fn start_services(
+    runtime: &RuntimeContext,
     ctx: &DaemonContext,
     startup_reporter: &mut StartupReporter,
 ) -> eyre::Result<ServiceHandles> {
-    let path = ctx.vm.file(bento_core::InstanceFile::InstancedSocket);
+    let path = runtime.file(bento_core::InstanceFile::InstancedSocket);
     let listener = UnixListener::bind(&path).context(format!("bind socket {}", path.display()))?;
     let server = NegotiateServer::new(listener, ctx.shutdown.clone());
     let handler_ctx = ctx.clone();
@@ -105,7 +110,7 @@ pub async fn start_services(
         async move { handle_connection(stream, upgrade, ctx).await }
     });
 
-    let serial_log_path = ctx.vm.file(bento_core::InstanceFile::SerialLog);
+    let serial_log_path = runtime.file(bento_core::InstanceFile::SerialLog);
     let serial_console_for_log = ctx.serial_console.clone();
     let serial_log = tokio::spawn(async move {
         if let Err(err) = serial_console_for_log
@@ -116,10 +121,10 @@ pub async fn start_services(
         }
     });
 
-    let guest_monitor = if ctx.guest_enabled {
+    let guest_monitor = if ctx.spec.settings.guest_enabled {
         ctx.store.dispatch(Action::guest_starting());
-        Some(guest::spawn_service_monitor(
-            ctx.machine.clone(),
+        Some(spawn_agent_monitor(
+            AgentClient::new(&ctx.machine),
             ctx.store.clone(),
             ctx.shutdown.clone(),
         ))
@@ -129,7 +134,7 @@ pub async fn start_services(
     };
 
     startup_reporter.report_started()?;
-    tracing::info!(instance = %ctx.vm.name, "vmmon running");
+    tracing::info!(instance = %ctx.machine.name(), "vmmon running");
 
     Ok(ServiceHandles {
         control_socket,
@@ -180,6 +185,80 @@ async fn handle_connection(
         }
         Upgrade::Api { .. } => serve(stream, ctx.store).await,
     }
+}
+
+fn spawn_agent_monitor(
+    agent: AgentClient,
+    store: Arc<InstanceStore>,
+    shutdown: CancellationToken,
+) -> JoinHandle<()> {
+    let mut health_stream = Box::pin(agent.watch(shutdown));
+
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + GUEST_HEALTH_TIMEOUT;
+
+        while let Some(result) = health_stream.next().await {
+            if let Err(err) = handle_agent_update(&store, result, deadline) {
+                tracing::warn!(error = %err, timeout = ?GUEST_HEALTH_TIMEOUT, "guest services did not become ready before timeout");
+                store.dispatch(Action::guest_error(format!(
+                    "guest health check failed: {err}"
+                )));
+                return;
+            }
+        }
+
+        tracing::info!("agent monitor shutting down");
+    })
+}
+
+fn handle_agent_update(
+    store: &InstanceStore,
+    result: eyre::Result<bento_protocol::v1::HealthResponse>,
+    deadline: tokio::time::Instant,
+) -> Result<(), eyre::Report> {
+    match result {
+        Ok(health) => {
+            let waiting_summary = health.summary.clone();
+            store.dispatch(Action::set_services(health.services));
+
+            if health.ready {
+                store.dispatch(Action::guest_running());
+            } else {
+                store.dispatch(Action::guest_starting());
+                tracing::info!(reason = %waiting_summary, "startup-required guest services not ready yet");
+            }
+
+            Ok(())
+        }
+        Err(err) if tokio::time::Instant::now() >= deadline => Err(err),
+        Err(err) => {
+            tracing::info!(reason = %classify_health_retry(&err), "agent not ready yet");
+            tracing::debug!(error = %err, "agent retry detail");
+            Ok(())
+        }
+    }
+}
+
+fn classify_health_retry(err: &eyre::Report) -> &'static str {
+    let message = err.to_string().to_ascii_lowercase();
+
+    if message.contains("unimplemented") {
+        return "agent protocol is older than vmmon";
+    }
+
+    if message.contains("connection reset by peer")
+        || message.contains("connection refused")
+        || message.contains("not connected")
+        || message.contains("service unavailable")
+    {
+        return "agent is not reachable yet";
+    }
+
+    if message.contains("timed out") {
+        return "agent rpc timed out";
+    }
+
+    "waiting for agent rpc"
 }
 
 fn guest_shell_ready(store: &InstanceStore) -> bool {

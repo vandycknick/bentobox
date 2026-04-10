@@ -5,22 +5,19 @@ use std::process::{Command, Stdio};
 use bento_core::InstanceFile;
 use clap::Parser;
 
+mod agent;
 mod context;
-mod guest;
-mod guest_control;
 mod machine;
 mod net;
 mod pid_guard;
-mod runtime;
 mod services;
 mod shutdown;
 mod startup;
-mod startup_reporter;
 mod state;
-mod tunnel;
 
-use crate::runtime::format_error_chain;
-use crate::startup_reporter::StartupReporter;
+use crate::context::RuntimeContext;
+use crate::pid_guard::PidGuard;
+use crate::startup::StartupReporter;
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "vmmon", disable_help_subcommand = true)]
@@ -80,9 +77,12 @@ fn main() -> eyre::Result<()> {
 
 async fn run(args: Args, startup_reporter: StartupReporter) -> eyre::Result<()> {
     let mut startup_reporter = startup_reporter;
-    let result = match startup::init(args.data_dir.clone()).await {
-        Ok(ctx) => match services::start_services(&ctx, &mut startup_reporter).await {
-            Ok(handles) => shutdown::run(ctx, handles).await,
+    let runtime = RuntimeContext::new(args.data_dir.clone());
+    let _guard = PidGuard::create(&runtime.file(InstanceFile::InstancedPid)).await?;
+
+    let result = match startup::init(&runtime).await {
+        Ok(ctx) => match services::start_services(&runtime, &ctx, &mut startup_reporter).await {
+            Ok(handles) => shutdown::run(runtime, ctx, handles).await,
             Err(err) => Err(err),
         },
         Err(err) => Err(err),
@@ -94,6 +94,14 @@ async fn run(args: Args, startup_reporter: StartupReporter) -> eyre::Result<()> 
     }
 
     result
+}
+
+fn format_error_chain(err: &eyre::Report) -> String {
+    let mut parts = Vec::new();
+    for cause in err.chain() {
+        parts.push(cause.to_string());
+    }
+    parts.join(": ")
 }
 
 #[cfg(target_os = "macos")]

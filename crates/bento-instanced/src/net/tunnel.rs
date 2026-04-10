@@ -53,7 +53,7 @@ mod tests {
     use bento_vmm::VsockStream;
     use tokio::net::UnixStream;
 
-    use crate::tunnel::proxy_streams;
+    use crate::net::tunnel::proxy_streams;
 
     #[tokio::test]
     async fn proxy_streams_exits_after_client_disconnect() {

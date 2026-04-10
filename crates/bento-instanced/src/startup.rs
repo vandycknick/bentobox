@@ -1,65 +1,112 @@
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{self, Write};
+use std::os::fd::{BorrowedFd, FromRawFd};
 use std::sync::Arc;
 
-use bento_core::InstanceFile;
+use bento_core::{InstanceFile, VmSpec};
 use bento_vmm::Vmm;
+use eyre::Context;
 use tokio_util::sync::CancellationToken;
 
-use crate::context::{DaemonContext, VmContext};
+use crate::context::{DaemonContext, RuntimeContext};
 use crate::machine::{
     machine_backend_from_vm_spec, machine_identifier_path_from_dir, vm_spec_machine_config,
     VmSpecInputs,
 };
-use crate::pid_guard::PidGuard;
-use crate::runtime::{read_vm_spec_from_dir, remove_stale_socket};
 use crate::state::{new_instance_store, Action};
 
-pub async fn init(data_dir: PathBuf) -> eyre::Result<DaemonContext> {
-    let vm = load_context(data_dir)?;
+pub struct StartupReporter {
+    file: Option<File>,
+}
 
-    tracing::info!(instance = %vm.name, "vmmon starting");
-    remove_stale_socket(&vm.file(InstanceFile::InstancedSocket))?;
+impl StartupReporter {
+    pub fn from(startup_fd: Option<i32>) -> io::Result<Self> {
+        match startup_fd {
+            Some(fd) => Ok(Self::from_startup_fd(fd)),
+            None => Self::from_stdout(),
+        }
+    }
+
+    fn from_startup_fd(fd: i32) -> Self {
+        let file = unsafe { File::from_raw_fd(fd) };
+        Self { file: Some(file) }
+    }
+
+    fn from_stdout() -> io::Result<Self> {
+        let borrowed = unsafe { BorrowedFd::borrow_raw(libc::STDOUT_FILENO) };
+        let duplicated = nix::unistd::dup(borrowed).map_err(io::Error::other)?;
+        let file = File::from(duplicated);
+        Ok(Self { file: Some(file) })
+    }
+
+    pub fn report_started(&mut self) -> io::Result<()> {
+        self.write_message("started\n")
+    }
+
+    pub fn report_failed(&mut self, message: &str) -> io::Result<()> {
+        self.write_message(&format!("failed\t{message}\n"))
+    }
+
+    fn write_message(&mut self, message: &str) -> io::Result<()> {
+        let Some(mut file) = self.file.take() else {
+            return Ok(());
+        };
+        file.write_all(message.as_bytes())?;
+        file.flush()?;
+        Ok(())
+    }
+}
+
+pub async fn init(runtime: &RuntimeContext) -> eyre::Result<DaemonContext> {
+    let spec = load_spec(&runtime)?;
+
+    tracing::info!(instance = %spec.name, "vmmon starting");
+    remove_stale_socket(&runtime.file(InstanceFile::InstancedSocket))?;
 
     let machine_config = vm_spec_machine_config(VmSpecInputs {
-        name: &vm.name,
-        data_dir: vm.dir(),
-        spec: &vm.spec,
+        name: &spec.name,
+        data_dir: runtime.dir(),
+        spec: &spec,
     })?;
-    let vmm = Vmm::new(machine_backend_from_vm_spec(&vm.spec)?)?;
+    let vmm = Vmm::new(machine_backend_from_vm_spec(&spec)?)?;
     let machine = vmm.create(machine_config.config).await?;
     if let Some(machine_identifier) = machine_config.machine_identifier.as_ref() {
         if machine_identifier.was_generated() {
-            let machine_identifier_path = machine_identifier_path_from_dir(vm.dir());
+            let machine_identifier_path = machine_identifier_path_from_dir(runtime.dir());
             std::fs::write(machine_identifier_path, machine_identifier.bytes())?;
         }
     }
 
     let serial_console = machine.serial();
     let store = Arc::new(new_instance_store());
-    let guest_enabled = vm.spec.settings.guest_enabled;
-
-    let pid_guard = Arc::new(PidGuard::create(&vm.file(InstanceFile::InstancedPid)).await?);
 
     store.dispatch(Action::vm_starting());
     machine.start().await?;
     store.dispatch(Action::vm_running());
 
     Ok(DaemonContext {
-        vm,
+        spec,
         machine,
         serial_console,
         store,
-        _pid_guard: pid_guard,
         shutdown: CancellationToken::new(),
-        guest_enabled,
     })
 }
 
-fn load_context(data_dir: PathBuf) -> eyre::Result<VmContext> {
-    let spec = read_vm_spec_from_dir(&data_dir)?;
-    Ok(VmContext {
-        name: spec.name.clone(),
-        data_dir,
-        spec,
-    })
+fn load_spec(runtime: &RuntimeContext) -> eyre::Result<VmSpec> {
+    let config_path = runtime.file(InstanceFile::Config);
+    let raw = std::fs::read_to_string(&config_path)
+        .wrap_err_with(|| format!("read vm spec at {}", config_path.display()))?;
+    serde_yaml_ng::from_str(&raw)
+        .map_err(|err| eyre::eyre!("parse vm spec at {}: {}", config_path.display(), err))
+}
+
+fn remove_stale_socket(path: &std::path::Path) -> eyre::Result<()> {
+    if let Err(err) = std::fs::remove_file(path) {
+        if err.kind() != std::io::ErrorKind::NotFound {
+            return Err(err).context(format!("remove stale socket {}", path.display()));
+        }
+    }
+
+    Ok(())
 }
