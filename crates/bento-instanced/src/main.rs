@@ -7,16 +7,16 @@ use clap::Parser;
 
 mod agent;
 mod context;
+mod lock;
 mod machine;
 mod net;
-mod pid_guard;
 mod services;
 mod shutdown;
 mod startup;
 mod state;
 
 use crate::context::RuntimeContext;
-use crate::pid_guard::PidGuard;
+use crate::lock::pid::PidGuard;
 use crate::startup::StartupReporter;
 
 #[derive(Parser, Debug, Clone)]
@@ -90,6 +90,7 @@ async fn run(args: Args, startup_reporter: StartupReporter) -> eyre::Result<()> 
 
     if let Err(err) = &result {
         let full_error = format_error_chain(err);
+        tracing::error!(error = %full_error, data_dir = %args.data_dir.display(), "vmmon exiting with error");
         let _ = startup_reporter.report_failed(&full_error);
     }
 

@@ -58,7 +58,7 @@ impl StartupReporter {
 }
 
 pub async fn init(runtime: &RuntimeContext) -> eyre::Result<DaemonContext> {
-    let spec = load_spec(&runtime)?;
+    let spec = load_spec(runtime)?;
 
     tracing::info!(instance = %spec.name, "vmmon starting");
     remove_stale_socket(&runtime.file(InstanceFile::InstancedSocket))?;
