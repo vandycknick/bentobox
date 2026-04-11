@@ -1,72 +1,54 @@
-# 4. Daemonless architecture
+# 4. Daemonless VM Monitor Architecture
 
 Date: 2026-04-06
 
 ## Status
 
-Proposed
+Implemented
 
 ## Context
 
-Bentobox currently mixes responsibilities across the CLI, runtime helpers, and `instanced`.
+Bentobox needs a VM architecture that keeps the runtime surface small, focused, and flexible. Focussed on the following:
 
-Today:
+- keeps one monitor process scoped to one VM,
+- starts from canonical machine configuration on disk,
+- keeps the CLI thin,
+- works well without a central always-on daemon,
+- preserves room for a future daemon or tunnel mode without changing the machine model.
 
-- `bentoctl` still owns business logic that should live in a library.
-- `bentoctl` directly starts `instanced` and polls pidfiles and sockets to infer startup.
-- `bento-runtime` mixes domain types with machine storage, image store, profile resolution, and transport helpers.
-- `bento-instanced` mixes VM preparation, runtime supervision, bootstrap logic, and control APIs.
+The chosen architecture is daemonless. `bentoctl` calls into `bento-libvm`, and `bento-libvm` owns machine lifecycle in local ABI mode. When a machine starts, `bento-libvm` spawns a dedicated `vmmon` process for that machine. `vmmon` reads the machine configuration from the instance directory, starts the VM, supervises it, and exposes the per-VM control surface.
 
-This makes the architecture harder to evolve toward a Podman-style split where:
-
-- the CLI is a thin consumer of a library,
-- the engine can operate in local ABI mode or future tunnel mode,
-- one monitor process supervises one VM,
-- and the monitor can be swapped from direct local control to a future remote manager API without changing CLI behavior.
-
-We want to preserve the rough no-central-daemon model used by Podman/libpod/conmon, while leaving room for a future remote manager API. The immediate goal is local ABI mode, not a permanent central daemon.
-
-## Goals
-
-- Make `bentoctl` a thin frontend over a library API.
-- Introduce a clear engine crate, `bento-libvm`, that owns machine lifecycle and storage.
-- Introduce a clear shared domain crate, `bento-core`, that owns the canonical machine `VmSpec` and related models.
-- Rename and refactor `bento-instanced` into `bento-vmmon`.
-- Make `bento-vmmon` one process per running VM.
-- Move monitor spawn and startup ownership from the CLI into `bento-libvm`.
-- Keep `config.yaml` in the per-instance directory as the canonical machine configuration.
-- Use SQLite (WAL mode) for manager metadata and indexes, including UUID-to-name mapping.
-- Preserve the existing Negotiate protocol model so `vmmon` can still upgrade a connection to serial attach, vsock access, or RPC.
-- Define an API split that supports local ABI mode now and future tunnel mode later.
-
-## Non-goals
-
-- Implement the future remote manager daemon in this phase.
-- Introduce a long-lived always-on daemon as the primary architecture.
-- Redesign the current Negotiate protocol.
-- Finalize the full SQLite schema beyond the responsibilities and canonical data ownership defined here.
+This gives Bentobox the operational flexibility of a daemonless system while still leaving room for a future manager daemon. `bento-libvm` is the boundary that preserves that split. It is the local engine today, and it can also become the client-side boundary for future daemon or tunnel mode without changing the monitor model.
 
 ## Decision
 
-We will adopt the following architecture:
+Bentobox adopts a daemonless, config-driven architecture with these roles:
 
-- `bento-runtime` will be collapsed into `bento-libvm` except for shared domain models moved into `bento-core`.
-- `bento-core` will define the canonical machine `VmSpec` and shared domain types.
-- `bento-libvm` will own machine lifecycle, on-disk layout, inventory, image and profile policy, bootstrap materialization, Negotiate client behavior, and `vmmon` process spawning.
-- `bento-vmmon` will be a refactor and rename of `bento-instanced` into a per-VM runtime supervisor.
-- the monitor package will be `bento-vmmon` and the executable will be `vmmon`.
-- `bento-vmmon` will read the machine `config.yaml` from the instance directory and auto-start the VM on spawn.
-- `bento-vmmon` will daemonize itself by default and support a foreground mode for tests and debugging.
-- `bento-libvm` and `bento-vmmon` will synchronize startup using a dedicated startup pipe, not an RPC `Start` call.
-- `bento-libvm` will stop `bento-vmmon` using signals. `Stop` will not be part of `VmMonitorService`.
-- during migration, `bento-libvm` may temporarily use the monitor pidfile to signal `vmmon` for stop and to observe shutdown completion.
-- the daemonizing parent `vmmon` process forwards the child monitor startup result over the original startup pipe so `bento-libvm` still sees a single startup handshake.
-- The machine stable identity will be a UUID stored in SQLite and used as the per-instance directory name.
-- The canonical per-instance data directory will be `~/.local/share/bento/instances/<uuid>/`.
-- The canonical SQLite database location will be `~/.local/share/bento/state.db`.
-- `InstanceService` will be the manager API.
-- `VmMonitorService` will be the per-VM monitor API.
-- The existing Negotiate protocol will remain, implemented server-side in `bento-vmmon` and client-side in `bento-libvm`.
+- `bentoctl` is a thin frontend over `bento-libvm`.
+- `bento-core` owns the canonical shared domain model, including `VmSpec`, machine identity types, and guest service configuration types.
+- `bento-libvm` owns manager-side lifecycle, machine inventory, on-disk layout, image and profile policy, bootstrap materialization, Negotiate client behavior, and `vmmon` process spawning.
+- `bento-vmmon` is the canonical per-VM monitor. It is a small-footprint runtime supervisor that owns one running VM.
+- `bento-vmm` remains the backend abstraction for backend-specific VM execution.
+
+This architecture is intentionally daemonless by default. A future daemon or tunnel mode may be added later, but it must preserve the same `bento-libvm` to `vmmon` boundary and the same per-VM monitor model.
+
+## Goals
+
+- Keep one `vmmon` process responsible for one VM.
+- Make `bentoctl` a thin consumer of `bento-libvm`.
+- Keep `vmmon` focused on runtime supervision instead of manager concerns.
+- Make machine startup config-driven from the per-instance `config.yaml`.
+- Keep `bento-libvm` as the architectural boundary between daemonless local ABI mode and future daemon or tunnel mode.
+- Preserve the current Negotiate upgrade model for serial, shell, and RPC access.
+- Keep machine identity and manager metadata in manager-owned state, not in the monitor.
+
+## Non-goals
+
+- Introducing a central always-on daemon as the primary architecture.
+- Moving global machine inventory into `vmmon`.
+- Replacing `config.yaml` with database-only machine definitions.
+- Redesigning the Negotiate protocol.
+- Defining the final future daemon API in this ADR.
 
 ## Component Boundaries
 
@@ -78,94 +60,92 @@ It owns:
 
 - argument parsing,
 - output formatting,
-- user interaction,
-- calling `bento-libvm`,
-- stdio proxying and local terminal handling once a monitor stream has already been opened by `bento-libvm`.
+- terminal and stdio handling,
+- calling `bento-libvm`.
 
 It does not own:
 
-- machine business logic,
-- machine creation policy,
-- monitor spawning,
-- pidfile polling,
-- direct Negotiate client usage,
+- machine lifecycle policy,
+- direct monitor spawning,
+- pidfile polling for startup,
+- direct Negotiate protocol ownership,
 - direct `vmmon` lifecycle management.
 
 ### `bento-core`
 
-`bento-core` owns shared domain models.
+`bento-core` owns shared domain types.
 
 It owns:
 
-- the canonical machine `VmSpec`,
-- backend, architecture, platform, network, and storage enums and structs,
-- machine metadata types shared across crates,
-- restart policy and label models,
-- UUID-backed machine identity types.
+- the canonical `VmSpec`,
+- machine identity types,
+- well-known instance filenames,
+- guest runtime and guest service configuration types,
+- shared enums and structs used across crates.
 
 It does not own:
 
 - SQLite,
-- filesystem layout,
-- image store policy,
+- filesystem policy,
+- image policy,
 - process management,
-- RPC servers or clients,
+- RPC servers or RPC clients,
 - backend-specific VM execution logic.
 
 ### `bento-libvm`
 
-`bento-libvm` is the machine engine library.
+`bento-libvm` is the manager-side engine library.
 
 It owns:
 
-- machine creation, start, stop, remove, list, and inspect,
-- the top-level data directory and instance directory layout,
-- SQLite state at `~/.local/share/bento/state.db`,
+- machine create, start, stop, inspect, list, and remove,
+- machine lookup by name, UUID, and UUID prefix,
+- the top-level data directory and per-instance layout,
+- SQLite manager state at `state.db`,
 - UUID allocation,
-- mapping UUID to name and name to UUID,
-- instance metadata, labels, creation timestamps, and restart policy,
-- writing the canonical `config.yaml` from `bento-core::VmSpec`,
+- canonical `config.yaml` writing from `bento-core::VmSpec`,
 - image resolution and instance materialization,
+- bootstrap and guest runtime materialization,
 - profile resolution,
-- bootstrap and host-side integration policy,
-- spawning `bento-vmmon` in local ABI mode,
-- client-side Negotiate logic,
-- monitor connection logic for status, service readiness, and negotiated proxy streams,
-- client-side manager API abstraction for local ABI and future tunnel mode.
+- spawning `vmmon`,
+- monitor stop signaling,
+- Negotiate client behavior,
+- manager-side status and stream attachment through `vmmon`.
 
 It does not own:
 
-- direct backend-specific VM lifecycle implementation,
 - long-running per-VM supervision,
+- backend-specific VM execution,
 - guest-agent implementation.
+
+The manager API is currently a library boundary implemented by `bento-libvm`. A future remote manager may expose an equivalent API over the network, but that wire service does not exist yet and is not required for the daemonless architecture.
 
 ### `bento-vmmon`
 
-`bento-vmmon` is the per-VM monitor and supervisor.
+`bento-vmmon` is the canonical per-VM monitor and supervisor.
 
 It owns:
 
 - reading `config.yaml` from the instance directory,
-- daemonizing itself,
-- writing its pidfile and runtime artifacts,
-- writing durable exit metadata in `exit.json`,
-- starting and supervising one VM,
-- exposing `VmMonitorService`,
-- implementing the Negotiate server for serial attach, vsock connect, and monitor RPC upgrades,
-- tracking runtime state for one running VM,
-- runtime cleanup and exit state persistence,
+- self-daemonization by default,
+- a foreground mode for tests and debugging,
+- creating and supervising one VM,
+- serving `VmMonitorService`,
+- serving the Negotiate protocol for monitor upgrades,
+- runtime state for VM and guest readiness,
+- serial attach, shell attach, and API upgrade handling,
 - signal-driven shutdown.
-
-During migration, `bento-vmmon` may temporarily keep legacy paths for older name-based startup flows, but the data-dir-driven monitor path now consumes `bento-core::VmSpec` directly instead of adapting it through legacy runtime config structures.
 
 It does not own:
 
-- the global machine inventory,
-- machine name lookup across all machines,
+- global machine inventory,
+- machine lookup across all machines,
+- manager metadata,
 - image resolution,
-- machine creation policy,
-- manager-level start, stop, list, or remove APIs,
-- how the machine was originally created.
+- create or remove policy,
+- future manager-daemon responsibilities.
+
+`vmmon` should remain small and focused. It is a runtime monitor, not a general manager.
 
 ### `bento-vmm`
 
@@ -175,8 +155,8 @@ It owns:
 
 - backend-specific VM execution,
 - backend validation,
-- backend process lifecycle primitives,
-- serial and vsock hooks exposed to the monitor.
+- backend lifecycle primitives,
+- serial and vsock hooks consumed by `vmmon`.
 
 It does not own:
 
@@ -184,44 +164,42 @@ It does not own:
 - machine inventory,
 - manager APIs,
 - monitor daemonization,
-- on-disk manager state,
-- profile or image policy.
+- manager-owned state.
 
-## State Model
+## Canonical State Model
 
-### Canonical machine identity
+### Machine identity
 
 - Every machine has a stable UUID.
-- The UUID is the manager identity used in SQLite.
-- The per-instance directory name is that UUID (32 lowercase hex chars, no dashes).
-- Human-readable names are aliases resolved through SQLite.
+- The manager identity is stored in SQLite.
+- The per-instance directory name is the UUID rendered as 32 lowercase hex characters without dashes.
+- Human-readable machine names are manager-owned aliases resolved through SQLite.
 
-### Canonical machine config
+### Machine configuration
 
-- `~/.local/share/bento/instances/<ulid>/config.yaml` is the canonical machine configuration.
+- `config.yaml` in the instance directory is the canonical machine configuration.
 - `config.yaml` is written by `bento-libvm` from `bento-core::VmSpec`.
-- `bento-vmmon` only needs the instance directory path and reads `config.yaml` from there.
+- `vmmon` is data-dir-driven. It accepts `--data-dir` and reads `config.yaml` from that directory.
 
-### Manager metadata and indexes
+### Manager metadata
 
-`~/.local/share/bento/state.db` (SQLite, WAL mode) stores:
+`state.db` stores manager-owned metadata, including:
 
 - UUID to name mapping,
 - name to UUID mapping,
 - creation time,
 - instance directory path.
 
-SQLite does not replace `config.yaml` as the canonical boot input.
+SQLite does not replace `config.yaml` as the canonical VM boot contract.
 
-### Observed runtime state
+### Runtime truth
 
-Runtime truth comes from `bento-vmmon` when it is running.
-
-Manager metadata may cache last-known runtime state, but runtime liveness and readiness are observed from the running monitor and not inferred solely from SQLite.
+- Runtime truth comes from `vmmon` while it is running.
+- `bento-libvm` may derive convenience status from monitor artifacts, but liveness and readiness are monitor-owned runtime concerns.
 
 ## On-disk Layout
 
-The default layout is:
+The current canonical layout is:
 
 ```text
 ~/.local/share/bento/
@@ -229,164 +207,31 @@ The default layout is:
   instances/
     <uuid>/
       config.yaml
-      vmmon.pid
-      vmmon.sock
-      exit.json
-      logs/
-      runtime/
+      id.pid
+      id.sock
+      id.trace.log
+      serial.log
+      apple-machine-id
+      rootfs.img
+      cidata.img
   images/
     ...
 ```
 
 `images/` remains manager-owned data.
 
-## API Model
+Future work:
 
-### `InstanceService`
+- rename runtime artifact filenames such as `id.pid`, `id.sock`, and `id.trace.log` to `vmmon`-specific names,
+- add a durable exit-state file if we decide that belongs in the canonical runtime contract.
 
-`InstanceService` is the manager API shape exposed by `bento-libvm` locally and by a future remote manager service in tunnel mode.
+Those renames are not part of the current implementation and should not be described as current reality.
 
-It includes:
+## Canonical `VmSpec`
 
-- `Create`
-- `Start`
-- `Stop`
-- `Remove`
-- `List`
-- `Inspect`
-- `SshInfo`
+The canonical machine config type is `bento_core::VmSpec`.
 
-### `VmMonitorService`
-
-`VmMonitorService` is the per-VM monitor API exposed by `bento-vmmon`.
-
-It includes:
-
-- `Ping`
-- `Inspect`
-- `WatchStatus`
-
-It does not include `Stop`.
-
-Shutdown is signal-based and owned by `bento-libvm`.
-
-## Negotiate Protocol Ownership
-
-The current Negotiate protocol remains part of the architecture.
-
-It is used to upgrade a connection into:
-
-- a serial attach session,
-- a vsock connection into the guest,
-- an RPC channel.
-
-Ownership becomes:
-
-- `bento-vmmon`: Negotiate server implementation,
-- `bento-libvm`: Negotiate client implementation.
-
-This preserves the current upgrade model while moving ownership out of the CLI.
-
-## `bento-vmmon` Process Model
-
-`bento-vmmon` should follow a structure similar to `arcbox-daemon` at the top level:
-
-- `main.rs` handles argument parsing, logging setup, Tokio runtime creation, and resolving the instance data directory.
-- `run()` coordinates staged startup.
-- helper modules own startup, services, shutdown, runtime state, and shared context.
-
-Recommended high-level module split:
-
-- `main.rs`
-- `run.rs`
-- `startup.rs`
-- `services.rs`
-- `shutdown.rs`
-- `state.rs`
-- `context.rs`
-- `supervisor.rs`
-
-The `vmmon` executable accepts a `--data-dir` argument that points at one specific instance directory, for example:
-
-```text
-~/.local/share/bento/instances/<ulid>
-```
-
-`vmmon` is data-dir-driven. It accepts `--data-dir` and reads `config.yaml` from that directory as its startup contract.
-
-## Startup and Shutdown Semantics
-
-### Startup synchronization
-
-`bento-libvm` spawns `bento-vmmon` and passes a startup pipe.
-
-`bento-vmmon` uses the startup pipe to report either:
-
-- successful supervision startup, or
-- structured startup failure.
-
-We explicitly do not use an RPC `Start` call for the initial handshake because the monitor socket does not exist until after monitor initialization. Using RPC for startup would reintroduce socket polling and readiness races.
-
-### Startup success threshold
-
-`Start` succeeds when:
-
-- `bento-vmmon` has daemonized or entered foreground mode successfully,
-- `config.yaml` has been loaded,
-- runtime artifacts such as pidfile and socket are initialized,
-- the backend has been created,
-- VM start has been invoked successfully,
-- the supervisor loop is live.
-
-`Start` does not require guest readiness, SSH reachability, or guest service readiness.
-
-### Startup pipe result
-
-The startup pipe reports a one-shot result similar to:
-
-```text
-Started {
-  vmmon_pid,
-  socket_path,
-  vm_pid?,
-}
-
-Failed {
-  stage,
-  message,
-}
-```
-
-Typical `stage` values:
-
-- `load_config`
-- `daemonize`
-- `bind_socket`
-- `create_backend`
-- `start_vm`
-
-### Shutdown
-
-`bento-libvm` stops a running machine by signaling `bento-vmmon`.
-
-Recommended behavior:
-
-- `SIGTERM` requests graceful shutdown.
-- `SIGINT` may also request graceful shutdown for local interactive compatibility.
-- A second signal or shutdown timeout escalates to forced teardown.
-- `bento-vmmon` persists exit metadata before exiting.
-
-Stop is therefore manager-owned and signal-driven, not monitor-RPC-owned.
-
-## Proposed `bento-core::VmSpec`
-
-The top-level machine config type is named `VmSpec`.
-
-`VmSpec` is the only type in `bento-core` that uses the `Spec` suffix.
-
-Supporting types do not use a `Vm` prefix or `Spec` suffix.
-
-Initial proposed shape:
+Its current shape is:
 
 ```rust
 pub struct VmSpec {
@@ -398,8 +243,7 @@ pub struct VmSpec {
     pub storage: Storage,
     pub mounts: Vec<Mount>,
     pub network: Network,
-    pub guest: Guest,
-    pub host: Host,
+    pub settings: Settings,
 }
 
 pub struct Platform {
@@ -450,14 +294,10 @@ pub struct Network {
     pub mode: NetworkMode,
 }
 
-pub struct Guest {
-    pub profiles: Vec<String>,
-    pub capabilities: Capabilities,
-}
-
-pub struct Host {
+pub struct Settings {
     pub nested_virtualization: bool,
     pub rosetta: bool,
+    pub guest_enabled: bool,
 }
 
 pub enum GuestOs {
@@ -481,143 +321,114 @@ pub enum NetworkMode {
     User,
     Bridged,
 }
-
-pub struct Capabilities {
-    pub ssh: bool,
-    pub docker: bool,
-    pub dns: bool,
-    pub forward: bool,
-}
 ```
 
-This shape is intentionally manager-facing and canonical. Backend-private derived configuration remains outside `VmSpec`.
+Guest service configuration used during bootstrap and readiness lives in `bento-core`, but it is not embedded directly inside `VmSpec` today.
 
-## Sequence Diagrams
+## `vmmon` API and Protocol Ownership
 
-### Local ABI start flow
+### `VmMonitorService`
+
+`VmMonitorService` is the per-VM monitor API exposed by `vmmon`.
+
+It currently includes:
+
+- `Ping`
+- `Inspect`
+- `WatchStatus`
+
+It does not include `Stop`.
+
+Shutdown remains signal-driven and manager-owned.
+
+### Negotiate ownership
+
+The current Negotiate protocol remains part of the architecture.
+
+It is used to upgrade a connection into:
+
+- serial attach,
+- shell attach,
+- monitor RPC.
+
+Ownership is:
+
+- `bento-vmmon`: Negotiate server implementation,
+- `bento-libvm`: Negotiate client implementation.
+
+This preserves the existing connection-upgrade model while keeping the CLI out of protocol ownership.
+
+## `vmmon` Process Model
+
+`vmmon` is data-dir-driven and per-instance.
+
+The executable accepts:
+
+- `--data-dir <instance-dir>`
+- `--startup-fd <fd>`
+- `--foreground`
+
+`main.rs` handles argument parsing, logging setup, Tokio runtime creation, and process bootstrap. Startup, service hosting, runtime state, and shutdown are split into helper modules.
+
+## Startup and Shutdown Semantics
+
+### Startup
+
+`bento-libvm` spawns `vmmon` and passes a startup pipe.
+
+`vmmon` reports a one-shot startup result over that pipe. The current wire format is simple:
 
 ```text
-CLI/SDK -> libvm: Start(name or uuid)
-libvm -> sqlite: resolve name -> uuid
-libvm -> vmmon: spawn --data-dir ~/.local/share/bento/instances/<uuid> --startup-fd N
-vmmon -> vmmon: parse args, init logging, build tokio runtime
-vmmon -> vmmon: daemonize
-vmmon -> config.yaml: load VmSpec
-vmmon -> vmmon: bind monitor socket, write pidfile
-vmmon -> vmm: create VM
-vmmon -> vmm: start VM
-vmmon -> libvm: Started { vmmon_pid, socket_path, vm_pid? }
-libvm -> CLI/SDK: success
+started
 ```
 
-### Graceful stop flow
+or:
 
 ```text
-CLI/SDK -> libvm: Stop(name or uuid)
-libvm -> sqlite: resolve name -> uuid
-libvm -> vmmon: SIGTERM
-vmmon -> vmmon: transition to stopping
-vmmon -> vmm: graceful stop
-vmm -> vmmon: VM exits
-vmmon -> exit.json: persist exit metadata
-vmmon -> libvm-visible state: stopped
-vmmon -> vmmon: remove runtime artifacts and exit
-libvm -> CLI/SDK: stop requested
+failed\t<message>
 ```
 
-### Forced stop escalation
+This startup handshake is used instead of an RPC `Start` call so the manager does not need to infer readiness by polling sockets or pidfiles.
 
-```text
-CLI/SDK -> libvm: Stop(name or uuid)
-libvm -> vmmon: SIGTERM
-vmmon -> vmm: graceful stop
-... timeout expires ...
-libvm or vmmon -> vmmon/backend: escalate
-vmmon -> vmm/helper processes: force teardown
-vmmon -> exit.json: persist forced exit metadata
-vmmon -> vmmon: exit
-```
+Start succeeds once `vmmon` has successfully initialized supervision for the VM. It does not require guest readiness, SSH reachability, or guest service readiness.
 
-## Implementation Phases
+### Shutdown
 
-### Phase 1: architecture and contracts
+`bento-libvm` stops a machine by signaling `vmmon`.
 
-- write and approve this ADR,
-- define crate responsibilities,
-- define the canonical `VmSpec`,
-- define on-disk layout,
-- define startup pipe semantics,
-- define `InstanceService` and `VmMonitorService` responsibilities.
+The current implementation uses `SIGINT` for the manager-triggered stop path, and `vmmon` also handles `SIGTERM`.
 
-### Phase 2: introduce `bento-core`
+Shutdown behavior is:
 
-- add `bento-core`,
-- move shared domain types into it,
-- define UUID-backed machine identity types,
-- add serialization for `VmSpec`.
+- first signal requests graceful shutdown,
+- `vmmon` transitions runtime state toward stopping,
+- `vmmon` asks the backend to stop the VM,
+- a second signal forces immediate exit,
+- `vmmon` exits after supervision shuts down.
 
-### Phase 3: introduce `bento-libvm`
-
-- add `bento-libvm`,
-- move runtime policy and manager logic out of `bento-runtime`,
-- move CLI-owned lifecycle logic into `bento-libvm`,
-- keep temporary adapters as needed.
-
-### Phase 4: adopt manager state and layout
-
-- add SQLite at `~/.local/share/bento/state.db`,
-- allocate UUIDs on create,
-- move instance directories to `~/.local/share/bento/instances/<uuid>/`,
-- write canonical `config.yaml`,
-- store name mappings and metadata in SQLite.
-
-### Phase 5: rename and restructure monitor
-
-- rename `bento-instanced` to `bento-vmmon`,
-- reorganize to a thin `main` plus staged `run()`,
-- add `--data-dir`,
-- move daemonization into `vmmon`,
-- add startup pipe handshake,
-- add signal-driven shutdown.
-
-### Phase 6: split APIs and Negotiate ownership
-
-- define manager `InstanceService`,
-- define per-VM `VmMonitorService`,
-- move Negotiate server ownership into `bento-vmmon`,
-- move Negotiate client ownership into `bento-libvm`,
-- route CLI commands through `bento-libvm`.
-
-### Phase 7: remove obsolete seams
-
-- remove direct CLI monitor spawning,
-- remove CLI-owned pidfile polling startup logic,
-- delete or shrink obsolete `bento-runtime` modules,
-- update tests and docs to the new architecture.
+Future work may refine signal choice and add a stronger durable exit-state contract, but the architecture remains signal-driven rather than monitor-RPC-driven.
 
 ## Consequences
 
 ### Positive
 
-- CLI behavior becomes independent from local versus future remote manager mode.
-- Machine lifecycle logic becomes reusable from SDKs and other language bindings.
-- One monitor per running VM creates a clear operational boundary.
-- Startup error propagation becomes explicit instead of pidfile- and socket-poll-based.
-- `config.yaml` remains human-inspectable and canonical.
-- UUID-backed machine identity gives stable manager identity while allowing mutable names.
-- Existing Negotiate behavior can be preserved while moving ownership to the right layers.
+- The CLI stays thin and can remain stable across local and future remote modes.
+- One monitor per VM creates a clean operational boundary.
+- Machine startup is config-driven from canonical on-disk state.
+- `vmmon` stays focused on runtime supervision with a small surface area.
+- `bento-libvm` can preserve a clean split between daemonless mode now and daemon or tunnel mode later.
+- Existing Negotiate behavior is preserved while ownership moves to the right layers.
 
 ### Negative
 
-- The refactor will touch multiple crate boundaries.
-- Startup and shutdown become more explicitly structured and therefore require careful migration.
-- SQLite introduces a new source of manager state that must stay consistent with the filesystem.
-- Temporary adapters may be needed while moving logic out of `bento-runtime` and the CLI.
+- The architecture introduces more explicit crate and process boundaries.
+- Manager state in SQLite must remain consistent with instance directories.
+- Signal-based stop and startup-pipe synchronization require careful contract maintenance.
+- Some naming cleanup in runtime artifacts is still pending.
 
 ## Open Questions
 
-- The exact SQLite schema is still to be defined.
-- The exact startup pipe wire format still needs to be finalized.
-- The exact forced-shutdown timeout and escalation behavior still needs to be finalized.
-- The exact `VmMonitorService::Inspect` payload still needs to be defined.
-- The future tunnel mode transport and daemon API surface remain deferred.
+- Whether a future remote manager should expose an `InstanceService` wire protocol, and what that exact surface should be.
+- Whether `vmmon` should persist a canonical durable exit-state file as part of the runtime contract.
+- Whether runtime artifact filenames should be renamed from the current `id.*` convention to explicit `vmmon` names.
+- How future tunnel mode should transport manager operations without weakening the daemonless local ABI model.
