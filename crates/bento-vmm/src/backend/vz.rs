@@ -16,7 +16,7 @@ use bento_vz::{
 };
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
-use crate::stream::{MachineSerialStream, VsockStream};
+use crate::stream::{MachineSerialStream, VsockListener, VsockStream};
 use crate::types::{MachineIdentifier, NetworkMode, VmConfig, VmExit, VmmError};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60 * 5);
@@ -176,6 +176,25 @@ impl VzMachineBackend {
 
         let stream = device.connect(port).await.map_err(vz_error)?;
         Ok(VsockStream::from_vz(stream))
+    }
+
+    pub(crate) async fn listen_vsock(&self, port: u32) -> Result<VsockListener, VmmError> {
+        let vm = {
+            let state = self.inner.lock().await;
+            state.vm.clone().ok_or_else(|| {
+                VmmError::Backend(format!(
+                    "cannot listen on vsock port because machine {:?} is not running",
+                    self.config.name.as_str()
+                ))
+            })?
+        };
+
+        let device = vm.open_devices().into_iter().next().ok_or_else(|| {
+            VmmError::Backend("no virtio socket device configured in VM".to_string())
+        })?;
+
+        let listener = device.listen(port).map_err(vz_error)?;
+        Ok(VsockListener::from_vz(listener))
     }
 
     pub(crate) async fn open_serial(&self) -> Result<MachineSerialStream, VmmError> {

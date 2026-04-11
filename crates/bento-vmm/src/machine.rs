@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::backend::{self, VmBackend};
 use crate::serial::SerialConsole;
 use crate::types::{resolve_backend, Backend, VmConfig, VmExit, VmmError};
-use crate::VsockStream;
+use crate::{VsockListener, VsockStream};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vmm {
@@ -66,6 +66,14 @@ impl VirtualMachine {
 
     pub async fn connect_vsock(&self, port: u32) -> Result<VsockStream, VmmError> {
         self.backend.connect_vsock(port).await
+    }
+
+    /// Start listening for guest-initiated vsock connections on the host.
+    ///
+    /// Dropping the returned listener stops accepting new connections for the
+    /// port.
+    pub async fn listen_vsock(&self, port: u32) -> Result<VsockListener, VmmError> {
+        self.backend.listen_vsock(port).await
     }
 
     pub async fn wait(&self) -> Result<VmExit, VmmError> {

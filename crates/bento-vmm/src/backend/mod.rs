@@ -5,7 +5,7 @@ mod firecracker;
 #[cfg(target_os = "macos")]
 mod vz;
 
-use crate::stream::{MachineSerialStream, VsockStream};
+use crate::stream::{MachineSerialStream, VsockListener, VsockStream};
 use crate::types::{Backend, VmConfig, VmExit, VmmError};
 
 #[derive(Debug)]
@@ -49,6 +49,23 @@ impl VmBackend {
             Self::Firecracker(backend) => backend.connect_vsock(port).await,
             #[cfg(target_os = "macos")]
             Self::Vz(backend) => backend.connect_vsock(port).await,
+        }
+    }
+
+    pub(crate) async fn listen_vsock(&self, port: u32) -> Result<VsockListener, VmmError> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Self::CloudHypervisor(_) => Err(VmmError::Unimplemented {
+                kind: Backend::CloudHypervisor,
+                operation: "listen_vsock",
+            }),
+            #[cfg(target_os = "linux")]
+            Self::Firecracker(_) => Err(VmmError::Unimplemented {
+                kind: Backend::Firecracker,
+                operation: "listen_vsock",
+            }),
+            #[cfg(target_os = "macos")]
+            Self::Vz(backend) => backend.listen_vsock(port).await,
         }
     }
 

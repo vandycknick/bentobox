@@ -13,6 +13,7 @@ use objc2_virtualization::{
     VZNetworkDevice, VZVirtualMachine, VZVirtualMachineConfiguration, VZVirtualMachineDelegate,
     VZVirtualMachineState,
 };
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::fmt::{Debug, Display};
 use std::sync::{Arc, Mutex};
@@ -30,6 +31,8 @@ use crate::vz_ext::VZVirtualMachineExt;
 use crate::{GenericPlatform, LinuxBootLoader};
 
 type ObjectiveCDelegate = Retained<ProtocolObject<dyn VZVirtualMachineDelegate>>;
+
+type SocketListenerRegistry = Arc<Mutex<HashMap<usize, HashSet<u32>>>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VirtualMachineState {
@@ -96,6 +99,7 @@ pub struct VirtualMachine {
     state_tx: watch::Sender<VirtualMachineState>,
     #[allow(clippy::arc_with_non_send_sync)]
     delegate: Arc<Mutex<Option<ObjectiveCDelegate>>>,
+    socket_listener_registry: SocketListenerRegistry,
 }
 
 pub trait VirtualMachineDelegate: Send + Sync + 'static {
@@ -146,6 +150,7 @@ impl VirtualMachine {
         });
         #[allow(clippy::arc_with_non_send_sync)]
         let delegate = Arc::new(Mutex::new(None));
+        let socket_listener_registry = Arc::new(Mutex::new(HashMap::new()));
 
         Self {
             queue,
@@ -154,6 +159,7 @@ impl VirtualMachine {
             _observer: observer,
             state_tx,
             delegate,
+            socket_listener_registry,
         }
     }
 
@@ -303,8 +309,16 @@ impl VirtualMachine {
         let count = self
             .queue
             .exec_sync(move || unsafe { self.machine.socketDevices().count() });
+        let registry = self.socket_listener_registry.clone();
         (0..count)
-            .map(|index| VirtioSocketDevice::new(self.machine.clone(), self.queue.clone(), index))
+            .map(|index| {
+                VirtioSocketDevice::new(
+                    self.machine.clone(),
+                    self.queue.clone(),
+                    index,
+                    registry.clone(),
+                )
+            })
             .collect()
     }
 }

@@ -14,6 +14,7 @@ use bento_fc::{SerialConnection as FcSerialConnection, VsockConnection as FcVsoc
 #[cfg(target_os = "macos")]
 use bento_vz::device::{
     SerialPortStream as VzSerialStream, VirtioSocketConnection as VzVsockConnection,
+    VirtioSocketListener as VzVsockListener,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 #[cfg(unix)]
@@ -21,6 +22,10 @@ use tokio::net::UnixStream as TokioUnixStream;
 
 pub struct VsockStream {
     inner: VsockStreamInner,
+}
+
+pub struct VsockListener {
+    inner: VsockListenerInner,
 }
 
 pub(crate) struct MachineSerialStream {
@@ -39,12 +44,18 @@ enum VsockStreamInner {
 }
 
 enum MachineSerialStreamInner {
+    #[allow(dead_code)]
     #[cfg(unix)]
     Unix(TokioUnixStream),
     #[cfg(target_os = "linux")]
     Firecracker(FcSerialConnection),
     #[cfg(target_os = "macos")]
     Vz(VzSerialStream),
+}
+
+enum VsockListenerInner {
+    #[cfg(target_os = "macos")]
+    Vz(VzVsockListener),
 }
 
 impl fmt::Debug for VsockStream {
@@ -57,6 +68,12 @@ impl fmt::Debug for MachineSerialStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MachineSerialStream")
             .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for VsockListener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VsockListener").finish_non_exhaustive()
     }
 }
 
@@ -120,7 +137,44 @@ impl VsockStream {
     }
 }
 
+impl VsockListener {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn from_vz(listener: VzVsockListener) -> Self {
+        Self {
+            inner: VsockListenerInner::Vz(listener),
+        }
+    }
+
+    /// Wait for the next guest-initiated vsock connection.
+    ///
+    /// Returns the next available connection for this listener.
+    pub async fn accept(&mut self) -> io::Result<VsockStream> {
+        match &mut self.inner {
+            #[cfg(target_os = "macos")]
+            VsockListenerInner::Vz(listener) => listener
+                .accept()
+                .await
+                .map(VsockStream::from_vz)
+                .map_err(io::Error::other),
+        }
+    }
+
+    /// Attempt to accept a queued connection without waiting.
+    ///
+    /// Returns `Ok(None)` if no connection is currently available.
+    pub fn try_accept(&mut self) -> io::Result<Option<VsockStream>> {
+        match &mut self.inner {
+            #[cfg(target_os = "macos")]
+            VsockListenerInner::Vz(listener) => listener
+                .try_accept()
+                .map(|stream| stream.map(VsockStream::from_vz))
+                .map_err(io::Error::other),
+        }
+    }
+}
+
 impl MachineSerialStream {
+    #[allow(dead_code)]
     #[cfg(unix)]
     pub(crate) fn from_unix_stream(stream: TokioUnixStream) -> Self {
         Self {
