@@ -12,7 +12,7 @@ use nix::sys::socket::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::mpsc;
-use tokio::task::{JoinHandle, LocalSet};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::context::DaemonContext;
@@ -34,34 +34,26 @@ pub(crate) fn start_endpoint_supervisor(ctx: DaemonContext) -> Option<JoinHandle
             .dispatch(Action::upsert_endpoint(base_status(endpoint)));
     }
 
-    Some(tokio::task::spawn_blocking(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build endpoint supervisor runtime");
-        let local = LocalSet::new();
-
-        runtime.block_on(local.run_until(async move {
-            let mut handles = Vec::new();
-            for endpoint in ctx.spec.endpoints.clone() {
-                if !endpoint.lifecycle.autostart {
-                    continue;
-                }
-
-                let endpoint_ctx = ctx.clone();
-                handles.push(tokio::task::spawn_local(async move {
-                    supervise_endpoint(endpoint_ctx, endpoint).await;
-                }));
+    Some(tokio::spawn(async move {
+        let mut handles = Vec::new();
+        for endpoint in ctx.spec.endpoints.clone() {
+            if !endpoint.lifecycle.autostart {
+                continue;
             }
 
-            ctx.shutdown.cancelled().await;
+            let endpoint_ctx = ctx.clone();
+            handles.push(tokio::spawn(async move {
+                supervise_endpoint(endpoint_ctx, endpoint).await;
+            }));
+        }
 
-            for handle in handles {
-                if let Err(err) = handle.await {
-                    tracing::error!(error = %err, "endpoint task failed during shutdown");
-                }
+        ctx.shutdown.cancelled().await;
+
+        for handle in handles {
+            if let Err(err) = handle.await {
+                tracing::error!(error = %err, "endpoint task failed during shutdown");
             }
-        }));
+        }
     }))
 }
 

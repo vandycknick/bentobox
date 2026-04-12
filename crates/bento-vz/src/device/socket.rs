@@ -514,6 +514,33 @@ impl AsyncWrite for VirtioSocketConnection {
     }
 }
 
+/// The VirtioSocketListener structure represents a listener for the Virtio socket device.
+///
+/// This allows the host to accept connections initiated by the guest.
+/// Use `accept()` to wait for and receive incoming connections.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # async fn example(device: &bento_vz::VirtioSocketDevice) -> Result<(), bento_vz::VzError> {
+/// let mut listener = device.listen(1024)?;
+///
+/// loop {
+///     let conn = listener.accept().await?;
+///     println!("New connection from guest: fd={}", conn.as_raw_fd());
+///     // Handle connection...
+/// }
+/// # }
+/// ```
+///
+/// # Cleanup
+///
+/// When the listener is dropped, it automatically:
+/// - Unregisters listener from the socket device
+/// - Drops _listener
+/// - Drops _delegate
+///
+/// See also [Apple's documentation](https://developer.apple.com/documentation/virtualization/vzvirtiosocketlistener?language=objc)
 pub struct VirtioSocketListener {
     device: VirtioSocketDevice,
     port: u32,
@@ -521,6 +548,10 @@ pub struct VirtioSocketListener {
     _listener: Retained<VZVirtioSocketListener>,
     _delegate: ListenerDelegate,
 }
+
+// SAFETY: The Objective-C objects are only accessed from the main thread
+// through Virtualization.framework's dispatch queue.
+unsafe impl Send for VirtioSocketListener {}
 
 impl fmt::Debug for VirtioSocketListener {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
