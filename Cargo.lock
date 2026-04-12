@@ -363,6 +363,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bento-plugins"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "nix 0.31.1",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "bento-protocol"
 version = "0.1.0"
 dependencies = [

@@ -1,4 +1,4 @@
 [workspace]
-members = ["crates/bento-core", "crates/bento-libvm", "crates/bentoctl", "crates/bento-guestd", "crates/bento-protocol", "crates/bento-instanced", "crates/bento-vmm", "crates/bento-vz", "crates/bento-fc", "crates/bento-ch"]
+members = ["crates/bento-core", "crates/bento-libvm", "crates/bentoctl", "crates/bento-guestd", "crates/bento-protocol", "crates/bento-instanced", "crates/bento-vmm", "crates/bento-vz", "crates/bento-fc", "crates/bento-ch", "crates/bento-plugins"]
 default-members = ["crates/bentoctl", "crates/bento-instanced"]
 resolver = "2"
