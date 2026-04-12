@@ -7,6 +7,7 @@ use clap::Parser;
 
 mod agent;
 mod context;
+mod endpoints;
 mod lock;
 mod machine;
 mod net;

@@ -57,8 +57,8 @@ impl Cmd {
             println!("endpoints:");
             for endpoint in status.endpoints {
                 println!(
-                    "  - {} guest={} host={} active={}",
-                    endpoint.name, endpoint.guest_address, endpoint.host_address, endpoint.active
+                    "  - {} port={} active={}",
+                    endpoint.name, endpoint.port, endpoint.active
                 );
                 if !endpoint.summary.is_empty() {
                     println!("    summary: {}", endpoint.summary);

@@ -29,7 +29,13 @@ type ListenerRegistry = Arc<Mutex<HashMap<usize, HashSet<u32>>>>;
 type ListenerDelegate = Retained<ProtocolObject<dyn VZVirtioSocketListenerDelegate>>;
 
 struct VsockListenerDelegateIvars {
-    sender: mpsc::UnboundedSender<Result<VirtioSocketConnection, VzError>>,
+    sender: mpsc::UnboundedSender<Result<PendingConnection, VzError>>,
+}
+
+struct PendingConnection {
+    fd: OwnedFd,
+    source_port: u32,
+    destination_port: u32,
 }
 
 define_class!(
@@ -53,7 +59,11 @@ define_class!(
 
             let result = dup(borrowed)
                 .map_err(|err| VzError::Backend(format!("duplicate vsock fd: {err}")))
-                .and_then(|fd| VirtioSocketConnection::new(fd, source_port, destination_port));
+                .map(|fd| PendingConnection {
+                    fd,
+                    source_port,
+                    destination_port,
+                });
 
             match self.ivars().sender.send(result) {
                 Ok(()) => true,
@@ -71,7 +81,7 @@ define_class!(
 
 impl VsockListenerDelegate {
     fn new_protocol_object(
-        sender: mpsc::UnboundedSender<Result<VirtioSocketConnection, VzError>>,
+        sender: mpsc::UnboundedSender<Result<PendingConnection, VzError>>,
     ) -> ListenerDelegate {
         let delegate = Self::alloc().set_ivars(VsockListenerDelegateIvars { sender });
         let delegate: Retained<Self> = unsafe { msg_send![super(delegate), init] };
@@ -507,7 +517,7 @@ impl AsyncWrite for VirtioSocketConnection {
 pub struct VirtioSocketListener {
     device: VirtioSocketDevice,
     port: u32,
-    receiver: mpsc::UnboundedReceiver<Result<VirtioSocketConnection, VzError>>,
+    receiver: mpsc::UnboundedReceiver<Result<PendingConnection, VzError>>,
     _listener: Retained<VZVirtioSocketListener>,
     _delegate: ListenerDelegate,
 }
@@ -531,10 +541,12 @@ impl VirtioSocketListener {
     ///
     /// Returns the next available connection for this listener.
     pub async fn accept(&mut self) -> Result<VirtioSocketConnection, VzError> {
-        self.receiver
+        let accepted = self
+            .receiver
             .recv()
             .await
-            .ok_or_else(|| VzError::Backend("listener closed".to_string()))?
+            .ok_or_else(|| VzError::Backend("listener closed".to_string()))??;
+        VirtioSocketConnection::new(accepted.fd, accepted.source_port, accepted.destination_port)
     }
 
     /// Attempt to accept a queued connection without waiting.
@@ -542,7 +554,14 @@ impl VirtioSocketListener {
     /// Returns `Ok(None)` if no connection is currently available.
     pub fn try_accept(&mut self) -> Result<Option<VirtioSocketConnection>, VzError> {
         match self.receiver.try_recv() {
-            Ok(result) => Ok(Some(result?)),
+            Ok(result) => {
+                let accepted = result?;
+                Ok(Some(VirtioSocketConnection::new(
+                    accepted.fd,
+                    accepted.source_port,
+                    accepted.destination_port,
+                )?))
+            }
             Err(mpsc::error::TryRecvError::Empty) => Ok(None),
             Err(mpsc::error::TryRecvError::Disconnected) => {
                 Err(VzError::Backend("listener closed".to_string()))

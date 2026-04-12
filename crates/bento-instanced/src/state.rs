@@ -1,7 +1,8 @@
 use std::sync::Mutex;
 
 use bento_protocol::v1::{
-    InspectResponse, LifecycleState, PingResponse, ServiceHealth, StatusSource, StatusUpdate,
+    EndpointStatus, InspectResponse, LifecycleState, PingResponse, ServiceHealth, StatusSource,
+    StatusUpdate,
 };
 use tokio::sync::broadcast;
 
@@ -89,6 +90,7 @@ pub(crate) struct InstanceState {
     guest: LifecycleState,
     guest_message: String,
     services: Vec<ServiceHealth>,
+    endpoints: Vec<EndpointStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +105,9 @@ pub(crate) enum Action {
     },
     SetServices {
         services: Vec<ServiceHealth>,
+    },
+    UpsertEndpoint {
+        endpoint: EndpointStatus,
     },
 }
 
@@ -145,6 +150,10 @@ impl Action {
     pub(crate) fn set_services(services: Vec<ServiceHealth>) -> Self {
         Self::SetServices { services }
     }
+
+    pub(crate) fn upsert_endpoint(endpoint: EndpointStatus) -> Self {
+        Self::UpsertEndpoint { endpoint }
+    }
 }
 
 pub(crate) type InstanceStore = Store<InstanceState, Action, StatusUpdate>;
@@ -173,7 +182,7 @@ pub(crate) fn select_current_inspect(state: &InstanceState) -> InspectResponse {
         ready: state.vm == LifecycleState::Running && state.guest == LifecycleState::Running,
         summary: status_summary(state),
         services: state.services.clone(),
-        endpoints: Vec::new(),
+        endpoints: state.endpoints.clone(),
     }
 }
 
@@ -219,6 +228,19 @@ fn reduce_instance_state(current: &InstanceState, action: &Action) -> InstanceSt
         Action::SetServices { services } => {
             next.services = services.clone();
         }
+        Action::UpsertEndpoint { endpoint } => {
+            if let Some(existing) = next
+                .endpoints
+                .iter_mut()
+                .find(|item| item.name == endpoint.name)
+            {
+                *existing = endpoint.clone();
+            } else {
+                next.endpoints.push(endpoint.clone());
+                next.endpoints
+                    .sort_by(|left, right| left.name.cmp(&right.name));
+            }
+        }
     }
 
     next
@@ -234,7 +256,7 @@ fn project_status_update(action: &Action) -> Option<StatusUpdate> {
             *state,
             message.clone(),
         )),
-        Action::SetServices { .. } => None,
+        Action::SetServices { .. } | Action::UpsertEndpoint { .. } => None,
     }
 }
 

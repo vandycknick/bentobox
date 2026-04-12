@@ -12,8 +12,103 @@ pub struct VmSpec {
     pub storage: Storage,
     #[serde(default)]
     pub mounts: Vec<Mount>,
+    #[serde(default)]
+    pub endpoints: Vec<EndpointSpec>,
     pub network: Network,
     pub settings: Settings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointSpec {
+    pub name: String,
+    pub port: u32,
+    pub mode: EndpointMode,
+    pub plugin: PluginSpec,
+    #[serde(default)]
+    pub lifecycle: LifecycleSpec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointMode {
+    Connect,
+    Listen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSpec {
+    pub command: PathBuf,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub working_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleSpec {
+    #[serde(default = "default_true")]
+    pub autostart: bool,
+    #[serde(default = "default_startup_timeout_ms")]
+    pub startup_timeout_ms: u64,
+    #[serde(default)]
+    pub restart: RestartPolicy,
+    #[serde(default)]
+    pub backoff_ms: BackoffSpec,
+}
+
+impl Default for LifecycleSpec {
+    fn default() -> Self {
+        Self {
+            autostart: default_true(),
+            startup_timeout_ms: default_startup_timeout_ms(),
+            restart: RestartPolicy::default(),
+            backoff_ms: BackoffSpec::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RestartPolicy {
+    Never,
+    #[default]
+    OnFailure,
+    Always,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackoffSpec {
+    #[serde(default = "default_backoff_initial")]
+    pub initial: u64,
+    #[serde(default = "default_backoff_max")]
+    pub max: u64,
+}
+
+impl Default for BackoffSpec {
+    fn default() -> Self {
+        Self {
+            initial: default_backoff_initial(),
+            max: default_backoff_max(),
+        }
+    }
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_startup_timeout_ms() -> u64 {
+    5_000
+}
+
+const fn default_backoff_initial() -> u64 {
+    200
+}
+
+const fn default_backoff_max() -> u64 {
+    5_000
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,9 +211,11 @@ pub enum NetworkMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        Architecture, Backend, Boot, Bootstrap, Disk, DiskKind, GuestOs, Mount, Network,
-        NetworkMode, Platform, Resources, Settings, Storage, VmSpec,
+        Architecture, Backend, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, EndpointMode,
+        EndpointSpec, GuestOs, LifecycleSpec, Mount, Network, NetworkMode, Platform, PluginSpec,
+        Resources, RestartPolicy, Settings, Storage, VmSpec,
     };
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     fn sample_vm_spec() -> VmSpec {
@@ -161,6 +258,26 @@ mod tests {
                 tag: "workspace".to_string(),
                 read_only: false,
             }],
+            endpoints: vec![EndpointSpec {
+                name: "api".to_string(),
+                port: 8080,
+                mode: EndpointMode::Connect,
+                plugin: PluginSpec {
+                    command: PathBuf::from("/usr/local/bin/bento-endpoint"),
+                    args: vec!["--serve".to_string()],
+                    env: BTreeMap::from([("RUST_LOG".to_string(), "info".to_string())]),
+                    working_dir: Some(PathBuf::from("/tmp")),
+                },
+                lifecycle: LifecycleSpec {
+                    autostart: true,
+                    startup_timeout_ms: 5_000,
+                    restart: RestartPolicy::OnFailure,
+                    backoff_ms: BackoffSpec {
+                        initial: 200,
+                        max: 5_000,
+                    },
+                },
+            }],
             network: Network {
                 mode: NetworkMode::User,
             },
@@ -191,5 +308,39 @@ mod tests {
         assert!(yaml.contains("kind: root"));
         assert!(yaml.contains("kind: seed"));
         assert!(yaml.contains("mode: user"));
+        assert!(yaml.contains("mode: connect"));
+    }
+
+    #[test]
+    fn vm_spec_defaults_missing_endpoints() {
+        let yaml = r#"
+version: 1
+name: dev
+platform:
+  guest_os: linux
+  architecture: aarch64
+  backend: auto
+resources:
+  cpus: 4
+  memory_mib: 4096
+boot:
+  kernel: /kernel
+  initramfs: /initramfs
+  kernel_cmdline: []
+  bootstrap:
+    cloud_init: /cloud-init/user-data
+storage:
+  disks: []
+mounts: []
+network:
+  mode: user
+settings:
+  nested_virtualization: false
+  rosetta: true
+  guest_enabled: true
+"#;
+
+        let decoded: VmSpec = serde_yaml_ng::from_str(yaml).expect("deserialize vm spec");
+        assert!(decoded.endpoints.is_empty());
     }
 }

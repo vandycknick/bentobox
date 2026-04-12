@@ -19,6 +19,7 @@ use tonic::{Request, Response, Status};
 
 use crate::agent::AgentClient;
 use crate::context::{DaemonContext, RuntimeContext};
+use crate::endpoints::start_endpoint_supervisor;
 use crate::net::server::NegotiateServer;
 use crate::net::tunnel::spawn_tunnel;
 use crate::startup::StartupReporter;
@@ -34,6 +35,7 @@ type WatchStatusStream = Pin<Box<dyn Stream<Item = Result<StatusUpdate, Status>>
 pub struct ServiceHandles {
     pub(crate) control_socket: JoinHandle<eyre::Result<()>>,
     pub(crate) guest_monitor: Option<JoinHandle<()>>,
+    pub(crate) endpoint_supervisor: Option<JoinHandle<()>>,
     pub(crate) serial_log: JoinHandle<()>,
 }
 
@@ -133,12 +135,15 @@ pub async fn start_services(
         None
     };
 
+    let endpoint_supervisor = start_endpoint_supervisor(ctx.clone());
+
     startup_reporter.report_started()?;
     tracing::info!(instance = %ctx.machine.name(), "vmmon running");
 
     Ok(ServiceHandles {
         control_socket,
         guest_monitor,
+        endpoint_supervisor,
         serial_log,
     })
 }

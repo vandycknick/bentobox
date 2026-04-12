@@ -84,6 +84,12 @@ async fn drain(handles: &mut ServiceHandles) {
         }
     }
 
+    if let Some(task) = handles.endpoint_supervisor.take() {
+        if let Err(err) = task.await {
+            tracing::error!(error = %err, "endpoint supervisor task failed during shutdown");
+        }
+    }
+
     match (&mut handles.control_socket).await {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {

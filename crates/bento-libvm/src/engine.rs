@@ -190,6 +190,7 @@ impl LibVm {
                 .collect(),
             },
             mounts: assign_mount_tags(request.mounts),
+            endpoints: Vec::new(),
             network: Network {
                 mode: request.network.unwrap_or(NetworkMode::User),
             },
@@ -277,6 +278,7 @@ impl LibVm {
             },
             storage: Storage { disks },
             mounts: assign_mount_tags(request.mounts),
+            endpoints: Vec::new(),
             network: Network {
                 mode: request.network.unwrap_or(NetworkMode::User),
             },
@@ -909,6 +911,7 @@ mod tests {
             },
             storage: Storage { disks: Vec::new() },
             mounts: Vec::new(),
+            endpoints: Vec::new(),
             network: Network {
                 mode: NetworkMode::User,
             },

@@ -28,25 +28,21 @@ message SystemInfo {
 
 enum EndpointKind {
   ENDPOINT_KIND_UNSPECIFIED = 0;
-  ENDPOINT_KIND_TCP = 1;
-  ENDPOINT_KIND_UNIX_SOCKET = 2;
-  ENDPOINT_KIND_SSH = 3;
-  ENDPOINT_KIND_SERIAL = 4;
+  ENDPOINT_KIND_VSOCK_CONNECT = 1;
+  ENDPOINT_KIND_VSOCK_LISTEN = 2;
 }
 
 message EndpointDescriptor {
   string name = 1;
   EndpointKind kind = 2;
   uint32 port = 3;
-  string guest_address = 4;
 }
 
 message EndpointStatus {
   string name = 1;
   EndpointKind kind = 2;
-  string guest_address = 3;
-  string host_address = 4;
-  bool active = 5;
-  string summary = 6;
-  repeated string problems = 7;
+  uint32 port = 3;
+  bool active = 4;
+  string summary = 5;
+  repeated string problems = 6;
 }

@@ -3,7 +3,7 @@ use std::fmt;
 use std::fs::File;
 use std::io;
 #[cfg(unix)]
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -134,6 +134,22 @@ impl VsockStream {
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => stream.destination_port(),
         }
+    }
+
+    #[cfg(unix)]
+    pub fn dup_fd(&self) -> io::Result<OwnedFd> {
+        let fd = match &self.inner {
+            #[cfg(target_os = "linux")]
+            VsockStreamInner::CloudHypervisor(stream) => duplicate_nonblocking_fd(stream)?,
+            #[cfg(target_os = "linux")]
+            VsockStreamInner::Firecracker(stream) => duplicate_nonblocking_fd(stream)?,
+            #[cfg(unix)]
+            VsockStreamInner::Unix(stream) => duplicate_nonblocking_fd(stream)?,
+            #[cfg(target_os = "macos")]
+            VsockStreamInner::Vz(stream) => duplicate_nonblocking_fd(stream)?,
+        };
+
+        Ok(fd)
     }
 }
 
@@ -314,5 +330,71 @@ impl AsyncWrite for MachineSerialStream {
             #[cfg(target_os = "macos")]
             MachineSerialStreamInner::Vz(stream) => Pin::new(stream).poll_shutdown(cx),
         }
+    }
+}
+
+#[cfg(unix)]
+fn duplicate_nonblocking_fd<F>(fd_owner: &F) -> io::Result<OwnedFd>
+where
+    F: AsRawFd,
+{
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd_owner.as_raw_fd()) };
+    let duplicated = nix::unistd::dup(borrowed).map_err(io::Error::other)?;
+    let file = std::fs::File::from(duplicated);
+    set_nonblocking(&file)?;
+    Ok(file.into())
+}
+
+#[cfg(unix)]
+fn set_nonblocking(file: &std::fs::File) -> io::Result<()> {
+    use nix::fcntl::{fcntl, FcntlArg, OFlag};
+
+    let flags =
+        OFlag::from_bits_truncate(fcntl(file, FcntlArg::F_GETFL).map_err(io::Error::other)?);
+    let new_flags = flags | OFlag::O_NONBLOCK;
+    let _ = fcntl(file, FcntlArg::F_SETFL(new_flags)).map_err(io::Error::other)?;
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::io;
+    use std::io::{Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+    use std::os::unix::net::UnixStream as StdUnixStream;
+
+    use nix::libc;
+
+    use super::VsockStream;
+
+    #[tokio::test]
+    async fn dup_fd_returns_valid_nonblocking_descriptor() {
+        let (mut left, right) = StdUnixStream::pair().expect("unix stream pair should be created");
+        right
+            .set_nonblocking(true)
+            .expect("right stream should be nonblocking");
+
+        let file = unsafe { std::fs::File::from_raw_fd(right.into_raw_fd()) };
+        let stream = VsockStream::from_file(file).expect("vsock stream should wrap unix stream");
+        let duplicated = stream.dup_fd().expect("dup fd should succeed");
+
+        let raw_flags = unsafe { libc::fcntl(duplicated.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(raw_flags, -1, "fcntl should succeed");
+        assert_ne!(raw_flags & libc::O_NONBLOCK, 0, "fd should be nonblocking");
+
+        let mut duplicated_stream = StdUnixStream::from(duplicated);
+        left.write_all(b"ping").expect("write should succeed");
+
+        let mut buf = [0u8; 4];
+        loop {
+            match duplicated_stream.read(&mut buf) {
+                Ok(4) => break,
+                Ok(_) => panic!("unexpected short read"),
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(err) => panic!("read should succeed: {err}"),
+            }
+        }
+
+        assert_eq!(&buf, b"ping");
     }
 }

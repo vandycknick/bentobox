@@ -230,6 +230,7 @@ mod tests {
             },
             storage: Storage { disks: Vec::new() },
             mounts: Vec::new(),
+            endpoints: Vec::new(),
             network: Network {
                 mode: SpecNetworkMode::None,
             },
