@@ -68,6 +68,15 @@ pub(crate) fn start_endpoint_supervisor(ctx: DaemonContext) -> Option<JoinHandle
 async fn supervise_endpoint(ctx: DaemonContext, endpoint: EndpointSpec) {
     let mut backoff = endpoint_backoff_initial(&endpoint);
 
+    tracing::info!(
+        endpoint = %endpoint.name,
+        mode = %endpoint_mode_name(endpoint.mode),
+        port = endpoint.port,
+        autostart = endpoint.lifecycle.autostart,
+        restart_policy = %restart_policy_name(endpoint.lifecycle.restart),
+        "starting endpoint supervision"
+    );
+
     loop {
         if ctx.shutdown.is_cancelled() {
             set_endpoint_status(&ctx, &endpoint, false, "stopped", Vec::new());
@@ -94,15 +103,34 @@ async fn supervise_endpoint(ctx: DaemonContext, endpoint: EndpointSpec) {
                 return;
             }
             EndpointOutcome::ExitedCleanly => {
+                tracing::info!(
+                    endpoint = %endpoint.name,
+                    mode = %endpoint_mode_name(endpoint.mode),
+                    port = endpoint.port,
+                    "endpoint plugin exited cleanly"
+                );
                 set_endpoint_status(&ctx, &endpoint, false, "plugin exited", Vec::new());
             }
             EndpointOutcome::Failed(message) => {
-                tracing::warn!(endpoint = %endpoint.name, error = %message, "endpoint failed");
+                tracing::error!(
+                    endpoint = %endpoint.name,
+                    mode = %endpoint_mode_name(endpoint.mode),
+                    port = endpoint.port,
+                    error = %message,
+                    "endpoint failed"
+                );
                 set_endpoint_status(&ctx, &endpoint, false, message, vec![message.clone()]);
             }
         }
 
         if !should_restart {
+            tracing::warn!(
+                endpoint = %endpoint.name,
+                mode = %endpoint_mode_name(endpoint.mode),
+                port = endpoint.port,
+                restart_policy = %restart_policy_name(endpoint.lifecycle.restart),
+                "endpoint plugin will not be restarted"
+            );
             return;
         }
 
@@ -117,6 +145,15 @@ async fn supervise_endpoint(ctx: DaemonContext, endpoint: EndpointSpec) {
             }
             _ = tokio::time::sleep(backoff) => {}
         }
+
+        tracing::warn!(
+            endpoint = %endpoint.name,
+            mode = %endpoint_mode_name(endpoint.mode),
+            port = endpoint.port,
+            restart_policy = %restart_policy_name(endpoint.lifecycle.restart),
+            backoff = ?backoff,
+            "restarting endpoint plugin after failure"
+        );
 
         backoff = std::cmp::min(backoff.saturating_mul(2), endpoint_backoff_max(&endpoint));
     }
@@ -134,6 +171,15 @@ async fn run_connect_endpoint(ctx: &DaemonContext, endpoint: &EndpointSpec) -> E
     };
 
     let startup = StartupMessage::new(endpoint, 3);
+    tracing::info!(
+        endpoint = %endpoint.name,
+        mode = %endpoint_mode_name(endpoint.mode),
+        port = endpoint.port,
+        command = %endpoint.plugin.command.display(),
+        args = ?endpoint.plugin.args,
+        working_dir = ?endpoint.plugin.working_dir,
+        "starting endpoint plugin"
+    );
     let mut plugin = match spawn_plugin(endpoint, fd, &startup) {
         Ok(plugin) => plugin,
         Err(err) => return EndpointOutcome::Failed(format!("spawn plugin: {err}")),
@@ -164,6 +210,15 @@ async fn run_listen_endpoint(ctx: &DaemonContext, endpoint: &EndpointSpec) -> En
     };
 
     let startup = StartupMessage::new(endpoint, 3);
+    tracing::info!(
+        endpoint = %endpoint.name,
+        mode = %endpoint_mode_name(endpoint.mode),
+        port = endpoint.port,
+        command = %endpoint.plugin.command.display(),
+        args = ?endpoint.plugin.args,
+        working_dir = ?endpoint.plugin.working_dir,
+        "starting endpoint plugin"
+    );
     let mut plugin = match spawn_plugin(endpoint, control_child, &startup) {
         Ok(plugin) => plugin,
         Err(err) => return EndpointOutcome::Failed(format!("spawn plugin: {err}")),
@@ -204,10 +259,24 @@ async fn run_listen_endpoint(ctx: &DaemonContext, endpoint: &EndpointSpec) -> En
                 };
 
                 conn_id = conn_id.saturating_add(1);
+                tracing::debug!(
+                    endpoint = %endpoint.name,
+                    mode = %endpoint_mode_name(endpoint.mode),
+                    port = endpoint.port,
+                    conn_id,
+                    "accepted endpoint connection"
+                );
                 if let Err(err) = send_conn_fd_with_retry(ctx, endpoint, &control_parent, fd, conn_id).await {
                     let _ = terminate_plugin(&mut plugin.child).await;
                     return EndpointOutcome::Failed(err);
                 }
+                tracing::debug!(
+                    endpoint = %endpoint.name,
+                    mode = %endpoint_mode_name(endpoint.mode),
+                    port = endpoint.port,
+                    conn_id,
+                    "handed endpoint connection to plugin"
+                );
             }
         }
     }
@@ -264,8 +333,23 @@ async fn wait_for_plugin_ready(
             }
             event = plugin.events.recv() => {
                 match event {
-                    Some(PluginEvent::Ready) => return Ok(()),
+                    Some(PluginEvent::Ready) => {
+                        tracing::info!(
+                            endpoint = %endpoint.name,
+                            mode = %endpoint_mode_name(endpoint.mode),
+                            port = endpoint.port,
+                            "endpoint plugin ready"
+                        );
+                        return Ok(());
+                    }
                     Some(PluginEvent::Failed(message)) => {
+                        tracing::error!(
+                            endpoint = %endpoint.name,
+                            mode = %endpoint_mode_name(endpoint.mode),
+                            port = endpoint.port,
+                            plugin_message = %message,
+                            "endpoint plugin reported failure"
+                        );
                         let _ = terminate_plugin(&mut plugin.child).await;
                         return Err(EndpointOutcome::Failed(message));
                     }
@@ -321,7 +405,16 @@ fn handle_plugin_event(
 ) -> Option<EndpointOutcome> {
     match event {
         Some(PluginEvent::Ready) => None,
-        Some(PluginEvent::Failed(message)) => Some(EndpointOutcome::Failed(message)),
+        Some(PluginEvent::Failed(message)) => {
+            tracing::error!(
+                endpoint = %endpoint.name,
+                mode = %endpoint_mode_name(endpoint.mode),
+                port = endpoint.port,
+                plugin_message = %message,
+                "endpoint plugin reported failure"
+            );
+            Some(EndpointOutcome::Failed(message))
+        }
         Some(PluginEvent::EndpointStatus {
             active,
             summary,
@@ -393,6 +486,14 @@ fn spawn_plugin(
     }
 
     let mut child = command.spawn()?;
+    tracing::info!(
+        endpoint = %endpoint.name,
+        mode = %endpoint_mode_name(endpoint.mode),
+        port = endpoint.port,
+        pid = ?child.id(),
+        command = %endpoint.plugin.command.display(),
+        "spawned endpoint plugin"
+    );
     let mut stdin = child
         .stdin
         .take()
@@ -650,6 +751,21 @@ struct BentoFdPassV1 {
     magic: u32,
     flags: u32,
     conn_id: u64,
+}
+
+fn endpoint_mode_name(mode: EndpointMode) -> &'static str {
+    match mode {
+        EndpointMode::Connect => "connect",
+        EndpointMode::Listen => "listen",
+    }
+}
+
+fn restart_policy_name(policy: RestartPolicy) -> &'static str {
+    match policy {
+        RestartPolicy::Never => "never",
+        RestartPolicy::OnFailure => "on_failure",
+        RestartPolicy::Always => "always",
+    }
 }
 
 #[cfg(test)]
