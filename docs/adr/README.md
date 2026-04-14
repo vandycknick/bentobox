@@ -20,4 +20,4 @@ We use Michael Nygard-style ADRs to capture architectural decisions.
 | 0002 | Image management                                              | Implemented | 2026-02-20 | `docs/adr/0002-image-management.md`              |
 | 0003 | Replace shell command with native SSH client (`ssh2`/libssh2) | Proposed    | 2026-02-23 | `docs/adr/0003-native-shell-client-ssh2.md`      |
 | 0004 | Daemonless architecture                                       | Implemented | 2026-04-06 | `docs/adr/0004-daemonless-architecture.md`       |
-| 0005 | Vmmon endpoint plugins for vsock streams                      | Proposed    | 2026-04-12 | `docs/adr/0005-vmmon-vsock-endpoint-plugins.md`  |
+| 0005 | Vmmon endpoint plugins for vsock streams                      | Implemented | 2026-04-12 | `docs/adr/0005-vmmon-vsock-endpoint-plugins.md`  |

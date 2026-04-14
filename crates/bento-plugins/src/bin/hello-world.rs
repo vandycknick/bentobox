@@ -1,9 +1,6 @@
 use std::io;
-use std::os::fd::OwnedFd;
 
-use bento_plugins::{
-    emit_event, into_async_stream, read_startup_message, recv_conn_fd, PluginEvent,
-};
+use bento_plugins::Plugin;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -14,43 +11,20 @@ use hyper_util::rt::TokioIo;
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let startup = match read_startup_message() {
-        Ok(startup) => startup,
-        Err(err) => {
-            let message = format!("read startup message: {err}");
-            let _ = emit_event(PluginEvent::Failed { message: &message });
-            return Err(err);
-        }
-    };
-
-    if let Err(err) = startup.expect_listen() {
-        let message = format!(
-            "invalid startup message for {}:{}: {err}",
-            startup.endpoint, startup.port
-        );
-        let _ = emit_event(PluginEvent::Failed { message: &message });
-        return Err(err);
-    }
-
-    emit_event(PluginEvent::Ready)?;
-    emit_event(PluginEvent::EndpointStatus {
-        active: true,
-        summary: "hello-world ready",
-        problems: &[],
-    })?;
+    let plugin = Plugin::init("hello-world").await?;
+    plugin.status(true, "hello-world ready", &[])?;
 
     loop {
-        let (conn_fd, _conn_id) = recv_conn_fd(startup.fd)?;
+        let stream = plugin.accept().await?;
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(conn_fd).await {
+            if let Err(err) = handle_connection(stream).await {
                 eprintln!("hello-world plugin connection failed: {err}");
             }
         });
     }
 }
 
-async fn handle_connection(conn_fd: OwnedFd) -> io::Result<()> {
-    let stream = into_async_stream(conn_fd)?;
+async fn handle_connection(stream: bento_plugins::AsyncStream) -> io::Result<()> {
     let io = TokioIo::new(stream);
     http1::Builder::new()
         .serve_connection(io, service_fn(handle_request))

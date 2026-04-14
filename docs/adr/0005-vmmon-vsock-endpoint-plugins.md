@@ -4,7 +4,7 @@ Date: 2026-04-12
 
 ## Status
 
-Proposed
+Implemented
 
 ## Context
 
@@ -66,7 +66,7 @@ The plugin interface is intentionally small:
 - `stdin`: exactly one startup JSON object, newline terminated,
 - `stdout`: newline-delimited JSON events only,
 - `stderr`: freeform logs,
-- `fd 3`: the endpoint stream or endpoint control socket, depending on mode.
+- `fd 3`: the endpoint control socket.
 
 Plugins must not need to know which VM backend is in use.
 
@@ -76,8 +76,11 @@ All stream file descriptors handed to plugins represent connected, full-duplex, 
 
 For `connect` mode:
 
-- `vmmon` opens a connected vsock stream to the guest port,
-- `vmmon` passes that connected stream to the plugin as `fd 3`.
+- `vmmon` creates a Unix `socketpair` control socket,
+- `vmmon` passes one end of that control socket to the plugin as `fd 3`,
+- the plugin requests guest streams on demand over the control socket,
+- `vmmon` opens a connected vsock stream to the configured guest port for each request,
+- `vmmon` passes each connected stream back to the plugin over the control socket using `SCM_RIGHTS`.
 
 For `listen` mode:
 
@@ -86,7 +89,7 @@ For `listen` mode:
 - `vmmon` accepts guest-initiated vsock connections,
 - `vmmon` passes each accepted connected stream to the plugin over the control socket using `SCM_RIGHTS`.
 
-This keeps `vmmon` out of the data path while allowing one long-running plugin process to handle multiple guest connections.
+This keeps `vmmon` out of the data path while allowing one long-running plugin process to handle multiple guest connections in both modes.
 
 ### Diagrams
 
@@ -107,11 +110,15 @@ sequenceDiagram
   vmmon->>vmmon: start endpoint supervisor
 
   alt endpoint.mode == "connect"
-    vmmon->>vmm: connect_vsock(port)
-    vmm-->>vmmon: connected stream
-    vmmon->>plugin: spawn (fd3 = connected stream)
+    vmmon->>plugin: spawn (fd3 = unix control socket)
     vmmon->>plugin: stdin startup JSON
     plugin-->>vmmon: {"event":"ready"} on stdout
+    loop for each Plugin::connect()
+      plugin->>vmmon: control message connect_open
+      vmmon->>vmm: connect_vsock(port)
+      vmm-->>vmmon: connected stream
+      vmmon->>plugin: sendmsg(SCM_RIGHTS, conn_fd)
+    end
   else endpoint.mode == "listen"
     vmmon->>vmm: listen_vsock(port)
     vmm-->>vmmon: listener
@@ -138,7 +145,7 @@ flowchart TD
   F --> G{accept() yields conn?}
   G -- error transient --> H[Log and retry with backoff]
   G -- error fatal --> I[Stop endpoint and apply restart policy]
-  G -- conn --> J[sendmsg SCM_RIGHTS conn_fd plus conn_id payload]
+  G -- conn --> J[send control message plus SCM_RIGHTS conn_fd]
   J --> K{send ok?}
   K -- yes --> F
   K -- ETOOMANYREFS or limits --> L[Backpressure and retry with backoff]
@@ -182,7 +189,7 @@ This ADR does not require the first implementation to add missing Linux `listen_
 - `vmmon` stays generic and does not need service-specific built-ins for every new host to guest integration.
 - Plugins can be written against one small API with no backend-specific logic.
 - `vmmon` avoids becoming a per-byte relay in the hot data path.
-- One plugin process can serve multiple guest-initiated connections in `listen` mode.
+- One plugin process can serve multiple guest streams in both `connect` and `listen` mode.
 - Endpoint health becomes visible in monitor status without overloading guest-service readiness.
 
 ### Negative
@@ -306,6 +313,7 @@ Existing configs without `endpoints` remain valid by defaulting to an empty list
   "api_version": 1,
   "endpoint": "string",
   "mode": "connect" | "listen",
+  "transport": "brokered_connect" | "listen_accept",
   "port": 0,
   "fd": 3
 }
@@ -316,6 +324,7 @@ Rules:
 - `api_version` must be `1`.
 - `endpoint` matches the configured endpoint name.
 - `mode` matches the configured endpoint mode.
+- `transport` describes the control-socket contract for the selected mode.
 - `port` matches the configured endpoint port.
 - `fd` is always `3`.
 
@@ -360,39 +369,74 @@ The `endpoint_status` event is the plugin's way to report its current runtime st
 
 ### fd 3 semantics
 
+For both endpoint modes:
+
+- `fd 3` is a Unix datagram control socket created by `socketpair()`.
+- `vmmon` uses that control socket to exchange fixed-size control messages and optional `SCM_RIGHTS` fd attachments.
+- Each received connection fd is a nonblocking generic byte-stream fd.
+
 #### `mode: connect`
 
-- `fd 3` is the connected stream to the guest endpoint.
-- The fd is a nonblocking generic byte-stream fd.
+- plugins call `Plugin::connect().await?` to request a new guest stream,
+- `vmmon` responds by opening a new vsock connection to the configured endpoint port,
+- `vmmon` returns that connected stream fd via `SCM_RIGHTS`.
 
 #### `mode: listen`
 
-- `fd 3` is a Unix `SOCK_STREAM` control socket created by `socketpair()`.
-- `vmmon` uses that control socket to deliver accepted connection fds via `SCM_RIGHTS`.
-- Each received fd is a nonblocking generic byte-stream fd for one accepted guest connection.
+- plugins call `Plugin::accept().await?` to wait for the next guest-initiated connection,
+- `vmmon` accepts guest-initiated connections on the configured endpoint port,
+- `vmmon` returns each accepted stream fd via `SCM_RIGHTS`.
 
-### `SCM_RIGHTS` framing
+### Control protocol
 
-Each `sendmsg()` call for an accepted connection includes:
+Both modes share a single fixed-size control protocol carried over `fd 3`.
 
-- exactly one fd in `SCM_RIGHTS`,
-- a fixed 16-byte payload carrying minimal metadata.
+Control messages are versioned by a magic value and carry one message kind, one identifier field, one flags field, and an optional UTF-8 message payload.
 
 ```text
-struct BentoFdPassV1 {
+struct ControlMessageFrameV1 {
   u32 magic;
+  u32 kind;
+  u64 id;
   u32 flags;
-  u64 conn_id;
+  u32 message_len;
+  u8 message[256];
 }
 ```
 
-Rules:
+Implemented message kinds:
 
-- `magic` identifies the framing version,
-- `flags` is reserved and must be `0` in v1,
-- `conn_id` is a monotonic per-endpoint connection id.
+- `connect_open`
+- `connect_open_ok`
+- `connect_open_err`
+- `listen_incoming`
 
-Plugins may ignore the payload after validating `magic`.
+`connect_open_ok` and `listen_incoming` carry one connection fd via `SCM_RIGHTS`.
+
+### Rust plugin API
+
+The intended Rust API is instance-based. Plugins initialize once, then call `connect()` or `accept()` on that initialized plugin instance.
+
+Illustrative outline:
+
+```rust
+use bento_plugins::Plugin;
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let plugin = Plugin::init("hello-world").await?;
+    plugin.status(true, "hello-world ready", &[])?;
+
+    loop {
+        let stream = plugin.accept().await?;
+        tokio::spawn(async move {
+            let _ = handle(stream).await;
+        });
+    }
+}
+```
+
+`Plugin::init(...)` performs runtime setup and emits the initial `ready` event.
 
 ### Generic Rust plugin handling
 

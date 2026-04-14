@@ -1,15 +1,18 @@
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bento_core::{EndpointMode, EndpointSpec, RestartPolicy};
 use bento_protocol::v1::{EndpointKind, EndpointStatus};
+use nix::errno::Errno;
 use nix::sys::socket::{
-    sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType,
+    recvmsg, sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::unix::AsyncFd;
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -19,10 +22,9 @@ use crate::context::DaemonContext;
 use crate::state::Action;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const CONNECT_RETRY_INITIAL: Duration = Duration::from_millis(200);
-const CONNECT_RETRY_MAX: Duration = Duration::from_secs(5);
 const STABLE_RUN_RESET: Duration = Duration::from_secs(30);
-const FD_PASS_MAGIC: u32 = 0x4245_4e54;
+const CONTROL_MAGIC: u32 = 0x4252_4b52;
+const CONTROL_MESSAGE_MAX_BYTES: usize = 256;
 
 pub(crate) fn start_endpoint_supervisor(ctx: DaemonContext) -> Option<JoinHandle<()>> {
     if ctx.spec.endpoints.is_empty() {
@@ -152,53 +154,65 @@ async fn supervise_endpoint(ctx: DaemonContext, endpoint: EndpointSpec) {
 }
 
 async fn run_connect_endpoint(ctx: &DaemonContext, endpoint: &EndpointSpec) -> EndpointOutcome {
-    let stream = match connect_with_retry(ctx, endpoint).await {
-        Ok(stream) => stream,
+    let (control_parent, mut plugin) = match start_endpoint_plugin(endpoint) {
+        Ok(value) => value,
         Err(outcome) => return outcome,
     };
 
-    let fd = match stream.dup_fd() {
-        Ok(fd) => fd,
-        Err(err) => return EndpointOutcome::Failed(format!("duplicate stream fd: {err}")),
-    };
-
-    let startup = StartupMessage::new(endpoint, 3);
-    tracing::info!(
-        endpoint = %endpoint.name,
-        mode = %endpoint_mode_name(endpoint.mode),
-        port = endpoint.port,
-        command = %endpoint.plugin.command.display(),
-        args = ?endpoint.plugin.args,
-        working_dir = ?endpoint.plugin.working_dir,
-        "starting endpoint plugin"
-    );
-    let mut plugin = match spawn_plugin(endpoint, fd, &startup) {
-        Ok(plugin) => plugin,
-        Err(err) => return EndpointOutcome::Failed(format!("spawn plugin: {err}")),
-    };
+    let broker = tokio::spawn(run_connect_broker(ctx.clone(), endpoint.clone(), control_parent));
 
     let ready = wait_for_plugin_ready(ctx, endpoint, &mut plugin).await;
     if let Err(outcome) = ready {
+        broker.abort();
         return outcome;
     }
 
-    run_plugin_event_loop(ctx, endpoint, &mut plugin).await
+    let outcome = run_plugin_event_loop(ctx, endpoint, &mut plugin, Some(broker)).await;
+    if !matches!(outcome, EndpointOutcome::Shutdown) {
+        let _ = terminate_plugin(&mut plugin.child).await;
+    }
+    outcome
 }
 
 async fn run_listen_endpoint(ctx: &DaemonContext, endpoint: &EndpointSpec) -> EndpointOutcome {
-    let mut listener = match ctx.machine.listen_vsock(endpoint.port).await {
+    let listener = match ctx.machine.listen_vsock(endpoint.port).await {
         Ok(listener) => listener,
         Err(err) => return EndpointOutcome::Failed(format!("listen vsock: {err}")),
     };
 
+    let (control_parent, mut plugin) = match start_endpoint_plugin(endpoint) {
+        Ok(value) => value,
+        Err(outcome) => return outcome,
+    };
+
+    let ready = wait_for_plugin_ready(ctx, endpoint, &mut plugin).await;
+    if let Err(outcome) = ready {
+        return outcome;
+    }
+
+    let dispatcher = tokio::spawn(run_listen_dispatch(
+        ctx.clone(),
+        endpoint.clone(),
+        listener,
+        control_parent,
+    ));
+
+    let outcome = run_plugin_event_loop(ctx, endpoint, &mut plugin, Some(dispatcher)).await;
+    if !matches!(outcome, EndpointOutcome::Shutdown) {
+        let _ = terminate_plugin(&mut plugin.child).await;
+    }
+    outcome
+}
+
+fn start_endpoint_plugin(endpoint: &EndpointSpec) -> Result<(OwnedFd, RunningPlugin), EndpointOutcome> {
     let (control_parent, control_child) = match socketpair(
         AddressFamily::Unix,
-        SockType::Stream,
+        SockType::Datagram,
         None,
         SockFlag::empty(),
     ) {
         Ok(pair) => pair,
-        Err(err) => return EndpointOutcome::Failed(format!("create control socketpair: {err}")),
+        Err(err) => return Err(EndpointOutcome::Failed(format!("create control socketpair: {err}"))),
     };
 
     let startup = StartupMessage::new(endpoint, 3);
@@ -211,94 +225,12 @@ async fn run_listen_endpoint(ctx: &DaemonContext, endpoint: &EndpointSpec) -> En
         working_dir = ?endpoint.plugin.working_dir,
         "starting endpoint plugin"
     );
-    let mut plugin = match spawn_plugin(endpoint, control_child, &startup) {
+    let plugin = match spawn_plugin(endpoint, control_child, &startup) {
         Ok(plugin) => plugin,
-        Err(err) => return EndpointOutcome::Failed(format!("spawn plugin: {err}")),
+        Err(err) => return Err(EndpointOutcome::Failed(format!("spawn plugin: {err}"))),
     };
 
-    let ready = wait_for_plugin_ready(ctx, endpoint, &mut plugin).await;
-    if let Err(outcome) = ready {
-        return outcome;
-    }
-
-    let mut conn_id = 0_u64;
-    loop {
-        tokio::select! {
-            _ = ctx.shutdown.cancelled() => {
-                let _ = terminate_plugin(&mut plugin.child).await;
-                return EndpointOutcome::Shutdown;
-            }
-            status = plugin.child.wait() => {
-                return child_exit_outcome(status);
-            }
-            event = plugin.events.recv() => {
-                if let Some(outcome) = handle_plugin_event(ctx, endpoint, event) {
-                    if !matches!(outcome, EndpointOutcome::ExitedCleanly) {
-                        let _ = terminate_plugin(&mut plugin.child).await;
-                    }
-                    return outcome;
-                }
-            }
-            accept_result = listener.accept() => {
-                let stream = match accept_result {
-                    Ok(stream) => stream,
-                    Err(err) => return EndpointOutcome::Failed(format!("accept vsock connection: {err}")),
-                };
-
-                let fd = match stream.dup_fd() {
-                    Ok(fd) => fd,
-                    Err(err) => return EndpointOutcome::Failed(format!("duplicate accepted fd: {err}")),
-                };
-
-                conn_id = conn_id.saturating_add(1);
-                tracing::debug!(
-                    endpoint = %endpoint.name,
-                    mode = %endpoint_mode_name(endpoint.mode),
-                    port = endpoint.port,
-                    conn_id,
-                    "accepted endpoint connection"
-                );
-                if let Err(err) = send_conn_fd_with_retry(ctx, endpoint, &control_parent, fd, conn_id).await {
-                    let _ = terminate_plugin(&mut plugin.child).await;
-                    return EndpointOutcome::Failed(err);
-                }
-                tracing::debug!(
-                    endpoint = %endpoint.name,
-                    mode = %endpoint_mode_name(endpoint.mode),
-                    port = endpoint.port,
-                    conn_id,
-                    "handed endpoint connection to plugin"
-                );
-            }
-        }
-    }
-}
-
-async fn connect_with_retry(
-    ctx: &DaemonContext,
-    endpoint: &EndpointSpec,
-) -> Result<bento_vmm::VsockStream, EndpointOutcome> {
-    let mut backoff = CONNECT_RETRY_INITIAL;
-
-    loop {
-        let attempt =
-            tokio::time::timeout(CONNECT_TIMEOUT, ctx.machine.connect_vsock(endpoint.port)).await;
-        match attempt {
-            Ok(Ok(stream)) => return Ok(stream),
-            Ok(Err(err)) => {
-                tracing::info!(endpoint = %endpoint.name, error = %err, "endpoint connect retrying");
-            }
-            Err(_) => {
-                tracing::info!(endpoint = %endpoint.name, timeout = ?CONNECT_TIMEOUT, "endpoint connect timed out, retrying");
-            }
-        }
-
-        tokio::select! {
-            _ = ctx.shutdown.cancelled() => return Err(EndpointOutcome::Shutdown),
-            _ = tokio::time::sleep(backoff) => {}
-        }
-        backoff = std::cmp::min(backoff.saturating_mul(2), CONNECT_RETRY_MAX);
-    }
+    Ok((control_parent, plugin))
 }
 
 async fn wait_for_plugin_ready(
@@ -368,25 +300,67 @@ async fn run_plugin_event_loop(
     ctx: &DaemonContext,
     endpoint: &EndpointSpec,
     plugin: &mut RunningPlugin,
+    broker: Option<JoinHandle<Result<(), String>>>,
 ) -> EndpointOutcome {
+    let mut broker = broker;
     loop {
         tokio::select! {
             _ = ctx.shutdown.cancelled() => {
+                stop_control_task(&mut broker).await;
                 let _ = terminate_plugin(&mut plugin.child).await;
                 return EndpointOutcome::Shutdown;
             }
             status = plugin.child.wait() => {
+                stop_control_task(&mut broker).await;
                 return child_exit_outcome(status);
             }
             event = plugin.events.recv() => {
                 if let Some(outcome) = handle_plugin_event(ctx, endpoint, event) {
+                    stop_control_task(&mut broker).await;
                     if !matches!(outcome, EndpointOutcome::ExitedCleanly) {
                         let _ = terminate_plugin(&mut plugin.child).await;
                     }
                     return outcome;
                 }
             }
+            result = await_broker(&mut broker), if broker.is_some() => {
+                if !matches!(result, Ok(())) {
+                    let _ = terminate_plugin(&mut plugin.child).await;
+                    return EndpointOutcome::Failed(result.err().unwrap());
+                }
+            }
         }
+    }
+}
+
+async fn stop_control_task(broker: &mut Option<JoinHandle<Result<(), String>>>) {
+    let Some(handle) = broker.take() else {
+        return;
+    };
+
+    handle.abort();
+    match handle.await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            tracing::debug!(error = %err, "endpoint control task returned error during shutdown");
+        }
+        Err(err) if err.is_cancelled() => {}
+        Err(err) => {
+            tracing::debug!(error = %err, "endpoint control task join failed during shutdown");
+        }
+    }
+}
+
+async fn await_broker(
+    broker: &mut Option<JoinHandle<Result<(), String>>>,
+) -> Result<(), String> {
+    let handle = broker
+        .take()
+        .expect("broker handle should exist when awaited");
+    match handle.await {
+        Ok(result) => result,
+        Err(err) if err.is_cancelled() => Ok(()),
+        Err(err) => Err(format!("broker task failed: {err}")),
     }
 }
 
@@ -551,7 +525,7 @@ async fn terminate_plugin(child: &mut Child) -> io::Result<()> {
     }
 }
 
-async fn send_conn_fd_with_retry(
+async fn send_incoming_conn_with_retry(
     ctx: &DaemonContext,
     endpoint: &EndpointSpec,
     control: &OwnedFd,
@@ -560,7 +534,11 @@ async fn send_conn_fd_with_retry(
 ) -> Result<(), String> {
     let mut backoff = endpoint_backoff_initial(endpoint);
     loop {
-        match send_conn_fd(control, &conn_fd, conn_id) {
+        match send_control_message(
+            control,
+            &ControlMessageKind::ListenIncoming { conn_id },
+            Some(&conn_fd),
+        ) {
             Ok(()) => return Ok(()),
             Err(err) if err.raw_os_error() == Some(libc::ETOOMANYREFS) => {
                 tracing::warn!(endpoint = %endpoint.name, error = %err, "endpoint fd passing hit backpressure");
@@ -576,25 +554,109 @@ async fn send_conn_fd_with_retry(
     }
 }
 
-fn send_conn_fd(control: &OwnedFd, conn_fd: &OwnedFd, conn_id: u64) -> io::Result<()> {
-    let payload = BentoFdPassV1 {
-        magic: FD_PASS_MAGIC,
-        flags: 0,
-        conn_id,
-    };
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            (&payload as *const BentoFdPassV1).cast::<u8>(),
-            std::mem::size_of::<BentoFdPassV1>(),
-        )
-    };
-    let iov = [std::io::IoSlice::new(bytes)];
-    let fds = [conn_fd.as_raw_fd()];
-    let cmsg = [ControlMessage::ScmRights(&fds)];
+async fn run_connect_broker(
+    ctx: DaemonContext,
+    endpoint: EndpointSpec,
+    control: OwnedFd,
+) -> Result<(), String> {
+    let control = Arc::new(
+        BrokerControlSocket::new(control).map_err(|err| format!("wrap broker socket: {err}"))?,
+    );
 
-    sendmsg::<()>(control.as_raw_fd(), &iov, &cmsg, MsgFlags::empty(), None)
-        .map_err(io::Error::other)?;
-    Ok(())
+    loop {
+        let message = match control.recv_message().await {
+            Ok(message) => message,
+            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(err) => return Err(format!("read broker request: {err}")),
+        };
+
+        match message {
+            ControlMessageKind::ConnectOpen { request_id } => {
+                let result = tokio::time::timeout(CONNECT_TIMEOUT, ctx.machine.connect_vsock(endpoint.port)).await;
+                match result {
+                    Ok(Ok(stream)) => {
+                        let fd = stream
+                            .dup_fd()
+                            .map_err(|err| format!("duplicate stream fd: {err}"))?;
+                        control
+                            .send_message(&ControlMessageKind::ConnectOpenOk { request_id }, Some(&fd))
+                            .await
+                            .map_err(|err| format!("send connect_open_ok: {err}"))?;
+                    }
+                    Ok(Err(err)) => {
+                        tracing::info!(endpoint = %endpoint.name, error = %err, "broker connect request failed");
+                        control
+                            .send_message(
+                                &ControlMessageKind::ConnectOpenErr {
+                                    request_id,
+                                    retryable: true,
+                                    message: format!("connect_vsock: {err}"),
+                                },
+                                None,
+                            )
+                            .await
+                            .map_err(|err| format!("send connect_open_err: {err}"))?;
+                    }
+                    Err(_) => {
+                        tracing::info!(endpoint = %endpoint.name, timeout = ?CONNECT_TIMEOUT, "broker connect request timed out");
+                        control
+                            .send_message(
+                                &ControlMessageKind::ConnectOpenErr {
+                                    request_id,
+                                    retryable: true,
+                                    message: format!("connect_vsock timed out after {CONNECT_TIMEOUT:?}"),
+                                },
+                                None,
+                            )
+                            .await
+                            .map_err(|err| format!("send connect_open_err: {err}"))?;
+                    }
+                }
+            }
+            other => {
+                return Err(format!("unexpected control message for connect broker: {}", control_message_name(&other)));
+            }
+        }
+    }
+}
+
+async fn run_listen_dispatch(
+    ctx: DaemonContext,
+    endpoint: EndpointSpec,
+    mut listener: bento_vmm::VsockListener,
+    control: OwnedFd,
+) -> Result<(), String> {
+    let mut conn_id = 0_u64;
+    loop {
+        tokio::select! {
+            _ = ctx.shutdown.cancelled() => return Ok(()),
+            accept_result = listener.accept() => {
+                let stream = accept_result
+                    .map_err(|err| format!("accept vsock connection: {err}"))?;
+
+                let fd = stream
+                    .dup_fd()
+                    .map_err(|err| format!("duplicate accepted fd: {err}"))?;
+
+                conn_id = conn_id.saturating_add(1);
+                tracing::debug!(
+                    endpoint = %endpoint.name,
+                    mode = %endpoint_mode_name(endpoint.mode),
+                    port = endpoint.port,
+                    conn_id,
+                    "accepted endpoint connection"
+                );
+                send_incoming_conn_with_retry(&ctx, &endpoint, &control, fd, conn_id).await?;
+                tracing::debug!(
+                    endpoint = %endpoint.name,
+                    mode = %endpoint_mode_name(endpoint.mode),
+                    port = endpoint.port,
+                    conn_id,
+                    "handed endpoint connection to plugin"
+                );
+            }
+        }
+    }
 }
 
 fn base_status(endpoint: &EndpointSpec) -> EndpointStatus {
@@ -665,6 +727,7 @@ struct StartupMessage {
     endpoint: String,
     mode: EndpointMode,
     port: u32,
+    transport: PluginTransport,
     fd: i32,
 }
 
@@ -675,9 +738,267 @@ impl StartupMessage {
             endpoint: endpoint.name.clone(),
             mode: endpoint.mode,
             port: endpoint.port,
+            transport: PluginTransport::for_mode(endpoint.mode),
             fd,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PluginTransport {
+    BrokeredConnect,
+    ListenAccept,
+}
+
+impl PluginTransport {
+    fn for_mode(mode: EndpointMode) -> Self {
+        match mode {
+            EndpointMode::Connect => Self::BrokeredConnect,
+            EndpointMode::Listen => Self::ListenAccept,
+        }
+    }
+}
+
+enum ControlMessageKind {
+    ConnectOpen { request_id: u64 },
+    ConnectOpenOk { request_id: u64 },
+    ConnectOpenErr {
+        request_id: u64,
+        retryable: bool,
+        message: String,
+    },
+    ListenIncoming { conn_id: u64 },
+}
+
+struct BrokerControlSocket {
+    inner: AsyncFd<OwnedFd>,
+}
+
+impl BrokerControlSocket {
+    fn new(fd: OwnedFd) -> io::Result<Self> {
+        set_nonblocking(fd.as_raw_fd())?;
+        Ok(Self {
+            inner: AsyncFd::new(fd)?,
+        })
+    }
+
+    async fn recv_message(&self) -> io::Result<ControlMessageKind> {
+        let payload = loop {
+            let mut guard = self.inner.readable().await?;
+            match guard.try_io(|inner| recv_broker_frame(inner.get_ref().as_raw_fd())) {
+                Ok(result) => break result?,
+                Err(_would_block) => continue,
+            }
+        };
+
+        ControlMessageKind::from_bytes(&payload)
+    }
+
+    async fn send_message(
+        &self,
+        message: &ControlMessageKind,
+        fd: Option<&OwnedFd>,
+    ) -> io::Result<()> {
+        let payload = message.to_bytes()?;
+
+        loop {
+            let mut guard = self.inner.writable().await?;
+            match guard.try_io(|inner| send_broker_frame(inner.get_ref().as_raw_fd(), &payload, fd)) {
+                Ok(result) => return result,
+                Err(_would_block) => continue,
+            }
+        }
+    }
+}
+
+fn send_broker_frame(control: RawFd, payload: &[u8], fd: Option<&OwnedFd>) -> io::Result<()> {
+    let iov = [std::io::IoSlice::new(payload)];
+    let sent = match fd {
+        Some(fd) => {
+            let fds = [fd.as_raw_fd()];
+            let cmsg = [ControlMessage::ScmRights(&fds)];
+            sendmsg::<()>(control, &iov, &cmsg, MsgFlags::empty(), None)
+        }
+        None => sendmsg::<()>(control, &iov, &[], MsgFlags::empty(), None),
+    }
+    .map_err(nix_errno_to_io_error)?;
+
+    if sent != payload.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!("short broker write: sent {sent} of {} bytes", payload.len()),
+        ));
+    }
+
+    Ok(())
+}
+
+fn send_control_message(
+    control: &OwnedFd,
+    message: &ControlMessageKind,
+    fd: Option<&OwnedFd>,
+) -> io::Result<()> {
+    let payload = message.to_bytes()?;
+    send_broker_frame(control.as_raw_fd(), &payload, fd)
+}
+
+fn recv_broker_frame(control: RawFd) -> io::Result<Vec<u8>> {
+    let mut payload = vec![0_u8; std::mem::size_of::<ControlMessageFrameV1>()];
+    let bytes = {
+        let mut iov = [std::io::IoSliceMut::new(&mut payload)];
+        recvmsg::<()>(control, &mut iov, None, MsgFlags::empty())
+            .map_err(nix_errno_to_io_error)?
+            .bytes
+    };
+    if bytes == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "broker socket closed",
+        ));
+    }
+
+    payload.truncate(bytes);
+    Ok(payload)
+}
+
+fn control_message_name(message: &ControlMessageKind) -> &'static str {
+    match message {
+        ControlMessageKind::ConnectOpen { .. } => "connect_open",
+        ControlMessageKind::ConnectOpenOk { .. } => "connect_open_ok",
+        ControlMessageKind::ConnectOpenErr { .. } => "connect_open_err",
+        ControlMessageKind::ListenIncoming { .. } => "listen_incoming",
+    }
+}
+
+impl ControlMessageKind {
+    fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
+        if bytes.len() != std::mem::size_of::<ControlMessageFrameV1>() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unexpected control message size {}", bytes.len()),
+            ));
+        }
+
+        let magic = u32::from_ne_bytes(bytes[0..4].try_into().expect("slice is four bytes"));
+        if magic != CONTROL_MAGIC {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unexpected control magic {magic:#x}"),
+            ));
+        }
+
+        let kind = u32::from_ne_bytes(bytes[4..8].try_into().expect("slice is four bytes"));
+        let id = u64::from_ne_bytes(bytes[8..16].try_into().expect("slice is eight bytes"));
+        let flags = u32::from_ne_bytes(bytes[16..20].try_into().expect("slice is four bytes"));
+        let message_len =
+            u32::from_ne_bytes(bytes[20..24].try_into().expect("slice is four bytes")) as usize;
+
+        if message_len > CONTROL_MESSAGE_MAX_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "control message exceeded max size",
+            ));
+        }
+
+        let message = String::from_utf8(bytes[24..24 + message_len].to_vec()).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("decode control message: {err}"),
+            )
+        })?;
+
+        match kind {
+            1 => Ok(Self::ConnectOpen { request_id: id }),
+            2 => Ok(Self::ConnectOpenOk { request_id: id }),
+            3 => Ok(Self::ConnectOpenErr {
+                request_id: id,
+                retryable: flags != 0,
+                message,
+            }),
+            4 => Ok(Self::ListenIncoming { conn_id: id }),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown control message kind {kind}"),
+            )),
+        }
+    }
+
+    fn to_bytes(&self) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::with_capacity(std::mem::size_of::<ControlMessageFrameV1>());
+
+        match self {
+            Self::ConnectOpen { request_id } => {
+                bytes.extend_from_slice(&CONTROL_MAGIC.to_ne_bytes());
+                bytes.extend_from_slice(&1_u32.to_ne_bytes());
+                bytes.extend_from_slice(&request_id.to_ne_bytes());
+                bytes.extend_from_slice(&0_u32.to_ne_bytes());
+                bytes.extend_from_slice(&0_u32.to_ne_bytes());
+            }
+            Self::ConnectOpenOk { request_id } => {
+                bytes.extend_from_slice(&CONTROL_MAGIC.to_ne_bytes());
+                bytes.extend_from_slice(&2_u32.to_ne_bytes());
+                bytes.extend_from_slice(&request_id.to_ne_bytes());
+                bytes.extend_from_slice(&0_u32.to_ne_bytes());
+                bytes.extend_from_slice(&0_u32.to_ne_bytes());
+            }
+            Self::ConnectOpenErr {
+                request_id,
+                retryable,
+                message,
+            } => {
+                let message_bytes = message.as_bytes();
+                if message_bytes.len() > CONTROL_MESSAGE_MAX_BYTES {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "control error message exceeds max size",
+                    ));
+                }
+
+                bytes.extend_from_slice(&CONTROL_MAGIC.to_ne_bytes());
+                bytes.extend_from_slice(&3_u32.to_ne_bytes());
+                bytes.extend_from_slice(&request_id.to_ne_bytes());
+                bytes.extend_from_slice(&u32::from(*retryable).to_ne_bytes());
+                bytes.extend_from_slice(&(message_bytes.len() as u32).to_ne_bytes());
+                bytes.extend_from_slice(message_bytes);
+            }
+            Self::ListenIncoming { conn_id } => {
+                bytes.extend_from_slice(&CONTROL_MAGIC.to_ne_bytes());
+                bytes.extend_from_slice(&4_u32.to_ne_bytes());
+                bytes.extend_from_slice(&conn_id.to_ne_bytes());
+                bytes.extend_from_slice(&0_u32.to_ne_bytes());
+                bytes.extend_from_slice(&0_u32.to_ne_bytes());
+            }
+        }
+        bytes.resize(std::mem::size_of::<ControlMessageFrameV1>(), 0);
+
+        Ok(bytes)
+    }
+}
+
+#[repr(C)]
+struct ControlMessageFrameV1 {
+    magic: u32,
+    kind: u32,
+    id: u64,
+    flags: u32,
+    message_len: u32,
+    message: [u8; CONTROL_MESSAGE_MAX_BYTES],
+}
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn nix_errno_to_io_error(err: Errno) -> io::Error {
+    io::Error::from_raw_os_error(err as i32)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -736,13 +1057,6 @@ enum PluginEvent {
         summary: String,
         problems: Vec<String>,
     },
-}
-
-#[repr(C)]
-struct BentoFdPassV1 {
-    magic: u32,
-    flags: u32,
-    conn_id: u64,
 }
 
 fn endpoint_mode_name(mode: EndpointMode) -> &'static str {

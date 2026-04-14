@@ -230,7 +230,7 @@ fn handle_agent_update(
                 store.dispatch(Action::guest_running());
             } else {
                 store.dispatch(Action::guest_starting());
-                tracing::info!(reason = %waiting_summary, "startup-required guest services not ready yet");
+                tracing::warn!(reason = %waiting_summary, "startup-required guest services not ready yet");
             }
 
             Ok(())
