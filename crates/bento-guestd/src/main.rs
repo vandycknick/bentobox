@@ -8,6 +8,7 @@ compile_error!("bento-guestd only supports Linux guests");
 
 mod config;
 mod dns;
+mod forward;
 mod host;
 mod init;
 mod port_forward;
@@ -22,6 +23,7 @@ use tokio::net::TcpStream;
 
 use crate::config::load_guestd_config;
 use crate::dns::DnsServer;
+use crate::forward::ForwardService;
 use crate::rpc::{serve_agent_connection, AgentContext};
 use crate::server::VsockServer;
 
@@ -79,6 +81,24 @@ async fn main() -> eyre::Result<()> {
                 }
             }
         }
+    }
+
+    if guestd_config.forward.enabled {
+        if guestd_config.forward.port == 0 {
+            return Err(eyre::eyre!(
+                "forward guest runtime is enabled but no 'forward' endpoint port was configured"
+            ));
+        }
+
+        let forward_service = ForwardService::new(guestd_config.forward.clone())?;
+        let forward_server = VsockServer::create(move |stream| {
+            let forward_service = forward_service.clone();
+            async move { forward_service.handle_connection(stream).await }
+        })
+        .with_concurrency(256)
+        .with_tracing(tracing::info_span!("vsock_server", service = "forward"))
+        .listen(Some(guestd_config.forward.port))?;
+        running_servers.push(forward_server);
     }
 
     let agent_service = AgentContext::new(guestd_config.clone());

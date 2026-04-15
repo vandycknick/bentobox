@@ -9,8 +9,8 @@ use bento_core::capabilities::{
     CapabilitiesConfig, DnsCapabilityConfig, ForwardCapabilityConfig, SshCapabilityConfig,
 };
 use bento_core::services::{
-    GuestRuntimeConfig, GuestServiceConfig, GuestServiceKind, RESERVED_FORWARD_PORT_START,
-    RESERVED_SHELL_PORT, SERVICE_ID_SHELL,
+    GuestForwardConfig, GuestRuntimeConfig, GuestServiceConfig, GuestServiceKind,
+    GuestTcpForwardConfig, GuestUdsForwardConfig, RESERVED_SHELL_PORT, SERVICE_ID_SHELL,
 };
 use bento_core::{resolve_mount_location, InstanceFile, NetworkMode as SpecNetworkMode, VmSpec};
 use eyre::Context;
@@ -54,7 +54,7 @@ pub(crate) fn prepare_instance_runtime(
 ) -> eyre::Result<()> {
     let spec = read_vm_spec_from_dir(instance_dir)?;
     let capabilities = resolve_startup_capabilities(profiles)?;
-    let guest_runtime = resolve_guest_runtime_config(&capabilities)?;
+    let guest_runtime = resolve_guest_runtime_config(&spec, &capabilities)?;
 
     rebuild_bootstrap(instance_dir, &spec, &guest_runtime)?;
     Ok(())
@@ -90,13 +90,23 @@ fn default_guest_capabilities() -> CapabilitiesConfig {
 }
 
 fn resolve_guest_runtime_config(
+    spec: &VmSpec,
     capabilities: &CapabilitiesConfig,
 ) -> eyre::Result<GuestRuntimeConfig> {
-    if capabilities.forward.tcp.auto_discover {
-        return Err(eyre::eyre!(
-            "forward.tcp.auto_discover is not supported with static vmmon service ports"
-        ));
-    }
+    let forward = resolve_forward_config(spec, capabilities)?;
+    let forward_port = if forward.enabled {
+        Some(
+            spec.endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == "forward")
+                .map(|endpoint| endpoint.port)
+                .ok_or_else(|| {
+                    eyre::eyre!("forward capability requires an endpoint named 'forward'")
+                })?,
+        )
+    } else {
+        None
+    };
 
     let mut guest_services = Vec::new();
 
@@ -110,22 +120,46 @@ fn resolve_guest_runtime_config(
         });
     }
 
-    for (index, forward) in capabilities.forward.uds.iter().enumerate() {
-        let port = RESERVED_FORWARD_PORT_START + index as u32;
-        guest_services.push(GuestServiceConfig {
-            id: forward.name.clone(),
-            kind: GuestServiceKind::UnixSocketForward,
-            port,
-            startup_required: false,
-            target: forward.guest_path.clone(),
-        });
-    }
-
     Ok(GuestRuntimeConfig {
         dns: capabilities.dns.clone(),
+        forward: GuestForwardConfig {
+            enabled: forward.enabled,
+            port: forward_port.unwrap_or_default(),
+            tcp: GuestTcpForwardConfig {
+                auto_discover: forward.tcp.auto_discover,
+            },
+            uds: forward
+                .uds
+                .iter()
+                .map(|forward| GuestUdsForwardConfig {
+                    name: forward.name.clone(),
+                    guest_path: forward.guest_path.clone(),
+                })
+                .collect(),
+        },
         services: guest_services,
         ..GuestRuntimeConfig::default()
     })
+}
+
+fn resolve_forward_config(
+    spec: &VmSpec,
+    capabilities: &CapabilitiesConfig,
+) -> eyre::Result<ForwardCapabilityConfig> {
+    let Some(endpoint) = spec
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.name == "forward")
+    else {
+        return Ok(capabilities.forward.clone());
+    };
+
+    let Some(config) = endpoint.plugin.config.clone() else {
+        return Ok(capabilities.forward.clone());
+    };
+
+    serde_json::from_value(config)
+        .map_err(|err| eyre::eyre!("decode forward endpoint plugin.config: {err}"))
 }
 
 fn requires_bootstrap(spec: &VmSpec, guest_runtime: &GuestRuntimeConfig) -> bool {

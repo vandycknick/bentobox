@@ -117,6 +117,14 @@ pub struct ForwardCapabilityConfig {
 pub struct TcpForwardConfig {
     #[serde(default)]
     pub auto_discover: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<TcpPortForwardConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TcpPortForwardConfig {
+    pub guest_port: u16,
+    pub host_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,6 +155,7 @@ impl CapabilitiesOverlay {
             && self.dns.zones.is_empty()
             && self.forward.enabled.is_none()
             && self.forward.tcp.auto_discover.is_none()
+            && self.forward.tcp.ports.is_empty()
             && self.forward.uds.is_empty()
     }
 }
@@ -179,6 +188,8 @@ pub struct ForwardCapabilityOverlay {
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct TcpForwardOverlay {
     pub auto_discover: Option<bool>,
+    #[serde(default)]
+    pub ports: Vec<TcpPortForwardConfig>,
 }
 
 impl CapabilitiesConfig {
@@ -221,6 +232,19 @@ impl CapabilitiesConfig {
         }
         if let Some(auto_discover) = overlay.forward.tcp.auto_discover {
             self.forward.tcp.auto_discover = auto_discover;
+        }
+        for port in overlay.forward.tcp.ports {
+            if let Some(existing) = self
+                .forward
+                .tcp
+                .ports
+                .iter_mut()
+                .find(|existing| existing.guest_port == port.guest_port)
+            {
+                *existing = port;
+            } else {
+                self.forward.tcp.ports.push(port);
+            }
         }
         for forward in overlay.forward.uds {
             if let Some(existing) = self

@@ -135,7 +135,7 @@ pub async fn start_services(
         None
     };
 
-    let endpoint_supervisor = start_endpoint_supervisor(ctx.clone());
+    let endpoint_supervisor = start_endpoint_supervisor(ctx.clone(), runtime.dir().to_path_buf());
 
     startup_reporter.report_started()?;
     tracing::info!(instance = %ctx.machine.name(), "vmmon running");

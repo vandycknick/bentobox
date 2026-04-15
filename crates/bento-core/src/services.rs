@@ -12,6 +12,8 @@ pub struct GuestRuntimeConfig {
     pub control_port: u32,
     #[serde(default)]
     pub dns: DnsCapabilityConfig,
+    #[serde(default)]
+    pub forward: GuestForwardConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub services: Vec<GuestServiceConfig>,
 }
@@ -21,9 +23,34 @@ impl Default for GuestRuntimeConfig {
         Self {
             control_port: DEFAULT_AGENT_CONTROL_PORT,
             dns: DnsCapabilityConfig::default(),
+            forward: GuestForwardConfig::default(),
             services: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GuestForwardConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub port: u32,
+    #[serde(default)]
+    pub tcp: GuestTcpForwardConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uds: Vec<GuestUdsForwardConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GuestTcpForwardConfig {
+    #[serde(default)]
+    pub auto_discover: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuestUdsForwardConfig {
+    pub name: String,
+    pub guest_path: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

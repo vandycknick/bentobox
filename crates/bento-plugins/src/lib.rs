@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,6 +12,7 @@ use std::task::{Context, Poll};
 use nix::cmsg_space;
 use nix::errno::Errno;
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -28,6 +30,9 @@ pub struct StartupMessage {
     pub mode: String,
     pub port: u32,
     pub transport: PluginTransport,
+    pub runtime_dir: String,
+    #[serde(default)]
+    pub config: Option<serde_json::Value>,
     pub fd: i32,
 }
 
@@ -164,8 +169,40 @@ impl Plugin {
     pub fn fail(&self, message: &str) -> io::Result<()> {
         emit_event(PluginEvent::Failed { message })
     }
+
+    pub fn runtime_dir(&self) -> &Path {
+        &self.runtime.runtime_dir
+    }
+
+    pub fn socks_dir(&self) -> PathBuf {
+        self.runtime.runtime_dir.join("socks")
+    }
+
+    pub fn config<T>(&self) -> io::Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let value = self.runtime.startup.config.clone().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "plugin config is missing")
+        })?;
+        serde_json::from_value(value).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("decode plugin config: {err}"),
+            )
+        })
+    }
+
+    pub fn endpoint(&self) -> &str {
+        &self.runtime.startup.endpoint
+    }
+
+    pub fn port(&self) -> u32 {
+        self.runtime.startup.port
+    }
 }
 
+#[derive(Clone)]
 pub struct Plugin {
     runtime: &'static PluginRuntime,
     _name: String,
@@ -202,9 +239,11 @@ async fn init_runtime() -> io::Result<Arc<PluginRuntime>> {
     startup.expect_api_v1()?;
 
     let control = ControlSocket::from_fd(startup.fd)?;
+    let runtime_dir = PathBuf::from(&startup.runtime_dir);
     let (incoming_tx, incoming_rx) = mpsc::channel(128);
     let runtime = PluginRuntime {
         startup,
+        runtime_dir,
         control,
         pending: Mutex::new(HashMap::new()),
         next_request_id: AtomicU64::new(1),
@@ -218,6 +257,7 @@ async fn init_runtime() -> io::Result<Arc<PluginRuntime>> {
 
 struct PluginRuntime {
     startup: StartupMessage,
+    runtime_dir: PathBuf,
     control: ControlSocket,
     pending: Mutex<HashMap<u64, oneshot::Sender<io::Result<OwnedFd>>>>,
     next_request_id: AtomicU64,

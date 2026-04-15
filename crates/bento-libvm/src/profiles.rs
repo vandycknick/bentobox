@@ -57,6 +57,15 @@ pub fn validate_capabilities(capabilities: &CapabilitiesConfig) -> eyre::Result<
         }
     }
 
+    for mapping in &capabilities.forward.tcp.ports {
+        if mapping.guest_port == 0 {
+            eyre::bail!("forward tcp guest_port cannot be zero");
+        }
+        if mapping.host_port == 0 {
+            eyre::bail!("forward tcp host_port cannot be zero");
+        }
+    }
+
     Ok(())
 }
 
@@ -87,7 +96,7 @@ mod tests {
     use bento_core::capabilities::{
         CapabilitiesOverlay, DnsCapabilityOverlay, DnsRecord, DnsRecordValue, DnsZone,
         ForwardCapabilityConfig, ForwardCapabilityOverlay, SshCapabilityOverlay, TcpForwardConfig,
-        TcpForwardOverlay, UdsForwardConfig,
+        TcpForwardOverlay, TcpPortForwardConfig, UdsForwardConfig,
     };
 
     #[test]
@@ -114,6 +123,10 @@ mod tests {
                 enabled: Some(true),
                 tcp: TcpForwardOverlay {
                     auto_discover: Some(true),
+                    ports: vec![TcpPortForwardConfig {
+                        guest_port: 8080,
+                        host_port: 8080,
+                    }],
                 },
                 uds: vec![UdsForwardConfig {
                     name: String::from("docker"),
@@ -129,6 +142,7 @@ mod tests {
         assert_eq!(capabilities.dns.zones[0].domain, "docker.internal");
         assert!(capabilities.forward.enabled);
         assert!(capabilities.forward.tcp.auto_discover);
+        assert_eq!(capabilities.forward.tcp.ports.len(), 1);
         assert_eq!(capabilities.forward.uds.len(), 1);
     }
 
@@ -143,7 +157,10 @@ mod tests {
         let capabilities = CapabilitiesConfig {
             forward: ForwardCapabilityConfig {
                 enabled: true,
-                tcp: TcpForwardConfig::default(),
+                tcp: TcpForwardConfig {
+                    auto_discover: false,
+                    ports: Vec::new(),
+                },
                 uds: vec![UdsForwardConfig {
                     name: String::new(),
                     guest_path: String::from("/tmp/guest.sock"),

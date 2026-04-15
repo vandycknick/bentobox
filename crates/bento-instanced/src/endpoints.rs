@@ -1,6 +1,7 @@
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,7 +27,7 @@ const STABLE_RUN_RESET: Duration = Duration::from_secs(30);
 const CONTROL_MAGIC: u32 = 0x4252_4b52;
 const CONTROL_MESSAGE_MAX_BYTES: usize = 256;
 
-pub(crate) fn start_endpoint_supervisor(ctx: DaemonContext) -> Option<JoinHandle<()>> {
+pub(crate) fn start_endpoint_supervisor(ctx: DaemonContext, instance_dir: PathBuf) -> Option<JoinHandle<()>> {
     if ctx.spec.endpoints.is_empty() {
         return None;
     }
@@ -44,8 +45,9 @@ pub(crate) fn start_endpoint_supervisor(ctx: DaemonContext) -> Option<JoinHandle
             }
 
             let endpoint_ctx = ctx.clone();
+            let endpoint_instance_dir = instance_dir.clone();
             handles.push(tokio::spawn(async move {
-                supervise_endpoint(endpoint_ctx, endpoint).await;
+                supervise_endpoint(endpoint_ctx, endpoint_instance_dir, endpoint).await;
             }));
         }
 
@@ -59,7 +61,7 @@ pub(crate) fn start_endpoint_supervisor(ctx: DaemonContext) -> Option<JoinHandle
     }))
 }
 
-async fn supervise_endpoint(ctx: DaemonContext, endpoint: EndpointSpec) {
+async fn supervise_endpoint(ctx: DaemonContext, instance_dir: PathBuf, endpoint: EndpointSpec) {
     let mut backoff = endpoint_backoff_initial(&endpoint);
 
     tracing::info!(
@@ -79,8 +81,8 @@ async fn supervise_endpoint(ctx: DaemonContext, endpoint: EndpointSpec) {
 
         let started_at = Instant::now();
         let outcome = match endpoint.mode {
-            EndpointMode::Connect => run_connect_endpoint(&ctx, &endpoint).await,
-            EndpointMode::Listen => run_listen_endpoint(&ctx, &endpoint).await,
+            EndpointMode::Connect => run_connect_endpoint(&ctx, &instance_dir, &endpoint).await,
+            EndpointMode::Listen => run_listen_endpoint(&ctx, &instance_dir, &endpoint).await,
         };
 
         let should_restart = match (&endpoint.lifecycle.restart, &outcome) {
@@ -153,8 +155,12 @@ async fn supervise_endpoint(ctx: DaemonContext, endpoint: EndpointSpec) {
     }
 }
 
-async fn run_connect_endpoint(ctx: &DaemonContext, endpoint: &EndpointSpec) -> EndpointOutcome {
-    let (control_parent, mut plugin) = match start_endpoint_plugin(endpoint) {
+async fn run_connect_endpoint(
+    ctx: &DaemonContext,
+    instance_dir: &Path,
+    endpoint: &EndpointSpec,
+) -> EndpointOutcome {
+    let (control_parent, mut plugin) = match start_endpoint_plugin(instance_dir, endpoint) {
         Ok(value) => value,
         Err(outcome) => return outcome,
     };
@@ -174,13 +180,17 @@ async fn run_connect_endpoint(ctx: &DaemonContext, endpoint: &EndpointSpec) -> E
     outcome
 }
 
-async fn run_listen_endpoint(ctx: &DaemonContext, endpoint: &EndpointSpec) -> EndpointOutcome {
+async fn run_listen_endpoint(
+    ctx: &DaemonContext,
+    instance_dir: &Path,
+    endpoint: &EndpointSpec,
+) -> EndpointOutcome {
     let listener = match ctx.machine.listen_vsock(endpoint.port).await {
         Ok(listener) => listener,
         Err(err) => return EndpointOutcome::Failed(format!("listen vsock: {err}")),
     };
 
-    let (control_parent, mut plugin) = match start_endpoint_plugin(endpoint) {
+    let (control_parent, mut plugin) = match start_endpoint_plugin(instance_dir, endpoint) {
         Ok(value) => value,
         Err(outcome) => return outcome,
     };
@@ -204,7 +214,10 @@ async fn run_listen_endpoint(ctx: &DaemonContext, endpoint: &EndpointSpec) -> En
     outcome
 }
 
-fn start_endpoint_plugin(endpoint: &EndpointSpec) -> Result<(OwnedFd, RunningPlugin), EndpointOutcome> {
+fn start_endpoint_plugin(
+    instance_dir: &Path,
+    endpoint: &EndpointSpec,
+) -> Result<(OwnedFd, RunningPlugin), EndpointOutcome> {
     let (control_parent, control_child) = match socketpair(
         AddressFamily::Unix,
         SockType::Datagram,
@@ -215,7 +228,15 @@ fn start_endpoint_plugin(endpoint: &EndpointSpec) -> Result<(OwnedFd, RunningPlu
         Err(err) => return Err(EndpointOutcome::Failed(format!("create control socketpair: {err}"))),
     };
 
-    let startup = StartupMessage::new(endpoint, 3);
+    let runtime_dir = instance_dir.to_path_buf();
+    if let Err(err) = std::fs::create_dir_all(&runtime_dir) {
+        return Err(EndpointOutcome::Failed(format!(
+            "create endpoint runtime dir {}: {err}",
+            runtime_dir.display()
+        )));
+    }
+
+    let startup = StartupMessage::new(endpoint, runtime_dir, 3);
     tracing::info!(
         endpoint = %endpoint.name,
         mode = %endpoint_mode_name(endpoint.mode),
@@ -728,17 +749,22 @@ struct StartupMessage {
     mode: EndpointMode,
     port: u32,
     transport: PluginTransport,
+    runtime_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<serde_json::Value>,
     fd: i32,
 }
 
 impl StartupMessage {
-    fn new(endpoint: &EndpointSpec, fd: i32) -> Self {
+    fn new(endpoint: &EndpointSpec, runtime_dir: PathBuf, fd: i32) -> Self {
         Self {
             api_version: 1,
             endpoint: endpoint.name.clone(),
             mode: endpoint.mode,
             port: endpoint.port,
             transport: PluginTransport::for_mode(endpoint.mode),
+            runtime_dir: runtime_dir.to_string_lossy().into_owned(),
+            config: endpoint.plugin.config.clone(),
             fd,
         }
     }

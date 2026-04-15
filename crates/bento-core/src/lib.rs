@@ -1,4 +1,5 @@
 pub mod capabilities;
+pub mod forward;
 mod instance_file;
 mod machine_id;
 mod mount_path;

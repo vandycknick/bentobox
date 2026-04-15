@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmSpec {
@@ -44,6 +45,8 @@ pub struct PluginSpec {
     pub env: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub working_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +270,7 @@ mod tests {
                     args: vec!["--serve".to_string()],
                     env: BTreeMap::from([("RUST_LOG".to_string(), "info".to_string())]),
                     working_dir: Some(PathBuf::from("/tmp")),
+                    config: None,
                 },
                 lifecycle: LifecycleSpec {
                     autostart: true,
