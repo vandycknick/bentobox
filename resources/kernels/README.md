@@ -292,6 +292,15 @@ This file tracks kernel-side config changes identified while debugging package u
     - `CONFIG_IP6_NF_NAT=y`
     - `CONFIG_IP6_NF_RAW=y`
     - `CONFIG_IP6_NF_TARGET_MASQUERADE=y`
+- nftables NAT and iptables-nft compatibility used by newer Docker and distro `iptables` userspace paths:
+    - `CONFIG_NF_TABLES=y`
+    - `CONFIG_NF_TABLES_IPV4=y`
+    - `CONFIG_NF_TABLES_IPV6=y`
+    - `CONFIG_NFT_COMPAT=y`
+    - `CONFIG_NFT_NAT=y`
+    - `CONFIG_NFT_CHAIN_NAT=y`
+    - `CONFIG_NFT_MASQ=y`
+    - `CONFIG_NFT_REDIR=y`
 - Storage and runtime basics:
     - `CONFIG_OVERLAY_FS=y`
     - `CONFIG_UNIX=y`
@@ -303,8 +312,10 @@ This file tracks kernel-side config changes identified while debugging package u
 - Namespace isolation, cgroup accounting, and seccomp filtering for ordinary container startup.
 - Legacy IPv4 and IPv6 `iptables` table support used by current rootful Docker startup paths, including the `raw` table.
 - The legacy xtables kernel path required by current `iptables-legacy` and `ip6tables-legacy` userspace on newer kernels.
+- nftables-backed NAT, redirect, and masquerade support used when Docker goes through the `iptables-nft` userspace path instead of the older legacy xtables path.
 - Connection-tracking matches used by Docker bridge firewall rules such as `-m conntrack --ctstate RELATED,ESTABLISHED`.
 - Compatibility support for `iptables-legacy` and `ip6tables-legacy` userspace against the kernel xtables path.
+- Compatibility between `iptables` userspace and nftables kernel plumbing via `CONFIG_NFT_COMPAT`.
 - Docker bridge networking, including `docker0` and veth peer creation for containers.
 - Overlay filesystem support for the `overlay2` storage driver.
 
@@ -313,10 +324,13 @@ This file tracks kernel-side config changes identified while debugging package u
 - Fixes Docker daemon startup failures such as:
     - `iptables ... can't initialize iptables table 'nat': Table does not exist`
     - `iptables ... can't initialize iptables table 'raw': Table does not exist`
+    - `iptables ... TABLE_ADD failed (Operation not supported): table nat`
+    - `failed to create NAT chain DOCKER`
     - `ip6tables ... can't initialize ip6tables table 'nat'` or `filter`
     - `Extension conntrack revision 0 not supported, missing kernel module?`
 - Prevents `olddefconfig` on newer kernels from silently dropping legacy `IP*_NF_*` and `IP6*_NF_*` table support when `CONFIG_NETFILTER_XTABLES_LEGACY=y` is missing.
 - Lets Docker create the `DOCKER` NAT chain and MASQUERADE rules when using `iptables-legacy`.
+- Lets Docker create the `DOCKER` NAT chain and MASQUERADE or REDIRECT rules when userspace goes through the nftables-backed `iptables` path.
 - Lets Docker install direct access filtering rules in `raw/PREROUTING`, which it uses to drop non-bridge traffic headed at container addresses.
 - Lets Docker install IPv6 chains when ip6tables support is enabled in userspace.
 - Provides the baseline guest kernel networking and storage features needed for Bento's current rootful Docker extension model.
@@ -324,10 +338,14 @@ This file tracks kernel-side config changes identified while debugging package u
 ### Notes
 
 - This repo's arm guest kernel profile currently disables modules, so these options must be built in, not left as modules.
-- `CONFIG_NF_TABLES=y` alone is not enough for the current Docker setup, because the guest userspace is using `iptables-legacy` rather than an nft-only path.
+- `CONFIG_NF_TABLES=y` alone is not enough for the current Docker setup, because the guest userspace may use either `iptables-legacy` or the nftables-backed `iptables` path.
 - On newer kernels, `CONFIG_NETFILTER_XTABLES_LEGACY=y` is required alongside the legacy `IP*_NF_*` and `IP6*_NF_*` symbols or Docker can still fail with missing `nat`/`raw` tables.
 - `CONFIG_IP_NF_RAW=y` and `CONFIG_IP6_NF_RAW=y` are easy to miss because Docker often fails later on the first visible `raw` table access rather than during its initial capability checks.
 - `CONFIG_NETFILTER_XTABLES_COMPAT=y` is part of that legacy userspace path, and missing it can surface as conntrack match failures or legacy table initialization failures even when the newer `IP*_NF_*` options are enabled.
+- Bento currently needs both sides of the firewall stack available for reliable Docker behavior in guests:
+    - legacy xtables support for `iptables-legacy`
+    - nftables NAT support for nft-backed `iptables`
+- If Docker reports `TABLE_ADD failed (Operation not supported): table nat`, the guest kernel is usually missing nft NAT support even if the older `IP_NF_*` options are enabled.
 - `CONFIG_NETFILTER_XTABLES_LEGACY` depends on `!PREEMPT_RT` on newer kernels, so a PREEMPT_RT kernel and the current Docker `iptables-legacy` path are not friends.
 
 ## 14) Firecracker arm64 serial console support
@@ -360,11 +378,13 @@ This file tracks kernel-side config changes identified while debugging package u
 
 ## 15) VZ requestSTop
 
-- `CONFIG_GPIO_PL061`
-- `CONFIG_INPUT_EVDEV`
-- `CONFIG_KEYBOARD_GPIO`
+### Required config changes
 
-## What this enables
+- `CONFIG_GPIO_PL061=y`
+- `CONFIG_INPUT_EVDEV=y`
+- `CONFIG_KEYBOARD_GPIO=y`
+
+### What this enables
 
 These are the important guest kernel bits for Apple Silicon requestStop() support.
 Userspace side
