@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bento_core::forward::{ForwardApiRequest, ForwardApiResponse, ForwardStreamRequest};
 use bento_core::services::GuestForwardConfig;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
 use tokio_vsock::VsockStream;
 
@@ -77,7 +77,11 @@ async fn handle_uds(
     config: &GuestForwardConfig,
     guest_path: &str,
 ) -> io::Result<()> {
-    if !config.uds.iter().any(|entry| entry.guest_path == guest_path) {
+    if !config
+        .uds
+        .iter()
+        .any(|entry| entry.guest_path == guest_path)
+    {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("guest uds path is not configured for forwarding: {guest_path}"),

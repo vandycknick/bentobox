@@ -5,18 +5,20 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use nix::cmsg_space;
 use nix::errno::Errno;
-use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
+use nix::sys::socket::{
+    recvmsg, sendmsg, shutdown, ControlMessage, ControlMessageOwned, MsgFlags, Shutdown,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{Mutex, OnceCell, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex, OnceCell};
 
 const CONTROL_MAGIC: u32 = 0x4252_4b52;
 const CONTROL_MESSAGE_MAX_BYTES: usize = 256;
@@ -84,7 +86,10 @@ impl StartupMessage {
         if self.transport != PluginTransport::ListenAccept {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("expected listen_accept transport, got {}", self.transport.as_str()),
+                format!(
+                    "expected listen_accept transport, got {}",
+                    self.transport.as_str()
+                ),
             ));
         }
         Ok(())
@@ -149,10 +154,7 @@ impl Plugin {
 
         let mut incoming = self.runtime.incoming.lock().await;
         let fd = incoming.recv().await.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "plugin control socket closed",
-            )
+            io::Error::new(io::ErrorKind::UnexpectedEof, "plugin control socket closed")
         })??;
 
         into_async_stream(fd)
@@ -415,14 +417,20 @@ impl ControlSocket {
 
 #[derive(Debug)]
 enum ControlMessageKind {
-    ConnectOpen { request_id: u64 },
-    ConnectOpenOk { request_id: u64 },
+    ConnectOpen {
+        request_id: u64,
+    },
+    ConnectOpenOk {
+        request_id: u64,
+    },
     ConnectOpenErr {
         request_id: u64,
         retryable: bool,
         message: String,
     },
-    ListenIncoming { conn_id: u64 },
+    ListenIncoming {
+        conn_id: u64,
+    },
 }
 
 impl ControlMessageKind {
@@ -552,7 +560,10 @@ fn send_message(control: RawFd, payload: &[u8], fd: Option<&OwnedFd>) -> io::Res
     if sent != payload.len() {
         return Err(io::Error::new(
             io::ErrorKind::WriteZero,
-            format!("short control write: sent {sent} of {} bytes", payload.len()),
+            format!(
+                "short control write: sent {sent} of {} bytes",
+                payload.len()
+            ),
         ));
     }
 
@@ -677,7 +688,11 @@ impl AsyncWrite for AsyncStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        Poll::Ready(Ok(()))
+        match shutdown(self.inner.get_ref().as_raw_fd(), Shutdown::Write) {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(Errno::ENOTCONN) => Poll::Ready(Ok(())),
+            Err(err) => Poll::Ready(Err(nix_errno_to_io_error(err))),
+        }
     }
 }
 
@@ -689,7 +704,7 @@ mod tests {
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::{CONTROL_MAGIC, ControlMessageKind, into_async_stream};
+    use super::{into_async_stream, ControlMessageKind, CONTROL_MAGIC};
 
     #[tokio::test]
     async fn async_stream_reads_and_writes() {
@@ -722,6 +737,23 @@ mod tests {
         assert_eq!(&read_buf, b"pong");
     }
 
+    #[tokio::test]
+    async fn async_stream_shutdown_closes_write_half() {
+        let (left, right) = StdUnixStream::pair().expect("unix stream pair should create");
+        left.set_nonblocking(true)
+            .expect("left stream should be nonblocking");
+
+        let fd = unsafe { OwnedFd::from_raw_fd(left.into_raw_fd()) };
+        let mut stream = into_async_stream(fd).expect("async stream should wrap fd");
+        let mut peer = right;
+
+        stream.shutdown().await.expect("shutdown should succeed");
+
+        let mut peer_buf = [0_u8; 1];
+        let bytes = peer.read(&mut peer_buf).expect("peer read should succeed");
+        assert_eq!(bytes, 0, "peer should observe EOF after shutdown");
+    }
+
     #[test]
     fn control_message_round_trip() {
         let message = ControlMessageKind::ConnectOpenErr {
@@ -730,8 +762,14 @@ mod tests {
             message: String::from("nope"),
         };
         let bytes = message.to_bytes().expect("encode control message");
-        assert_eq!(bytes.len(), std::mem::size_of::<super::ControlMessageFrameV1>());
-        assert_eq!(u32::from_ne_bytes(bytes[0..4].try_into().expect("magic bytes")), CONTROL_MAGIC);
+        assert_eq!(
+            bytes.len(),
+            std::mem::size_of::<super::ControlMessageFrameV1>()
+        );
+        assert_eq!(
+            u32::from_ne_bytes(bytes[0..4].try_into().expect("magic bytes")),
+            CONTROL_MAGIC
+        );
         let decoded = ControlMessageKind::from_bytes(&bytes).expect("decode control message");
         match decoded {
             ControlMessageKind::ConnectOpenErr {

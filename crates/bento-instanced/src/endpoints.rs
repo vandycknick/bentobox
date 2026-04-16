@@ -12,8 +12,8 @@ use nix::errno::Errno;
 use nix::sys::socket::{
     recvmsg, sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -27,7 +27,10 @@ const STABLE_RUN_RESET: Duration = Duration::from_secs(30);
 const CONTROL_MAGIC: u32 = 0x4252_4b52;
 const CONTROL_MESSAGE_MAX_BYTES: usize = 256;
 
-pub(crate) fn start_endpoint_supervisor(ctx: DaemonContext, instance_dir: PathBuf) -> Option<JoinHandle<()>> {
+pub(crate) fn start_endpoint_supervisor(
+    ctx: DaemonContext,
+    instance_dir: PathBuf,
+) -> Option<JoinHandle<()>> {
     if ctx.spec.endpoints.is_empty() {
         return None;
     }
@@ -165,7 +168,11 @@ async fn run_connect_endpoint(
         Err(outcome) => return outcome,
     };
 
-    let broker = tokio::spawn(run_connect_broker(ctx.clone(), endpoint.clone(), control_parent));
+    let broker = tokio::spawn(run_connect_broker(
+        ctx.clone(),
+        endpoint.clone(),
+        control_parent,
+    ));
 
     let ready = wait_for_plugin_ready(ctx, endpoint, &mut plugin).await;
     if let Err(outcome) = ready {
@@ -225,7 +232,11 @@ fn start_endpoint_plugin(
         SockFlag::empty(),
     ) {
         Ok(pair) => pair,
-        Err(err) => return Err(EndpointOutcome::Failed(format!("create control socketpair: {err}"))),
+        Err(err) => {
+            return Err(EndpointOutcome::Failed(format!(
+                "create control socketpair: {err}"
+            )))
+        }
     };
 
     let runtime_dir = instance_dir.to_path_buf();
@@ -372,9 +383,7 @@ async fn stop_control_task(broker: &mut Option<JoinHandle<Result<(), String>>>) 
     }
 }
 
-async fn await_broker(
-    broker: &mut Option<JoinHandle<Result<(), String>>>,
-) -> Result<(), String> {
+async fn await_broker(broker: &mut Option<JoinHandle<Result<(), String>>>) -> Result<(), String> {
     let handle = broker
         .take()
         .expect("broker handle should exist when awaited");
@@ -593,14 +602,19 @@ async fn run_connect_broker(
 
         match message {
             ControlMessageKind::ConnectOpen { request_id } => {
-                let result = tokio::time::timeout(CONNECT_TIMEOUT, ctx.machine.connect_vsock(endpoint.port)).await;
+                let result =
+                    tokio::time::timeout(CONNECT_TIMEOUT, ctx.machine.connect_vsock(endpoint.port))
+                        .await;
                 match result {
                     Ok(Ok(stream)) => {
                         let fd = stream
                             .dup_fd()
                             .map_err(|err| format!("duplicate stream fd: {err}"))?;
                         control
-                            .send_message(&ControlMessageKind::ConnectOpenOk { request_id }, Some(&fd))
+                            .send_message(
+                                &ControlMessageKind::ConnectOpenOk { request_id },
+                                Some(&fd),
+                            )
                             .await
                             .map_err(|err| format!("send connect_open_ok: {err}"))?;
                     }
@@ -625,7 +639,9 @@ async fn run_connect_broker(
                                 &ControlMessageKind::ConnectOpenErr {
                                     request_id,
                                     retryable: true,
-                                    message: format!("connect_vsock timed out after {CONNECT_TIMEOUT:?}"),
+                                    message: format!(
+                                        "connect_vsock timed out after {CONNECT_TIMEOUT:?}"
+                                    ),
                                 },
                                 None,
                             )
@@ -635,7 +651,10 @@ async fn run_connect_broker(
                 }
             }
             other => {
-                return Err(format!("unexpected control message for connect broker: {}", control_message_name(&other)));
+                return Err(format!(
+                    "unexpected control message for connect broker: {}",
+                    control_message_name(&other)
+                ));
             }
         }
     }
@@ -787,14 +806,20 @@ impl PluginTransport {
 }
 
 enum ControlMessageKind {
-    ConnectOpen { request_id: u64 },
-    ConnectOpenOk { request_id: u64 },
+    ConnectOpen {
+        request_id: u64,
+    },
+    ConnectOpenOk {
+        request_id: u64,
+    },
     ConnectOpenErr {
         request_id: u64,
         retryable: bool,
         message: String,
     },
-    ListenIncoming { conn_id: u64 },
+    ListenIncoming {
+        conn_id: u64,
+    },
 }
 
 struct BrokerControlSocket {
@@ -830,7 +855,8 @@ impl BrokerControlSocket {
 
         loop {
             let mut guard = self.inner.writable().await?;
-            match guard.try_io(|inner| send_broker_frame(inner.get_ref().as_raw_fd(), &payload, fd)) {
+            match guard.try_io(|inner| send_broker_frame(inner.get_ref().as_raw_fd(), &payload, fd))
+            {
                 Ok(result) => return result,
                 Err(_would_block) => continue,
             }

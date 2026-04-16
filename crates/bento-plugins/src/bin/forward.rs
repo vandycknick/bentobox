@@ -7,7 +7,7 @@ use std::time::Duration;
 use bento_core::capabilities::{ForwardCapabilityConfig, TcpPortForwardConfig};
 use bento_core::forward::{ForwardApiRequest, ForwardApiResponse, ForwardStreamRequest};
 use bento_plugins::Plugin;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -45,8 +45,8 @@ async fn run(plugin: Arc<Plugin>) -> io::Result<()> {
     }
 
     let summary = format!(
-        "forward ready: {} tcp, {} uds, auto_discover={}"
-        , static_tcp_count, uds_count, auto_discover
+        "forward ready: {} tcp, {} uds, auto_discover={}",
+        static_tcp_count, uds_count, auto_discover
     );
     plugin.status(true, &summary, &[])?;
 
@@ -115,7 +115,10 @@ fn spawn_uds_listener(
                     });
                 }
                 Err(err) => {
-                    eprintln!("forward uds listener accept failed on {}: {err}", host_path.display());
+                    eprintln!(
+                        "forward uds listener accept failed on {}: {err}",
+                        host_path.display()
+                    );
                     return;
                 }
             }
@@ -127,7 +130,10 @@ async fn run_auto_discover(
     plugin: Arc<Plugin>,
     static_ports: Vec<TcpPortForwardConfig>,
 ) -> io::Result<()> {
-    let static_host_ports: BTreeSet<u16> = static_ports.iter().map(|mapping| mapping.host_port).collect();
+    let static_host_ports: BTreeSet<u16> = static_ports
+        .iter()
+        .map(|mapping| mapping.host_port)
+        .collect();
     let mut dynamic_listeners: HashMap<u16, DynamicTcpListener> = HashMap::new();
     let mut bind_failures: HashMap<u16, String> = HashMap::new();
 
@@ -167,7 +173,10 @@ async fn run_auto_discover(
             bind_failures.remove(&port);
         }
 
-        let mut problems = bind_failures.values().map(String::as_str).collect::<Vec<_>>();
+        let mut problems = bind_failures
+            .values()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         problems.sort_unstable();
         let summary = format!(
             "forward ready: {} static tcp, {} discovered tcp, {} bind problems",
@@ -237,7 +246,11 @@ async fn proxy_tcp(plugin: Arc<Plugin>, mut host: TcpStream, guest_port: u16) ->
     Ok(())
 }
 
-async fn proxy_uds(plugin: Arc<Plugin>, mut host: UnixStream, guest_path: String) -> io::Result<()> {
+async fn proxy_uds(
+    plugin: Arc<Plugin>,
+    mut host: UnixStream,
+    guest_path: String,
+) -> io::Result<()> {
     let mut guest = plugin.connect().await?;
     write_json_line(&mut guest, &ForwardStreamRequest::Uds { guest_path }).await?;
     let _ = copy_bidirectional(&mut host, &mut guest).await?;
