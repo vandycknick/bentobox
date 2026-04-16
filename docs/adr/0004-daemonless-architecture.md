@@ -207,9 +207,9 @@ The current canonical layout is:
   instances/
     <uuid>/
       config.yaml
-      id.pid
-      id.sock
-      id.trace.log
+      vm.pid
+      vm.sock
+      vm.trace.log
       serial.log
       apple-machine-id
       rootfs.img
@@ -222,10 +222,10 @@ The current canonical layout is:
 
 Future work:
 
-- rename runtime artifact filenames such as `id.pid`, `id.sock`, and `id.trace.log` to `vmmon`-specific names,
+- runtime artifact filenames use `vm.pid`, `vm.sock`, and `vm.trace.log`,
 - add a durable exit-state file if we decide that belongs in the canonical runtime contract.
 
-Those renames are not part of the current implementation and should not be described as current reality.
+Those filenames are part of the current implementation and should be treated as the canonical runtime contract.
 
 ## Canonical `VmSpec`
 

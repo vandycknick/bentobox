@@ -10,7 +10,7 @@ Proposed
 
 Current shell access works through an external OpenSSH process and proxy command:
 
-`bentoctl shell -> host ssh binary -> bentoctl shell-proxy -> instanced (UDS control) -> VSOCK -> guest socat -> guest sshd`
+`bentoctl shell -> host ssh binary -> bentoctl shell-proxy -> vmmon (UDS control) -> VSOCK -> guest socat -> guest sshd`
 
 This implementation is functional and supports concurrent sessions, but it has architectural and UX drawbacks:
 
@@ -20,7 +20,7 @@ This implementation is functional and supports concurrent sessions, but it has a
 - Limited ability to provide Bento-native shell behavior and features without shelling out.
 - Harder path to unify shell/exec/cp behavior under one in-process client model.
 
-We want `instanced` to remain the sole VM owner and VSOCK endpoint owner. We also want future per-VM key injection via cloud-init and immediate key-based login.
+We want `vmmon` to remain the sole VM owner and VSOCK endpoint owner. We also want future per-VM key injection via cloud-init and immediate key-based login.
 
 ## Decision
 
@@ -28,24 +28,24 @@ We will replace the external OpenSSH invocation path with an in-process SSH clie
 
 The `bentoctl shell` command will own:
 
-1. transport setup to `instanced` control socket,
+1. transport setup to `vmmon` control socket,
 2. protocol handshake (`open_vsock`),
 3. SSH handshake and auth over that stream,
 4. PTY shell lifecycle (stdin/stdout relay, resize, teardown).
 
-`instanced` and guest responsibilities remain unchanged:
+`vmmon` and guest responsibilities remain unchanged:
 
-- `instanced` owns VM and VSOCK connect.
+- `vmmon` owns VM and VSOCK connect.
 - Guest provides SSH endpoint (currently via `socat` bridge to `sshd`).
 
 ## Target Architecture
 
-`bentoctl shell -> instanced id.sock -> open_vsock(2222) -> guest VSOCK bridge -> guest sshd`
+`bentoctl shell -> vmmon vm.sock -> open_vsock(2222) -> guest VSOCK bridge -> guest sshd`
 
 Implementation shape in `bentoctl`:
 
 - `ssh_transport` module:
-  - connect to `id.sock`
+  - connect to `vm.sock`
   - send `ControlRequest(open_vsock)`
   - parse `ControlResponse`
   - expose upgraded raw stream
@@ -94,7 +94,7 @@ We considered pure Rust SSH libraries and external OpenSSH wrappers.
 
 ### Phase 1: Native shell MVP
 
-- Add `ssh2` integration and native SSH session over existing `instanced` transport.
+- Add `ssh2` integration and native SSH session over existing `vmmon` transport.
 - Support interactive shell with `--user` (default `root`).
 - Preserve current failure semantics and improve messages.
 
@@ -113,7 +113,7 @@ We considered pure Rust SSH libraries and external OpenSSH wrappers.
 ### Phase 4: Remove legacy path
 
 - Remove `shell-proxy` command and external `ssh` invocation path.
-- Keep protocol compatibility with `instanced` control interface.
+- Keep protocol compatibility with `vmmon` control interface.
 
 ## Follow-ups
 

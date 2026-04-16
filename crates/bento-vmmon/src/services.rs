@@ -103,7 +103,7 @@ pub async fn start_services(
     ctx: &DaemonContext,
     startup_reporter: &mut StartupReporter,
 ) -> eyre::Result<ServiceHandles> {
-    let path = runtime.file(bento_core::InstanceFile::InstancedSocket);
+    let path = runtime.file(bento_core::InstanceFile::VmmonSocket);
     let listener = UnixListener::bind(&path).context(format!("bind socket {}", path.display()))?;
     let server = NegotiateServer::new(listener, ctx.shutdown.clone());
     let handler_ctx = ctx.clone();

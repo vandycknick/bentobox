@@ -45,15 +45,15 @@ impl Layout {
     }
 
     pub fn monitor_pid_path(&self, machine_id: MachineId) -> PathBuf {
-        self.instance_dir(machine_id).join("id.pid")
+        self.instance_dir(machine_id).join("vm.pid")
     }
 
     pub fn monitor_socket_path(&self, machine_id: MachineId) -> PathBuf {
-        self.instance_dir(machine_id).join("id.sock")
+        self.instance_dir(machine_id).join("vm.sock")
     }
 
     pub fn monitor_trace_path(&self, machine_id: MachineId) -> PathBuf {
-        self.instance_dir(machine_id).join("id.trace.log")
+        self.instance_dir(machine_id).join("vm.trace.log")
     }
 
     pub fn staging_dir(&self) -> PathBuf {
@@ -138,19 +138,19 @@ mod tests {
             layout.monitor_pid_path(machine_id),
             PathBuf::from("/tmp/bento/instances")
                 .join(machine_id.to_string())
-                .join("id.pid")
+                .join("vm.pid")
         );
         assert_eq!(
             layout.monitor_socket_path(machine_id),
             PathBuf::from("/tmp/bento/instances")
                 .join(machine_id.to_string())
-                .join("id.sock")
+                .join("vm.sock")
         );
         assert_eq!(
             layout.monitor_trace_path(machine_id),
             PathBuf::from("/tmp/bento/instances")
                 .join(machine_id.to_string())
-                .join("id.trace.log")
+                .join("vm.trace.log")
         );
     }
 

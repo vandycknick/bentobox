@@ -61,7 +61,7 @@ pub async fn init(runtime: &RuntimeContext) -> eyre::Result<DaemonContext> {
     let spec = load_spec(runtime)?;
 
     tracing::info!(instance = %spec.name, "vmmon starting");
-    remove_stale_socket(&runtime.file(InstanceFile::InstancedSocket))?;
+    remove_stale_socket(&runtime.file(InstanceFile::VmmonSocket))?;
 
     let machine_config = vm_spec_machine_config(VmSpecInputs {
         name: &spec.name,

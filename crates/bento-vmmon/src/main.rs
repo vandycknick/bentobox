@@ -49,7 +49,7 @@ fn main() -> eyre::Result<()> {
     let startup_reporter = StartupReporter::from(args.startup_fd)
         .map_err(|err| eyre::eyre!("open startup reporter: {err}"))?;
 
-    let trace_path = args.data_dir.join(InstanceFile::InstancedTraceLog.as_str());
+    let trace_path = args.data_dir.join(InstanceFile::VmmonTraceLog.as_str());
 
     let trace_file = OpenOptions::new()
         .create(true)
@@ -67,7 +67,7 @@ fn main() -> eyre::Result<()> {
         .with_level(true)
         .with_writer(writer)
         .try_init()
-        .map_err(|err| eyre::eyre!("initialize instanced tracing: {err}"))?;
+        .map_err(|err| eyre::eyre!("initialize vmmon tracing: {err}"))?;
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -79,7 +79,7 @@ fn main() -> eyre::Result<()> {
 async fn run(args: Args, startup_reporter: StartupReporter) -> eyre::Result<()> {
     let mut startup_reporter = startup_reporter;
     let runtime = RuntimeContext::new(args.data_dir.clone());
-    let _guard = PidGuard::create(&runtime.file(InstanceFile::InstancedPid)).await?;
+    let _guard = PidGuard::create(&runtime.file(InstanceFile::VmmonPid)).await?;
 
     let result = match startup::init(&runtime).await {
         Ok(ctx) => match services::start_services(&runtime, &ctx, &mut startup_reporter).await {

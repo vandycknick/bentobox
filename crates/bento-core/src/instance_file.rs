@@ -1,9 +1,9 @@
 /// Well-known filenames in an instance directory.
 pub enum InstanceFile {
     Config,
-    InstancedPid,
-    InstancedSocket,
-    InstancedTraceLog,
+    VmmonPid,
+    VmmonSocket,
+    VmmonTraceLog,
     AppleMachineIdentifier,
     SerialLog,
     RootDisk,
@@ -14,9 +14,9 @@ impl InstanceFile {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Config => "config.yaml",
-            Self::InstancedPid => "id.pid",
-            Self::InstancedSocket => "id.sock",
-            Self::InstancedTraceLog => "id.trace.log",
+            Self::VmmonPid => "vm.pid",
+            Self::VmmonSocket => "vm.sock",
+            Self::VmmonTraceLog => "vm.trace.log",
             Self::AppleMachineIdentifier => "apple-machine-id",
             Self::SerialLog => "serial.log",
             Self::RootDisk => "rootfs.img",
