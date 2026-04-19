@@ -1,12 +1,12 @@
 GUEST_TARGET := aarch64-unknown-linux-musl
-GUEST_BIN := $(CURDIR)/target/$(GUEST_TARGET)/release/bento-guestd
+GUEST_BIN := $(CURDIR)/target/$(GUEST_TARGET)/release/bento-agent
 BENTO_CONFIG := $(HOME)/.config/bento/config.yaml
 BENTO_PROFILE_DIR := $(HOME)/.config/bento/profiles
 ARCH ?= arm64
 
 .PHONY: build-guest-agent
 build-guest-agent:
-	cargo zigbuild -p bento-guestd --target $(GUEST_TARGET) --release
+	cargo zigbuild -p bento-agent --target $(GUEST_TARGET) --release
 	mkdir -p "$(HOME)/.config/bento"
 	printf "guest:\n  agent_binary: \"%s\"\n" "$(GUEST_BIN)" > "$(BENTO_CONFIG)"
 	@echo "Updated $(BENTO_CONFIG) -> $(GUEST_BIN)"

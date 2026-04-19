@@ -49,6 +49,7 @@ pub(crate) fn vm_spec_machine_config(
     let mut builder = VmConfig::builder(inputs.name)
         .base_directory(inputs.data_dir.to_path_buf())
         .network(map_vm_spec_network_mode(inputs.spec.network.mode))
+        .kernel_cmdline(inputs.spec.boot.kernel_cmdline.clone())
         .nested_virtualization(inputs.spec.settings.nested_virtualization)
         .rosetta(inputs.spec.settings.rosetta);
 
@@ -201,12 +202,23 @@ fn map_vm_spec_network_mode(mode: SpecNetworkMode) -> NetworkMode {
 
 #[cfg(test)]
 mod tests {
-    use super::machine_backend_from_vm_spec;
+    use super::{machine_backend_from_vm_spec, vm_spec_machine_config, VmSpecInputs};
     use bento_core::{
         Architecture, Backend as SpecBackend, Boot, GuestOs, Network,
         NetworkMode as SpecNetworkMode, Platform, Resources, Settings, Storage, VmSpec,
     };
     use bento_vmm::Backend;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("bento-vmmon-test-{name}-{now}"))
+    }
 
     #[test]
     fn machine_backend_maps_cloud_hypervisor_engine() {
@@ -242,5 +254,73 @@ mod tests {
         };
         let backend = machine_backend_from_vm_spec(&spec).expect("backend should resolve");
         assert_eq!(backend, Backend::CloudHypervisor);
+    }
+
+    #[test]
+    fn vm_spec_machine_config_forwards_kernel_cmdline() {
+        let dir = temp_dir("kernel-cmdline");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let kernel = dir.join("kernel");
+        let initramfs = dir.join("initramfs");
+        fs::write(&kernel, b"kernel").expect("write kernel");
+        fs::write(&initramfs, b"initramfs").expect("write initramfs");
+
+        let spec = VmSpec {
+            version: 1,
+            name: "devbox".to_string(),
+            platform: Platform {
+                guest_os: GuestOs::Linux,
+                architecture: Architecture::Aarch64,
+                backend: SpecBackend::Auto,
+            },
+            resources: Resources {
+                cpus: 2,
+                memory_mib: 1024,
+            },
+            boot: Boot {
+                kernel: Some(
+                    kernel
+                        .strip_prefix(&dir)
+                        .expect("relative kernel")
+                        .to_path_buf(),
+                ),
+                initramfs: Some(
+                    initramfs
+                        .strip_prefix(&dir)
+                        .expect("relative initramfs")
+                        .to_path_buf(),
+                ),
+                kernel_cmdline: vec![
+                    "console=hvc0".to_string(),
+                    "bento.guest.port=1027".to_string(),
+                ],
+                bootstrap: None,
+            },
+            storage: Storage { disks: Vec::new() },
+            mounts: Vec::new(),
+            endpoints: Vec::new(),
+            network: Network {
+                mode: SpecNetworkMode::None,
+            },
+            settings: Settings {
+                nested_virtualization: false,
+                rosetta: false,
+                guest_enabled: true,
+            },
+        };
+
+        let machine_config = vm_spec_machine_config(VmSpecInputs {
+            name: &spec.name,
+            data_dir: &dir,
+            spec: &spec,
+        })
+        .expect("machine config should resolve");
+
+        assert_eq!(
+            machine_config.config.kernel_cmdline,
+            spec.boot.kernel_cmdline
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

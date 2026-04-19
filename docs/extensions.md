@@ -6,7 +6,7 @@ into resolved capability config at startup time.
 ## Core Ideas
 
 - instance configs persist profile references
-- guestd only sees capabilities, not profile names
+- agent only sees capabilities, not profile names
 - endpoints are the concrete things Bento exposes, like `ssh`, `docker.sock`, or a forwarded TCP port
 
 ## Profile Files
@@ -19,7 +19,7 @@ config directory. You can sync them with `make sync-profiles`.
 ## Current Capabilities
 
 - `ssh`, enabled by default, startup-required
-- `dns`, enabled by default
+- `dns`, disabled by default unless a profile enables it
 - `forward`, disabled by default unless a profile enables it
 
 DNS discovers the host-facing resolver from the guest default gateway. Any configured
@@ -77,7 +77,7 @@ Today that mainly affects `ssh`.
 
 ## Guest DNS
 
-When the DNS capability is enabled, `guestd` manages guest resolver configuration by writing
+When the DNS capability is enabled, `agent` manages guest resolver configuration by writing
 `/etc/bento/resolv.conf` and replacing `/etc/resolv.conf` with a symlink to that managed file.
 It also injects `host.bento.internal` to point back at the discovered host gateway address. The
 `docker` profile adds `host.docker.internal` as a CNAME in the `docker.internal` zone.

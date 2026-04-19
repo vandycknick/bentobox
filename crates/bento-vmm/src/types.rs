@@ -86,6 +86,7 @@ pub struct VmConfig {
     pub nested_virtualization: bool,
     pub rosetta: bool,
     pub network: NetworkMode,
+    pub kernel_cmdline: Vec<String>,
     pub root_disk: Option<DiskImage>,
     pub data_disks: Vec<DiskImage>,
     pub mounts: Vec<SharedDirectory>,
@@ -104,6 +105,7 @@ impl VmConfig {
             nested_virtualization: false,
             rosetta: false,
             network: NetworkMode::None,
+            kernel_cmdline: Vec::new(),
             root_disk: None,
             data_disks: Vec::new(),
             mounts: Vec::new(),
@@ -182,6 +184,11 @@ impl VmConfigBuilder {
 
     pub fn network(mut self, network: NetworkMode) -> Self {
         self.config.network = network;
+        self
+    }
+
+    pub fn kernel_cmdline(mut self, kernel_cmdline: Vec<String>) -> Self {
+        self.config.kernel_cmdline = kernel_cmdline;
         self
     }
 

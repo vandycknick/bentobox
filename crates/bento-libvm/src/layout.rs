@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use bento_core::MachineId;
+use bento_core::{InstanceFile, MachineId};
 
 use crate::LibVmError;
 
@@ -41,19 +41,23 @@ impl Layout {
     }
 
     pub fn instance_config_path(&self, machine_id: MachineId) -> PathBuf {
-        self.instance_dir(machine_id).join(CONFIG_FILE_NAME)
+        self.instance_dir(machine_id)
+            .join(InstanceFile::Config.as_str())
     }
 
     pub fn monitor_pid_path(&self, machine_id: MachineId) -> PathBuf {
-        self.instance_dir(machine_id).join("vm.pid")
+        self.instance_dir(machine_id)
+            .join(InstanceFile::VmmonPid.as_str())
     }
 
     pub fn monitor_socket_path(&self, machine_id: MachineId) -> PathBuf {
-        self.instance_dir(machine_id).join("vm.sock")
+        self.instance_dir(machine_id)
+            .join(InstanceFile::VmmonSocket.as_str())
     }
 
     pub fn monitor_trace_path(&self, machine_id: MachineId) -> PathBuf {
-        self.instance_dir(machine_id).join("vm.trace.log")
+        self.instance_dir(machine_id)
+            .join(InstanceFile::VmmonTraceLog.as_str())
     }
 
     pub fn staging_dir(&self) -> PathBuf {
@@ -105,7 +109,7 @@ fn absolute_path(name: &'static str, value: OsString) -> Result<PathBuf, LibVmEr
 #[cfg(test)]
 mod tests {
     use super::{resolve_data_dir_from, Layout};
-    use bento_core::MachineId;
+    use bento_core::{InstanceFile, MachineId};
     use std::path::PathBuf;
 
     #[test]
@@ -132,25 +136,25 @@ mod tests {
             layout.instance_config_path(machine_id),
             PathBuf::from("/tmp/bento/instances")
                 .join(machine_id.to_string())
-                .join("config.yaml")
+                .join(InstanceFile::Config.as_str())
         );
         assert_eq!(
             layout.monitor_pid_path(machine_id),
             PathBuf::from("/tmp/bento/instances")
                 .join(machine_id.to_string())
-                .join("vm.pid")
+                .join(InstanceFile::VmmonPid.as_str())
         );
         assert_eq!(
             layout.monitor_socket_path(machine_id),
             PathBuf::from("/tmp/bento/instances")
                 .join(machine_id.to_string())
-                .join("vm.sock")
+                .join(InstanceFile::VmmonSocket.as_str())
         );
         assert_eq!(
             layout.monitor_trace_path(machine_id),
             PathBuf::from("/tmp/bento/instances")
                 .join(machine_id.to_string())
-                .join("vm.trace.log")
+                .join(InstanceFile::VmmonTraceLog.as_str())
         );
     }
 

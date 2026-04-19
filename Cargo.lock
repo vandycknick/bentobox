@@ -262,6 +262,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bento-agent"
+version = "0.1.0"
+dependencies = [
+ "bento-core",
+ "bento-protocol",
+ "eyre",
+ "futures",
+ "futures-util",
+ "hickory-proto",
+ "netlink-packet-route",
+ "nix 0.31.1",
+ "rtnetlink",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tokio",
+ "tokio-util",
+ "tokio-vsock",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bento-ch"
 version = "0.1.0"
 dependencies = [
@@ -305,31 +329,6 @@ dependencies = [
  "syn",
  "thiserror 2.0.18",
  "tokio",
-]
-
-[[package]]
-name = "bento-guestd"
-version = "0.1.0"
-dependencies = [
- "bento-core",
- "bento-protocol",
- "eyre",
- "futures",
- "futures-util",
- "hickory-proto",
- "netlink-packet-route",
- "nix 0.31.1",
- "rand 0.9.2",
- "rtnetlink",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "tokio",
- "tokio-util",
- "tokio-vsock",
- "tonic",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bento_protocol::{DEFAULT_AGENT_CONTROL_PORT, KERNEL_PARAM_AGENT_CONTROL_PORT};
 use bento_vz::device::{
     EntropyDeviceConfiguration, LinuxRosettaDirectoryShare, MemoryBalloonDeviceConfiguration,
     NetworkDeviceConfiguration, SerialPortConfiguration, SharedDirectory, SingleDirectoryShare,
@@ -383,15 +382,17 @@ fn build_boot_loader(spec: &VmConfig) -> Result<LinuxBootLoader, VmmError> {
     let mut boot_loader = LinuxBootLoader::new(kernel_path);
     boot_loader.set_initial_ramdisk(initramfs_path);
 
-    let root_arg = spec
-        .root_disk
-        .as_ref()
-        .map(|_| " root=/dev/vda")
-        .unwrap_or("");
-    let command_line = format!(
-        "console=hvc0 rd.break=initqueue{} {}={} selinux=1 enforcing=0",
-        root_arg, KERNEL_PARAM_AGENT_CONTROL_PORT, DEFAULT_AGENT_CONTROL_PORT,
-    );
+    let mut args = vec![
+        "console=hvc0".to_string(),
+        "rd.break=initqueue".to_string(),
+        "selinux=1".to_string(),
+        "enforcing=0".to_string(),
+    ];
+    if spec.root_disk.is_some() {
+        args.push("root=/dev/vda".to_string());
+    }
+    args.extend(spec.kernel_cmdline.iter().cloned());
+    let command_line = args.join(" ");
     boot_loader.set_command_line(&command_line);
     Ok(boot_loader)
 }

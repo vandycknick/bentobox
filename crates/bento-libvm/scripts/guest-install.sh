@@ -7,9 +7,9 @@ exec >>"$LOG" 2>&1
 echo "[bento] guest install start $(date -Iseconds)"
 
 MNT=/run/bento-cidata
-SRC_LOWER="$MNT/bento-guestd"
-SRC_UPPER="$MNT/BENTO-GUESTD"
-CONFIG_SRC="$MNT/bento-guestd.yaml"
+SRC_LOWER="$MNT/bento-agent"
+SRC_UPPER="$MNT/BENTO-AGENT"
+CONFIG_SRC="$MNT/bento-agent.yaml"
 CONFIG_ENV_SRC="$MNT/config.env"
 TASKS_DIR="$MNT/tasks"
 RUN_TASKS_DIR=/run/bento-tasks
@@ -25,7 +25,7 @@ else
 fi
 
 if [ ! -f "$CONFIG_SRC" ]; then
-  echo "[bento] guestd config payload not found in CIDATA mount"
+  echo "[bento] agent config payload not found in CIDATA mount"
   exit 1
 fi
 
@@ -39,17 +39,15 @@ if [ ! -d "$TASKS_DIR" ]; then
   exit 1
 fi
 
-DST=/usr/local/bin/bento-guestd
+DST=/usr/local/bin/bento-agent
 
 mkdir -p "$(dirname "$DST")"
 mkdir -p "$RUN_TASKS_DIR"
 
 install -m 0755 "$SRC" "$DST"
-BENTO_GUESTD_BINARY_CHANGED=1
 echo "[bento] installed guest binary to $DST"
 
 export BENTO_CIDATA_MNT="$MNT"
-export BENTO_GUESTD_BINARY_CHANGED
 export BENTO_TASKS_DIR="$RUN_TASKS_DIR"
 
 set -a

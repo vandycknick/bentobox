@@ -81,22 +81,6 @@ impl DnsServer {
         }
     }
 
-    #[allow(dead_code)]
-    pub async fn add_record(&self, zone: &str, name: &str, value: DnsRecordValue) {
-        let mut state = self.state.write().await;
-        let zone = normalize_name(zone);
-        let fqdn = normalize_record_name(name, &zone);
-        state.records.entry(fqdn).or_default().push(value);
-    }
-
-    #[allow(dead_code)]
-    pub async fn remove_record(&self, zone: &str, name: &str) {
-        let mut state = self.state.write().await;
-        let zone = normalize_name(zone);
-        let fqdn = normalize_record_name(name, &zone);
-        state.records.remove(&fqdn);
-    }
-
     pub async fn run(&self, shutdown: CancellationToken) -> eyre::Result<()> {
         let udp = Arc::new(UdpSocket::bind(self.listen_addr).await?);
         let tcp = TcpListener::bind(self.listen_addr).await?;
@@ -437,58 +421,6 @@ fn write_resolv_conf_at(managed: &Path, actual: &Path, host: IpAddr) -> eyre::Re
 
     symlink(managed, actual)?;
     Ok(())
-}
-
-pub async fn capability_status(config: &DnsCapabilityConfig) -> (bool, bool, String, Vec<String>) {
-    if !config.enabled {
-        return (
-            false,
-            false,
-            String::from("DNS capability disabled"),
-            Vec::new(),
-        );
-    }
-
-    match discover_gateways().await {
-        Ok(discovery) => {
-            let upstreams = match select_upstreams(&discovery, &config.upstream_servers) {
-                Ok(upstreams) => upstreams,
-                Err(err) => {
-                    return (
-                        false,
-                        false,
-                        String::from("DNS upstream selection failed"),
-                        vec![err.to_string()],
-                    );
-                }
-            };
-            let mut parts = Vec::new();
-            if let Some(ipv4) = discovery.ipv4 {
-                parts.push(format!("ipv4 gateway {ipv4}"));
-            }
-            if let Some(ipv6) = discovery.ipv6 {
-                parts.push(format!("ipv6 host {ipv6}"));
-            }
-
-            (
-                true,
-                true,
-                format!(
-                    "DNS resolver configured with {}, {} total upstreams, {} zones",
-                    parts.join(", "),
-                    upstreams.len(),
-                    config.zones.len()
-                ),
-                Vec::new(),
-            )
-        }
-        Err(err) => (
-            false,
-            false,
-            String::from("DNS gateway discovery failed"),
-            vec![err.to_string()],
-        ),
-    }
 }
 
 fn select_upstreams(

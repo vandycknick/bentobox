@@ -11,7 +11,6 @@ use bento_ch::types::{
     VsockConfig,
 };
 use bento_ch::{CloudHypervisorProcess, CloudHypervisorProcessBuilder};
-use bento_protocol::{DEFAULT_AGENT_CONTROL_PORT, KERNEL_PARAM_AGENT_CONTROL_PORT};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, timeout};
@@ -598,10 +597,7 @@ fn build_boot_args(config: &VmConfig) -> String {
         args.push("root=/dev/vda".to_string());
         args.push("rw".to_string());
     }
-    args.push(format!(
-        "{}={}",
-        KERNEL_PARAM_AGENT_CONTROL_PORT, DEFAULT_AGENT_CONTROL_PORT
-    ));
+    args.extend(config.kernel_cmdline.iter().cloned());
     args.join(" ")
 }
 

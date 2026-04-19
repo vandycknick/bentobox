@@ -8,11 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bento_core::capabilities::{
     CapabilitiesConfig, DnsCapabilityConfig, ForwardCapabilityConfig, SshCapabilityConfig,
 };
-use bento_core::services::{
-    GuestForwardConfig, GuestRuntimeConfig, GuestServiceConfig, GuestServiceKind,
-    GuestTcpForwardConfig, GuestUdsForwardConfig, RESERVED_SHELL_PORT, SERVICE_ID_SHELL,
-};
+use bento_core::services::{GuestForwardConfig, GuestRuntimeConfig, GuestUdsForwardConfig};
 use bento_core::{resolve_mount_location, InstanceFile, NetworkMode as SpecNetworkMode, VmSpec};
+use bento_protocol::{agent_port_arg, parse_agent_port_args, KERNEL_PARAM_AGENT_PORT};
 use eyre::Context;
 use fatfs::{format_volume, FileSystem, FormatVolumeOptions, FsOptions};
 use serde::Serialize;
@@ -22,14 +20,14 @@ use crate::host_user::{self, HostUser};
 use crate::profiles::{resolve_profiles, validate_capabilities};
 use crate::ssh_keys;
 
-const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-guestd";
+const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-agent";
 const GUEST_AGENT_INSTALL_SCRIPT_ENTRY: &str = "bento-install-guest-agent.sh";
-const GUEST_AGENT_CONFIG_ENTRY: &str = "bento-guestd.yaml";
+const GUEST_AGENT_CONFIG_ENTRY: &str = "bento-agent.yaml";
 const GUEST_AGENT_CONFIG_ENV_ENTRY: &str = "config.env";
 const GUEST_AGENT_BOOTSTRAP_SCRIPT: &str = "/var/lib/cloud/scripts/per-boot/00-bento.bootstrap.sh";
 const GUEST_BOOTSTRAP_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-bootstrap.sh");
 const GUEST_INSTALL_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-install.sh");
-const TASK_REGISTER_GUESTD_CONTENT: &str = include_str!("../scripts/tasks/10-register-guestd.sh");
+const TASK_REGISTER_AGENT_CONTENT: &str = include_str!("../scripts/tasks/10-register-agent.sh");
 const TASK_SETUP_ROSETTA_CONTENT: &str = include_str!("../scripts/tasks/20-setup-rosetta.sh");
 const CIDATA_VOLUME_LABEL: &str = "CIDATA";
 const CIDATA_MIN_SIZE_BYTES: u64 = 16 * 1024 * 1024;
@@ -52,10 +50,12 @@ pub(crate) fn prepare_instance_runtime(
     instance_dir: &Path,
     profiles: &[String],
 ) -> eyre::Result<()> {
-    let spec = read_vm_spec_from_dir(instance_dir)?;
+    let mut spec = read_vm_spec_from_dir(instance_dir)?;
     let capabilities = resolve_startup_capabilities(profiles)?;
+    reconcile_agent_kernel_cmdline(&mut spec);
     let guest_runtime = resolve_guest_runtime_config(&spec, &capabilities)?;
 
+    write_vm_spec_to_dir(instance_dir, &spec)?;
     rebuild_bootstrap(instance_dir, &spec, &guest_runtime)?;
     Ok(())
 }
@@ -66,6 +66,113 @@ fn read_vm_spec_from_dir(instance_dir: &Path) -> eyre::Result<VmSpec> {
         .with_context(|| format!("read vm spec at {}", config_path.display()))?;
     serde_yaml_ng::from_str(&raw)
         .map_err(|err| eyre::eyre!("parse vm spec at {}: {}", config_path.display(), err))
+}
+
+fn write_vm_spec_to_dir(instance_dir: &Path, spec: &VmSpec) -> eyre::Result<()> {
+    let config_path = instance_dir.join(InstanceFile::Config.as_str());
+    let raw = serde_yaml_ng::to_string(spec).context("serialize vm spec")?;
+    std::fs::write(&config_path, raw)
+        .with_context(|| format!("write vm spec at {}", config_path.display()))
+}
+
+fn reconcile_agent_kernel_cmdline(spec: &mut VmSpec) {
+    let port = parse_agent_port_args(spec.boot.kernel_cmdline.iter().map(String::as_str));
+    spec.boot
+        .kernel_cmdline
+        .retain(|arg| !arg.starts_with(&format!("{}=", KERNEL_PARAM_AGENT_PORT)));
+
+    if !spec.settings.guest_enabled {
+        return;
+    }
+
+    spec.boot.kernel_cmdline.push(agent_port_arg(port));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconcile_agent_kernel_cmdline;
+    use bento_core::{
+        Architecture, Backend, Boot, GuestOs, Network, NetworkMode, Platform, Resources, Settings,
+        Storage, VmSpec,
+    };
+
+    fn sample_spec(kernel_cmdline: Vec<String>, guest_enabled: bool) -> VmSpec {
+        VmSpec {
+            version: 1,
+            name: "devbox".to_string(),
+            platform: Platform {
+                guest_os: GuestOs::Linux,
+                architecture: Architecture::Aarch64,
+                backend: Backend::Auto,
+            },
+            resources: Resources {
+                cpus: 4,
+                memory_mib: 4096,
+            },
+            boot: Boot {
+                kernel: None,
+                initramfs: None,
+                kernel_cmdline,
+                bootstrap: None,
+            },
+            storage: Storage { disks: Vec::new() },
+            mounts: Vec::new(),
+            endpoints: Vec::new(),
+            network: Network {
+                mode: NetworkMode::User,
+            },
+            settings: Settings {
+                nested_virtualization: false,
+                rosetta: false,
+                guest_enabled,
+            },
+        }
+    }
+
+    #[test]
+    fn reconcile_agent_kernel_cmdline_replaces_existing_agent_port() {
+        let mut spec = sample_spec(
+            vec![
+                "console=hvc0".to_string(),
+                "bento.guest.port=7001".to_string(),
+            ],
+            true,
+        );
+
+        reconcile_agent_kernel_cmdline(&mut spec);
+
+        assert_eq!(
+            spec.boot.kernel_cmdline,
+            vec![
+                "console=hvc0".to_string(),
+                "bento.guest.port=7001".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn reconcile_agent_kernel_cmdline_injects_default_port_for_guest_instances() {
+        let mut spec = sample_spec(vec!["console=hvc0".to_string()], true);
+
+        reconcile_agent_kernel_cmdline(&mut spec);
+
+        assert_eq!(
+            spec.boot.kernel_cmdline,
+            vec![
+                "console=hvc0".to_string(),
+                "bento.guest.port=1027".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn reconcile_agent_kernel_cmdline_removes_agent_port_when_guest_is_disabled() {
+        let mut spec = sample_spec(vec!["bento.guest.port=7001".to_string()], false);
+
+        reconcile_agent_kernel_cmdline(&mut spec);
+
+        assert!(spec.boot.kernel_cmdline.is_empty());
+    }
 }
 
 fn resolve_startup_capabilities(start_profiles: &[String]) -> eyre::Result<CapabilitiesConfig> {
@@ -108,37 +215,20 @@ fn resolve_guest_runtime_config(
         None
     };
 
-    let mut guest_services = Vec::new();
-
-    if capabilities.ssh.enabled {
-        guest_services.push(GuestServiceConfig {
-            id: SERVICE_ID_SHELL.to_string(),
-            kind: GuestServiceKind::Shell,
-            port: RESERVED_SHELL_PORT,
-            startup_required: true,
-            target: String::from("127.0.0.1:22"),
-        });
-    }
-
     Ok(GuestRuntimeConfig {
+        ssh: capabilities.ssh.clone(),
         dns: capabilities.dns.clone(),
         forward: GuestForwardConfig {
             enabled: forward.enabled,
             port: forward_port.unwrap_or_default(),
-            tcp: GuestTcpForwardConfig {
-                auto_discover: forward.tcp.auto_discover,
-            },
             uds: forward
                 .uds
                 .iter()
                 .map(|forward| GuestUdsForwardConfig {
-                    name: forward.name.clone(),
                     guest_path: forward.guest_path.clone(),
                 })
                 .collect(),
         },
-        services: guest_services,
-        ..GuestRuntimeConfig::default()
     })
 }
 
@@ -164,8 +254,9 @@ fn resolve_forward_config(
 
 fn requires_bootstrap(spec: &VmSpec, guest_runtime: &GuestRuntimeConfig) -> bool {
     spec.boot.bootstrap.is_some()
-        || !guest_runtime.services.is_empty()
+        || guest_runtime.ssh.enabled
         || guest_runtime.dns.enabled
+        || guest_runtime.forward.enabled
         || spec.settings.rosetta
 }
 
@@ -210,7 +301,7 @@ fn build_cidata_disk(
     let user_data = render_user_data(spec, host_user, ssh_public_key)?;
     let meta_data = render_meta_data(&spec.name)?;
     let network_config = render_network_config_for_instance(spec)?;
-    let guestd_config = render_guestd_config(guest_runtime)?;
+    let agent_config = render_agent_config(guest_runtime)?;
     let config_env = render_config_env(spec)?;
     let iso_path = instance_dir.join(InstanceFile::CidataDisk.as_str());
 
@@ -233,15 +324,15 @@ fn build_cidata_disk(
         },
         CidataEntry {
             name: GUEST_AGENT_CONFIG_ENTRY.to_string(),
-            contents: guestd_config.into_bytes(),
+            contents: agent_config.into_bytes(),
         },
         CidataEntry {
             name: GUEST_AGENT_CONFIG_ENV_ENTRY.to_string(),
             contents: config_env.into_bytes(),
         },
         CidataEntry {
-            name: "tasks/10-register-guestd.sh".to_string(),
-            contents: TASK_REGISTER_GUESTD_CONTENT.as_bytes().to_vec(),
+            name: "tasks/10-register-agent.sh".to_string(),
+            contents: TASK_REGISTER_AGENT_CONTENT.as_bytes().to_vec(),
         },
     ];
 
@@ -555,8 +646,8 @@ fn mounts(spec: &VmSpec) -> Vec<MonitorMount> {
         .collect()
 }
 
-fn render_guestd_config(guest_runtime: &GuestRuntimeConfig) -> eyre::Result<String> {
-    serde_yaml_ng::to_string(guest_runtime).context("serialize guestd config")
+fn render_agent_config(guest_runtime: &GuestRuntimeConfig) -> eyre::Result<String> {
+    serde_yaml_ng::to_string(guest_runtime).context("serialize agent config")
 }
 
 fn render_config_env(spec: &VmSpec) -> eyre::Result<String> {
@@ -566,8 +657,7 @@ fn render_config_env(spec: &VmSpec) -> eyre::Result<String> {
         "BENTO_INSTANCE_NAME={}\n",
         shell_quote(&spec.name)
     ));
-    env.push_str("BENTO_GUESTD_BINARY_PATH=/usr/local/bin/bento-guestd\n");
-    env.push_str("BENTO_GUESTD_CONFIG_PATH=/etc/bento/guestd.yaml\n");
+    env.push_str("BENTO_AGENT_CONFIG_PATH=/etc/bento/agent.yaml\n");
     env.push_str(&format!(
         "BENTO_ROSETTA={}\n",
         if spec.settings.rosetta {

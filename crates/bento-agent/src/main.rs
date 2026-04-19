@@ -4,26 +4,26 @@
 )]
 
 #[cfg(not(target_os = "linux"))]
-compile_error!("bento-guestd only supports Linux guests");
+compile_error!("bento-agent only supports Linux guests");
 
 mod config;
 mod dns;
 mod forward;
 mod host;
-mod init;
-mod port_forward;
+mod port;
 mod rpc;
 mod server;
 
 use std::io;
 
-use bento_core::services::{GuestServiceKind, SERVICE_ID_SHELL};
+use bento_core::services::RESERVED_SHELL_PORT;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
 
-use crate::config::load_guestd_config;
+use crate::config::load_agent_config;
 use crate::dns::DnsServer;
 use crate::forward::ForwardService;
+use crate::port::from_kernel_cmdline;
 use crate::rpc::{serve_agent_connection, AgentContext};
 use crate::server::VsockServer;
 
@@ -41,67 +41,56 @@ async fn main() -> eyre::Result<()> {
         .with_writer(std::io::stderr)
         .try_init();
 
+    // TODO: support direct PID 1 initialization in the future. For now the
+    // agent still expects systemd/cloud-init to own early system setup.
     if is_pid1 {
-        tracing::info!("Running as PID 1, configuring system");
+        tracing::info!("running as PID 1 without init mode enabled yet");
     }
 
     tracing::info!("agent starting");
 
-    let guestd_config = load_guestd_config()?;
-    let control_port = guestd_config.control_port;
+    let agent_config = load_agent_config()?;
+    let control_port = from_kernel_cmdline();
     let mut running_servers = Vec::new();
-    let dns_server = if guestd_config.dns.enabled {
-        let dns_server = DnsServer::new(&guestd_config.dns).await?;
-        DnsServer::write_resolv_conf(Some(guestd_config.dns.listen_address))?;
+    let dns_server = if agent_config.dns.enabled {
+        let dns_server = DnsServer::new(&agent_config.dns).await?;
+        DnsServer::write_resolv_conf(Some(agent_config.dns.listen_address))?;
         Some(dns_server)
     } else {
         None
     };
 
-    for service in &guestd_config.services {
-        match service.kind {
-            GuestServiceKind::Shell => {
-                let shell_port = service.port;
-                let shell_server = VsockServer::create(|mut stream| async move {
-                    let mut ssh = TcpStream::connect("127.0.0.1:22").await?;
-                    let _ = copy_bidirectional(&mut stream, &mut ssh).await?;
-                    Ok(())
-                })
-                .with_concurrency(256)
-                .with_tracing(tracing::info_span!(
-                    "vsock_server",
-                    service = SERVICE_ID_SHELL
-                ))
-                .listen(Some(shell_port))?;
-                running_servers.push(shell_server);
-            }
-            GuestServiceKind::UnixSocketForward => {
-                if let Some(server) = crate::port_forward::start_guest_service(service)? {
-                    running_servers.push(server);
-                }
-            }
-        }
+    if agent_config.ssh.enabled {
+        let shell_server = VsockServer::create(|mut stream| async move {
+            let mut ssh = TcpStream::connect("127.0.0.1:22").await?;
+            let _ = copy_bidirectional(&mut stream, &mut ssh).await?;
+            Ok(())
+        })
+        .with_concurrency(256)
+        .with_tracing(tracing::info_span!("vsock_server", service = "shell"))
+        .listen(RESERVED_SHELL_PORT)?;
+        running_servers.push(shell_server);
     }
 
-    if guestd_config.forward.enabled {
-        if guestd_config.forward.port == 0 {
+    if agent_config.forward.enabled {
+        if agent_config.forward.port == 0 {
             return Err(eyre::eyre!(
                 "forward guest runtime is enabled but no 'forward' endpoint port was configured"
             ));
         }
 
-        let forward_service = ForwardService::new(guestd_config.forward.clone())?;
+        let forward_service = ForwardService::new(agent_config.forward.clone())?;
         let forward_server = VsockServer::create(move |stream| {
             let forward_service = forward_service.clone();
             async move { forward_service.handle_connection(stream).await }
         })
         .with_concurrency(256)
         .with_tracing(tracing::info_span!("vsock_server", service = "forward"))
-        .listen(Some(guestd_config.forward.port))?;
+        .listen(agent_config.forward.port)?;
         running_servers.push(forward_server);
     }
 
-    let agent_service = AgentContext::new(guestd_config.clone());
+    let agent_service = AgentContext::new(agent_config.clone());
 
     let control_server = VsockServer::create(move |stream| {
         let agent = agent_service.clone();
@@ -113,7 +102,7 @@ async fn main() -> eyre::Result<()> {
     })
     .with_concurrency(64)
     .with_tracing(tracing::info_span!("vsock_server", service = "agent"))
-    .listen(Some(control_port))?;
+    .listen(control_port)?;
 
     running_servers.push(control_server);
 

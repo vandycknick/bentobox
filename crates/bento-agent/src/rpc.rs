@@ -3,14 +3,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use bento_core::services::{GuestRuntimeConfig, GuestServiceConfig, GuestServiceKind};
+use bento_core::services::GuestRuntimeConfig;
 use bento_protocol::v1::agent_service_server::{AgentService, AgentServiceServer};
 use bento_protocol::v1::{
     AgentPingRequest, AgentPingResponse, Empty, HealthRequest, HealthResponse, ServiceHealth,
     SystemInfo,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::net::TcpStream;
 use tokio_vsock::VsockStream;
 use tonic::transport::server::Connected;
 use tonic::{Request, Response, Status};
@@ -86,7 +86,7 @@ impl AgentService for AgentContext {
         &self,
         _request: Request<HealthRequest>,
     ) -> Result<Response<HealthResponse>, Status> {
-        let services = service_health(&self.config).await;
+        let services = subsystem_health(&self.config).await;
         let ready = services
             .iter()
             .filter(|service| service.startup_required)
@@ -110,8 +110,12 @@ impl AgentService for AgentContext {
     }
 }
 
-async fn service_health(config: &GuestRuntimeConfig) -> Vec<ServiceHealth> {
+async fn subsystem_health(config: &GuestRuntimeConfig) -> Vec<ServiceHealth> {
     let mut statuses = Vec::new();
+
+    if config.ssh.enabled {
+        statuses.push(probe_ssh().await);
+    }
 
     if config.dns.enabled {
         let (healthy, summary, problems) = dns_health(config).await;
@@ -124,8 +128,8 @@ async fn service_health(config: &GuestRuntimeConfig) -> Vec<ServiceHealth> {
         });
     }
 
-    for service in &config.services {
-        statuses.push(probe_service(service).await);
+    if config.forward.enabled {
+        statuses.push(probe_forward(config).await);
     }
 
     statuses
@@ -146,14 +150,7 @@ async fn dns_health(config: &GuestRuntimeConfig) -> (bool, String, Vec<String>) 
     }
 }
 
-async fn probe_service(service: &GuestServiceConfig) -> ServiceHealth {
-    match service.kind {
-        GuestServiceKind::Shell => probe_shell(service).await,
-        GuestServiceKind::UnixSocketForward => probe_unix_socket_forward(service).await,
-    }
-}
-
-async fn probe_shell(service: &GuestServiceConfig) -> ServiceHealth {
+async fn probe_ssh() -> ServiceHealth {
     let healthy = TcpStream::connect("127.0.0.1:22").await.is_ok();
     let (summary, problems) = if healthy {
         (String::from("shell is reachable"), Vec::new())
@@ -165,28 +162,36 @@ async fn probe_shell(service: &GuestServiceConfig) -> ServiceHealth {
     };
 
     ServiceHealth {
-        name: service.id.clone(),
-        startup_required: service.startup_required,
+        name: String::from("shell"),
+        startup_required: true,
         healthy,
         summary,
         problems,
     }
 }
 
-async fn probe_unix_socket_forward(service: &GuestServiceConfig) -> ServiceHealth {
-    let healthy = UnixStream::connect(&service.target).await.is_ok();
+async fn probe_forward(config: &GuestRuntimeConfig) -> ServiceHealth {
+    let healthy = config.forward.port != 0;
     let (summary, problems) = if healthy {
-        (format!("{} is reachable", service.target), Vec::new())
+        (
+            format!(
+                "forward service configured on vsock port {}",
+                config.forward.port
+            ),
+            Vec::new(),
+        )
     } else {
         (
-            format!("{} is not reachable", service.target),
-            vec![format!("failed to connect to {}", service.target)],
+            String::from("forward service is missing a configured endpoint port"),
+            vec![String::from(
+                "forward capability is enabled but endpoint port is zero",
+            )],
         )
     };
 
     ServiceHealth {
-        name: service.id.clone(),
-        startup_required: service.startup_required,
+        name: String::from("forward"),
+        startup_required: false,
         healthy,
         summary,
         problems,
@@ -195,7 +200,7 @@ async fn probe_unix_socket_forward(service: &GuestServiceConfig) -> ServiceHealt
 
 fn health_summary(services: &[ServiceHealth], ready: bool) -> String {
     if ready {
-        return String::from("startup-required guest services are healthy");
+        return String::from("startup-required guest capabilities are healthy");
     }
 
     let waiting = services
@@ -212,7 +217,7 @@ fn health_summary(services: &[ServiceHealth], ready: bool) -> String {
         .collect::<Vec<_>>();
 
     if waiting.is_empty() {
-        String::from("guest services are starting")
+        String::from("guest capabilities are starting")
     } else {
         waiting.join("; ")
     }

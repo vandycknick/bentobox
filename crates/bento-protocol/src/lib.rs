@@ -28,4 +28,26 @@ pub mod v1 {
 }
 
 pub const DEFAULT_AGENT_CONTROL_PORT: u32 = 1027;
-pub const KERNEL_PARAM_AGENT_CONTROL_PORT: &str = "bento.guest.control_port";
+pub const KERNEL_PARAM_AGENT_PORT: &str = "bento.guest.port";
+
+pub fn agent_port_arg(port: u32) -> String {
+    format!("{}={port}", KERNEL_PARAM_AGENT_PORT)
+}
+
+pub fn parse_agent_port_args<'a>(args: impl IntoIterator<Item = &'a str>) -> u32 {
+    for arg in args {
+        let Some(raw_port) = arg.strip_prefix(&format!("{}=", KERNEL_PARAM_AGENT_PORT)) else {
+            continue;
+        };
+
+        let Ok(port) = raw_port.parse::<u32>() else {
+            continue;
+        };
+
+        if (1..=u32::from(u16::MAX)).contains(&port) {
+            return port;
+        }
+    }
+
+    DEFAULT_AGENT_CONTROL_PORT
+}
