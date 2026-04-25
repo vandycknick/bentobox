@@ -78,6 +78,14 @@ bentoctl create dev --image <name-or-oci-ref> --rosetta
 
 This currently requires Apple silicon, macOS 13 or newer, and Rosetta to already be installed with `softwareupdate --install-rosetta`.
 
+Enable the Bento guest agent explicitly when you want guest bootstrap artifacts to be injected:
+
+```bash
+bentoctl create dev --image <name-or-oci-ref> --agent
+```
+
+Images used with `--agent`, `--userdata`, or `--rosetta` are expected to support the current cloud-init/CIDATA bootstrap path. Bentobox assumes that image contract and does not validate it at create time.
+
 Start it:
 
 ```bash
@@ -109,5 +117,3 @@ bentoctl list
 ```
 
 ## More Docs
-
-- [Extensions](docs/extensions.md), guest features like `ssh` and `docker`, how to enable them, and how to read their status

@@ -77,7 +77,7 @@ Validation rules:
 The rootfs payload is a raw disk split into fixed-size chunks and compressed chunk-by-chunk with
 zstd. Chunks are reconstructed in manifest order into `rootfs.img` on ingest.
 
-The metadata JSON is the source of truth for image defaults and capabilities:
+The metadata JSON is the source of truth for image defaults and bootstrap support:
 
 ```json
 {
@@ -90,11 +90,6 @@ The metadata JSON is the source of truth for image defaults and capabilities:
   },
   "bootstrap": {
     "cidataCloudInit": true
-  },
-  "extensions": {
-    "ssh": true,
-    "docker": false,
-    "portForward": false
   }
 }
 ```
@@ -111,7 +106,7 @@ tooling.
 
 `bentoctl create <ref> <name>` resolves a local image or pulls it on demand, then:
 
-- applies image metadata defaults for CPU, memory, bootstrap capability, and extensions unless CLI
+- applies image metadata defaults for CPU, memory, and bootstrap support unless CLI
   overrides them
 - prefers bundled `kernel` and `initramfs` when present unless CLI overrides them
 - falls back to the global default kernel and initramfs bundle when the image does not provide them

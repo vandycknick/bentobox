@@ -200,7 +200,7 @@ async fn probe_forward(config: &GuestRuntimeConfig) -> ServiceHealth {
 
 fn health_summary(services: &[ServiceHealth], ready: bool) -> String {
     if ready {
-        return String::from("startup-required guest capabilities are healthy");
+        return String::from("startup-required guest services are healthy");
     }
 
     let waiting = services
@@ -217,7 +217,7 @@ fn health_summary(services: &[ServiceHealth], ready: bool) -> String {
         .collect::<Vec<_>>();
 
     if waiting.is_empty() {
-        String::from("guest capabilities are starting")
+        String::from("guest services are starting")
     } else {
         waiting.join("; ")
     }

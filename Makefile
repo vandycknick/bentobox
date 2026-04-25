@@ -1,7 +1,6 @@
 GUEST_TARGET := aarch64-unknown-linux-musl
 GUEST_BIN := $(CURDIR)/target/$(GUEST_TARGET)/release/bento-agent
 BENTO_CONFIG := $(HOME)/.config/bento/config.yaml
-BENTO_PROFILE_DIR := $(HOME)/.config/bento/profiles
 ARCH ?= arm64
 
 .PHONY: build-guest-agent
@@ -10,13 +9,6 @@ build-guest-agent:
 	mkdir -p "$(HOME)/.config/bento"
 	printf "guest:\n  agent_binary: \"%s\"\n" "$(GUEST_BIN)" > "$(BENTO_CONFIG)"
 	@echo "Updated $(BENTO_CONFIG) -> $(GUEST_BIN)"
-
-.PHONY: sync-profiles
-sync-profiles:
-	mkdir -p "$(BENTO_PROFILE_DIR)"
-	cp config/profiles/*.yaml "$(BENTO_PROFILE_DIR)/"
-	@echo "Synced profiles to $(BENTO_PROFILE_DIR)"
-
 
 .PHONY: kernel
 kernel:

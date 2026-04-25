@@ -36,12 +36,12 @@ pub struct CreateMachineRequest {
     pub initramfs: Option<PathBuf>,
     pub disk_size_gb: Option<u64>,
     pub nested_virtualization: bool,
+    pub agent: bool,
     pub rosetta: bool,
     pub userdata: Option<PathBuf>,
     pub disks: Vec<PathBuf>,
     pub mounts: Vec<Mount>,
     pub network: Option<NetworkMode>,
-    pub profiles: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,11 +54,11 @@ pub struct CreateRawMachineRequest {
     pub rootfs: Option<PathBuf>,
     pub empty_rootfs_gb: Option<u64>,
     pub nested_virtualization: bool,
+    pub agent: bool,
     pub rosetta: bool,
     pub disks: Vec<PathBuf>,
     pub mounts: Vec<Mount>,
     pub network: Option<NetworkMode>,
-    pub profiles: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,14 +140,7 @@ impl LibVm {
         let bootstrap = (userdata_path.is_some() || request.rosetta).then(|| Bootstrap {
             cloud_init: userdata_path.clone(),
         });
-        let guest_enabled = bootstrap.is_some();
-
-        if bootstrap.is_some() && !selected_image.metadata.bootstrap.cidata_cloud_init {
-            return Err(LibVmError::InvalidCreateRequest {
-                name: request.name,
-                reason: "instance requires bootstrap for userdata or rosetta, but the selected image does not advertise bootstrap support".to_string(),
-            });
-        }
+        let guest_enabled = should_enable_guest(request.agent, bootstrap.as_ref());
 
         let resolved_kernel =
             kernel_path.or_else(|| image_store.image_kernel_path(&selected_image));
@@ -236,7 +229,7 @@ impl LibVm {
         let disk_paths = canonicalize_existing_paths(&request.disks, "disk")?;
 
         let bootstrap = request.rosetta.then_some(Bootstrap { cloud_init: None });
-        let guest_enabled = bootstrap.is_some();
+        let guest_enabled = should_enable_guest(request.agent, bootstrap.as_ref());
 
         let mut disks = Vec::new();
         if let Some(path) = rootfs_path.clone() {
@@ -368,11 +361,7 @@ impl LibVm {
         self.state.remove_machine(&metadata)
     }
 
-    pub async fn start(
-        &self,
-        machine: &MachineRef,
-        profiles: &[String],
-    ) -> Result<MachineRecord, LibVmError> {
+    pub async fn start(&self, machine: &MachineRef) -> Result<MachineRecord, LibVmError> {
         let metadata = self.resolve_metadata(machine)?;
         let pid_path = self.layout.monitor_pid_path(metadata.id);
 
@@ -382,7 +371,7 @@ impl LibVm {
             });
         }
 
-        prepare_instance_runtime(Path::new(&metadata.instance_dir), profiles).map_err(|err| {
+        prepare_instance_runtime(Path::new(&metadata.instance_dir)).map_err(|err| {
             LibVmError::InstancePreparationFailed {
                 reference: metadata.name.clone(),
                 message: err.to_string(),
@@ -881,9 +870,13 @@ fn create_staging_dir(layout: &Layout) -> Result<PathBuf, LibVmError> {
     })
 }
 
+fn should_enable_guest(agent: bool, bootstrap: Option<&Bootstrap>) -> bool {
+    agent || bootstrap.is_some()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LibVm, MachineStatus};
+    use super::{should_enable_guest, LibVm, MachineStatus};
     use crate::{Layout, LibVmError, MachineRef};
     use bento_core::{
         Architecture, Backend, Boot, GuestOs, Network, NetworkMode, Platform, Resources, Settings,
@@ -1012,5 +1005,21 @@ mod tests {
         ));
         assert!(machine.dir.exists());
         assert_eq!(libvm.list().expect("list machines").len(), 1);
+    }
+
+    #[test]
+    fn should_enable_guest_when_agent_is_requested() {
+        assert!(should_enable_guest(true, None));
+    }
+
+    #[test]
+    fn should_enable_guest_when_bootstrap_is_present() {
+        let bootstrap = bento_core::Bootstrap { cloud_init: None };
+        assert!(should_enable_guest(false, Some(&bootstrap)));
+    }
+
+    #[test]
+    fn should_not_enable_guest_without_agent_or_bootstrap() {
+        assert!(!should_enable_guest(false, None));
     }
 }

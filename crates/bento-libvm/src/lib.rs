@@ -7,7 +7,6 @@ mod launch;
 mod layout;
 mod machine_ref;
 mod monitor;
-pub mod profiles;
 pub mod ssh_keys;
 mod state;
 

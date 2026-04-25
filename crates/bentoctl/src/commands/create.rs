@@ -18,7 +18,6 @@ pub(crate) enum NetworkMode {
     VzNat,
     None,
     Bridged,
-    Cni,
 }
 
 #[derive(Args, Debug)]
@@ -45,6 +44,8 @@ pub struct Cmd {
     pub disk_size: Option<u64>,
     #[arg(long, help = "Enable nested virtualization for supported VZ guests")]
     pub nested_virtualization: bool,
+    #[arg(long, help = "Enable the Bento guest agent")]
+    pub agent: bool,
     #[arg(
         long,
         help = "Enable Rosetta for x86_64 Linux binaries in supported VZ guests"
@@ -62,8 +63,6 @@ pub struct Cmd {
     pub mounts: Vec<MountConfig>,
     #[arg(long, value_name = "MODE", value_parser = parse_network_mode)]
     pub network: Option<NetworkMode>,
-    #[arg(long = "profile", value_name = "PROFILE")]
-    pub profiles: Vec<String>,
 }
 
 impl Display for Cmd {
@@ -83,12 +82,12 @@ impl Cmd {
             initramfs: resolve_optional_path(self.initramfs.as_deref(), "initramfs")?,
             disk_size_gb: self.disk_size,
             nested_virtualization: self.nested_virtualization,
+            agent: self.agent,
             rosetta: self.rosetta,
             userdata: resolve_optional_path(self.userdata.as_deref(), "userdata")?,
             disks: resolve_existing_paths(&self.disks, "disk")?,
             mounts: self.mounts.iter().cloned().map(mount_to_spec).collect(),
             network: self.network.map(map_network_mode),
-            profiles: self.profiles.clone(),
         };
 
         libvm.create_from_image(request)?;
@@ -156,9 +155,8 @@ pub(crate) fn parse_network_mode(input: &str) -> Result<NetworkMode, String> {
         "vznat" => Ok(NetworkMode::VzNat),
         "none" => Ok(NetworkMode::None),
         "bridged" => Ok(NetworkMode::Bridged),
-        "cni" => Ok(NetworkMode::Cni),
         _ => Err(format!(
-            "invalid network mode '{input}', expected one of: vznat, none, bridged, cni"
+            "invalid network mode '{input}', expected one of: vznat, none, bridged"
         )),
     }
 }
@@ -168,7 +166,6 @@ fn map_network_mode(mode: NetworkMode) -> bento_core::NetworkMode {
         NetworkMode::VzNat => bento_core::NetworkMode::User,
         NetworkMode::None => bento_core::NetworkMode::None,
         NetworkMode::Bridged => bento_core::NetworkMode::Bridged,
-        NetworkMode::Cni => bento_core::NetworkMode::User,
     }
 }
 
@@ -224,10 +221,6 @@ mod tests {
             parse_network_mode("bridged").expect("bridged should parse"),
             NetworkMode::Bridged
         );
-        assert_eq!(
-            parse_network_mode("cni").expect("cni should parse"),
-            NetworkMode::Cni
-        );
     }
 
     #[test]
@@ -271,6 +264,25 @@ mod tests {
         };
 
         assert!(create.rosetta);
+    }
+
+    #[test]
+    fn create_command_parses_agent_flag() {
+        let cmd = BentoCtlCmd::try_parse_from([
+            "bentoctl",
+            "create",
+            "ghcr.io/acme/base:latest",
+            "dev",
+            "--agent",
+        ])
+        .expect("create command should parse");
+
+        let create = match cmd.cmd {
+            Command::Create(cmd) => cmd,
+            other => panic!("expected create command, got {other:?}"),
+        };
+
+        assert!(create.agent);
     }
 
     #[test]

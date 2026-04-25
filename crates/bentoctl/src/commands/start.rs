@@ -5,9 +5,6 @@ use std::fmt::{Display, Formatter};
 #[derive(Args, Debug)]
 pub struct Cmd {
     pub name: String,
-
-    #[arg(long = "profile", value_name = "PROFILE")]
-    pub profiles: Vec<String>,
 }
 
 impl Display for Cmd {
@@ -19,7 +16,7 @@ impl Display for Cmd {
 impl Cmd {
     pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
         let machine_ref = MachineRef::parse(self.name.clone())?;
-        let machine = libvm.start(&machine_ref, &self.profiles).await?;
+        let machine = libvm.start(&machine_ref).await?;
 
         if requires_guest_readiness(&machine) {
             libvm
@@ -28,7 +25,7 @@ impl Cmd {
                     bento_libvm::DEFAULT_GUEST_READINESS_TIMEOUT,
                 )
                 .await
-                .map_err(|err| eyre::eyre!("guest capability readiness check failed: {err}"))?;
+                .map_err(|err| eyre::eyre!("guest readiness check failed: {err}"))?;
         }
 
         Ok(())

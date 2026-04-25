@@ -5,9 +5,7 @@ use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bento_core::capabilities::{
-    CapabilitiesConfig, DnsCapabilityConfig, ForwardCapabilityConfig, SshCapabilityConfig,
-};
+use bento_core::capabilities::DnsCapabilityConfig;
 use bento_core::services::{GuestForwardConfig, GuestRuntimeConfig, GuestUdsForwardConfig};
 use bento_core::{resolve_mount_location, InstanceFile, NetworkMode as SpecNetworkMode, VmSpec};
 use bento_protocol::{agent_port_arg, parse_agent_port_args, KERNEL_PARAM_AGENT_PORT};
@@ -17,7 +15,6 @@ use serde::Serialize;
 
 use crate::global_config::{ensure_guest_agent_binary, GlobalConfig};
 use crate::host_user::{self, HostUser};
-use crate::profiles::{resolve_profiles, validate_capabilities};
 use crate::ssh_keys;
 
 const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-agent";
@@ -46,14 +43,10 @@ struct MonitorMount {
     writable: bool,
 }
 
-pub(crate) fn prepare_instance_runtime(
-    instance_dir: &Path,
-    profiles: &[String],
-) -> eyre::Result<()> {
+pub(crate) fn prepare_instance_runtime(instance_dir: &Path) -> eyre::Result<()> {
     let mut spec = read_vm_spec_from_dir(instance_dir)?;
-    let capabilities = resolve_startup_capabilities(profiles)?;
     reconcile_agent_kernel_cmdline(&mut spec);
-    let guest_runtime = resolve_guest_runtime_config(&spec, &capabilities)?;
+    let guest_runtime = resolve_guest_runtime_config(&spec);
 
     write_vm_spec_to_dir(instance_dir, &spec)?;
     rebuild_bootstrap(instance_dir, &spec, &guest_runtime)?;
@@ -90,7 +83,7 @@ fn reconcile_agent_kernel_cmdline(spec: &mut VmSpec) {
 
 #[cfg(test)]
 mod tests {
-    use super::reconcile_agent_kernel_cmdline;
+    use super::{reconcile_agent_kernel_cmdline, resolve_guest_runtime_config};
     use bento_core::{
         Architecture, Backend, Boot, GuestOs, Network, NetworkMode, Platform, Resources, Settings,
         Storage, VmSpec,
@@ -173,83 +166,41 @@ mod tests {
 
         assert!(spec.boot.kernel_cmdline.is_empty());
     }
-}
 
-fn resolve_startup_capabilities(start_profiles: &[String]) -> eyre::Result<CapabilitiesConfig> {
-    let base = default_guest_capabilities();
-    let capabilities = resolve_profiles(&base, start_profiles)?;
-    validate_capabilities(&capabilities)?;
-    Ok(capabilities)
-}
+    #[test]
+    fn guest_runtime_defaults_to_ssh_and_dns_when_guest_is_enabled() {
+        let runtime = resolve_guest_runtime_config(&sample_spec(Vec::new(), true));
 
-fn default_guest_capabilities() -> CapabilitiesConfig {
-    CapabilitiesConfig {
-        ssh: SshCapabilityConfig { enabled: true },
-        dns: DnsCapabilityConfig {
-            enabled: false,
-            ..DnsCapabilityConfig::default()
-        },
-        forward: ForwardCapabilityConfig {
-            enabled: false,
-            ..ForwardCapabilityConfig::default()
-        },
+        assert!(runtime.ssh.enabled);
+        assert!(runtime.dns.enabled);
+        assert!(!runtime.forward.enabled);
+    }
+
+    #[test]
+    fn guest_runtime_disables_ssh_dns_and_forward_when_guest_is_disabled() {
+        let runtime = resolve_guest_runtime_config(&sample_spec(Vec::new(), false));
+
+        assert!(!runtime.ssh.enabled);
+        assert!(!runtime.dns.enabled);
+        assert!(!runtime.forward.enabled);
     }
 }
 
-fn resolve_guest_runtime_config(
-    spec: &VmSpec,
-    capabilities: &CapabilitiesConfig,
-) -> eyre::Result<GuestRuntimeConfig> {
-    let forward = resolve_forward_config(spec, capabilities)?;
-    let forward_port = if forward.enabled {
-        Some(
-            spec.endpoints
-                .iter()
-                .find(|endpoint| endpoint.name == "forward")
-                .map(|endpoint| endpoint.port)
-                .ok_or_else(|| {
-                    eyre::eyre!("forward capability requires an endpoint named 'forward'")
-                })?,
-        )
-    } else {
-        None
-    };
-
-    Ok(GuestRuntimeConfig {
-        ssh: capabilities.ssh.clone(),
-        dns: capabilities.dns.clone(),
-        forward: GuestForwardConfig {
-            enabled: forward.enabled,
-            port: forward_port.unwrap_or_default(),
-            uds: forward
-                .uds
-                .iter()
-                .map(|forward| GuestUdsForwardConfig {
-                    guest_path: forward.guest_path.clone(),
-                })
-                .collect(),
+fn resolve_guest_runtime_config(spec: &VmSpec) -> GuestRuntimeConfig {
+    GuestRuntimeConfig {
+        ssh: bento_core::capabilities::SshCapabilityConfig {
+            enabled: spec.settings.guest_enabled,
         },
-    })
-}
-
-fn resolve_forward_config(
-    spec: &VmSpec,
-    capabilities: &CapabilitiesConfig,
-) -> eyre::Result<ForwardCapabilityConfig> {
-    let Some(endpoint) = spec
-        .endpoints
-        .iter()
-        .find(|endpoint| endpoint.name == "forward")
-    else {
-        return Ok(capabilities.forward.clone());
-    };
-
-    let Some(config) = endpoint.plugin.config.clone() else {
-        return Ok(capabilities.forward.clone());
-    };
-
-    serde_json::from_value(config)
-        .map_err(|err| eyre::eyre!("decode forward endpoint plugin.config: {err}"))
+        dns: DnsCapabilityConfig {
+            enabled: spec.settings.guest_enabled,
+            ..DnsCapabilityConfig::default()
+        },
+        forward: GuestForwardConfig {
+            enabled: false,
+            port: 0,
+            uds: Vec::<GuestUdsForwardConfig>::new(),
+        },
+    }
 }
 
 fn requires_bootstrap(spec: &VmSpec, guest_runtime: &GuestRuntimeConfig) -> bool {

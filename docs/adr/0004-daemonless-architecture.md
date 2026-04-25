@@ -26,7 +26,7 @@ Bentobox adopts a daemonless, config-driven architecture with these roles:
 
 - `bentoctl` is a thin frontend over `bento-libvm`.
 - `bento-core` owns the canonical shared domain model, including `VmSpec`, machine identity types, and guest service configuration types.
-- `bento-libvm` owns manager-side lifecycle, machine inventory, on-disk layout, image and profile policy, bootstrap materialization, Negotiate client behavior, and `vmmon` process spawning.
+- `bento-libvm` owns manager-side lifecycle, machine inventory, on-disk layout, image policy, bootstrap materialization, Negotiate client behavior, and `vmmon` process spawning.
 - `bento-vmmon` is the canonical per-VM monitor. It is a small-footprint runtime supervisor that owns one running VM.
 - `bento-vmm` remains the backend abstraction for backend-specific VM execution.
 
@@ -106,7 +106,6 @@ It owns:
 - canonical `config.yaml` writing from `bento-core::VmSpec`,
 - image resolution and instance materialization,
 - bootstrap and guest runtime materialization,
-- profile resolution,
 - spawning `vmmon`,
 - monitor stop signaling,
 - Negotiate client behavior,

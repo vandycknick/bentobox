@@ -1,8 +1,19 @@
 use clap::Args;
 use std::fmt::{Display, Formatter};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use bento_libvm::{LibVm, MachineRef};
-use bento_protocol::v1::LifecycleState;
+use bento_core::{InstanceFile, VmSpec};
+use bento_libvm::{LibVm, MachineRef, MachineStatus};
+use bento_protocol::{parse_agent_port_args, v1::LifecycleState};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GuestConfigStatus {
+    enabled: bool,
+    bootstrap: bool,
+    agent_port: Option<u32>,
+    cidata_present: bool,
+    shell_expected: bool,
+}
 
 #[derive(Args, Debug)]
 pub struct Cmd {
@@ -21,9 +32,10 @@ impl Cmd {
         let machine = libvm.inspect(&machine_ref)?;
 
         println!("name: {}", machine.spec.name);
-        println!("process: {:?}", machine.status);
+        print_process(machine.status);
 
         if !machine.status.is_running() {
+            print_guest(None, guest_config_status(&machine.spec, &machine.dir));
             println!("ready: no");
             return Ok(());
         }
@@ -31,7 +43,10 @@ impl Cmd {
         let status = libvm.get_status(&MachineRef::Id(machine.id)).await?;
 
         println!("vm: {}", lifecycle_label(status.vm_state));
-        println!("guest: {}", lifecycle_label(status.guest_state));
+        print_guest(
+            Some((lifecycle_label(status.guest_state), status.ready)),
+            guest_config_status(&machine.spec, &machine.dir),
+        );
         println!("ready: {}", if status.ready { "yes" } else { "no" });
         if !status.summary.is_empty() {
             println!("summary: {}", status.summary);
@@ -73,6 +88,138 @@ impl Cmd {
     }
 }
 
+fn guest_config_status(spec: &VmSpec, machine_dir: &std::path::Path) -> GuestConfigStatus {
+    GuestConfigStatus {
+        enabled: spec.settings.guest_enabled,
+        bootstrap: spec.boot.bootstrap.is_some(),
+        agent_port: spec
+            .settings
+            .guest_enabled
+            .then(|| parse_agent_port_args(spec.boot.kernel_cmdline.iter().map(String::as_str))),
+        cidata_present: machine_dir
+            .join(InstanceFile::CidataDisk.as_str())
+            .is_file(),
+        shell_expected: spec.settings.guest_enabled,
+    }
+}
+
+fn print_process(status: MachineStatus) {
+    println!("process:");
+    println!("  status: {}", process_status_label(status));
+    if let Some(started_at) = process_started_at(status) {
+        println!("  started_at: {}", started_at);
+    }
+}
+
+fn print_guest(runtime: Option<(&str, bool)>, config: GuestConfigStatus) {
+    println!("guest:");
+    match runtime {
+        Some((status, ready)) => {
+            println!("  status: {}", status);
+            println!("  ready: {}", yes_no(ready));
+        }
+        None => {
+            println!("  status: stopped");
+            println!("  ready: no");
+        }
+    }
+    println!("  settings:");
+    println!("    enabled: {}", yes_no(config.enabled));
+    println!("    bootstrap: {}", yes_no(config.bootstrap));
+    match config.agent_port {
+        Some(port) => println!("    agent_port: {}", port),
+        None => println!("    agent_port: none"),
+    }
+    println!("    cidata: {}", present_absent(config.cidata_present));
+    println!("    shell_expected: {}", yes_no(config.shell_expected));
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn present_absent(value: bool) -> &'static str {
+    if value {
+        "present"
+    } else {
+        "absent"
+    }
+}
+
+fn process_status_label(status: MachineStatus) -> &'static str {
+    match status {
+        MachineStatus::Running { .. } => "running",
+        MachineStatus::Stopped => "stopped",
+    }
+}
+
+fn process_started_at(status: MachineStatus) -> Option<String> {
+    match status {
+        MachineStatus::Running { started_at } => Some(relative_time(started_at, now_unix())),
+        MachineStatus::Stopped => None,
+    }
+}
+
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_secs() as i64
+}
+
+fn relative_time(timestamp: i64, now: i64) -> String {
+    if timestamp == 0 {
+        return "N/A".to_string();
+    }
+
+    let seconds = (now - timestamp).max(0);
+
+    if seconds < 5 {
+        return "Less than a second ago".to_string();
+    }
+    if seconds < 60 {
+        return format!("{seconds} seconds ago");
+    }
+
+    let minutes = seconds / 60;
+    if minutes == 1 {
+        return "About a minute ago".to_string();
+    }
+    if minutes < 60 {
+        return format!("{minutes} minutes ago");
+    }
+
+    let hours = minutes / 60;
+    if hours == 1 {
+        return "About an hour ago".to_string();
+    }
+    if hours < 48 {
+        return format!("{hours} hours ago");
+    }
+
+    let days = hours / 24;
+    if days < 14 {
+        return format!("{days} days ago");
+    }
+
+    let weeks = days / 7;
+    if weeks < 8 {
+        return format!("{weeks} weeks ago");
+    }
+
+    let months = days / 30;
+    if months < 12 {
+        return format!("{months} months ago");
+    }
+
+    let years = days / 365;
+    format!("{years} years ago")
+}
+
 fn lifecycle_label(raw: i32) -> &'static str {
     match LifecycleState::try_from(raw).unwrap_or(LifecycleState::Unspecified) {
         LifecycleState::Unspecified => "unspecified",
@@ -81,5 +228,118 @@ fn lifecycle_label(raw: i32) -> &'static str {
         LifecycleState::Stopping => "stopping",
         LifecycleState::Stopped => "stopped",
         LifecycleState::Error => "error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        guest_config_status, now_unix, process_started_at, process_status_label, relative_time,
+    };
+    use bento_core::{
+        Architecture, Backend, Boot, GuestOs, Network, NetworkMode, Platform, Resources, Settings,
+        Storage, VmSpec,
+    };
+    use bento_libvm::MachineStatus;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn sample_spec(guest_enabled: bool, kernel_cmdline: Vec<String>, bootstrap: bool) -> VmSpec {
+        VmSpec {
+            version: 1,
+            name: "devbox".to_string(),
+            platform: Platform {
+                guest_os: GuestOs::Linux,
+                architecture: Architecture::Aarch64,
+                backend: Backend::Auto,
+            },
+            resources: Resources {
+                cpus: 2,
+                memory_mib: 1024,
+            },
+            boot: Boot {
+                kernel: None,
+                initramfs: None,
+                kernel_cmdline,
+                bootstrap: bootstrap.then_some(bento_core::Bootstrap { cloud_init: None }),
+            },
+            storage: Storage { disks: Vec::new() },
+            mounts: Vec::new(),
+            endpoints: Vec::new(),
+            network: Network {
+                mode: NetworkMode::User,
+            },
+            settings: Settings {
+                nested_virtualization: false,
+                rosetta: false,
+                guest_enabled,
+            },
+        }
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("bento-status-test-{name}-{now}"))
+    }
+
+    #[test]
+    fn guest_config_status_reports_disabled_guest_without_agent_port() {
+        let dir = temp_dir("disabled");
+        fs::create_dir_all(&dir).expect("create temp dir");
+
+        let config = guest_config_status(&sample_spec(false, Vec::new(), false), &dir);
+
+        assert!(!config.enabled);
+        assert_eq!(config.agent_port, None);
+        assert!(!config.cidata_present);
+        assert!(!config.shell_expected);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn guest_config_status_reports_agent_port_and_cidata_when_present() {
+        let dir = temp_dir("enabled");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        fs::write(dir.join("cidata.img"), b"cidata").expect("write cidata marker");
+
+        let config = guest_config_status(
+            &sample_spec(true, vec!["bento.guest.port=7001".to_string()], false),
+            &dir,
+        );
+
+        assert!(config.enabled);
+        assert_eq!(config.agent_port, Some(7001));
+        assert!(config.cidata_present);
+        assert!(config.shell_expected);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn relative_time_matches_list_style_formatting() {
+        let now = 1_000_000;
+
+        assert_eq!(relative_time(0, now), "N/A");
+        assert_eq!(relative_time(now, now), "Less than a second ago");
+        assert_eq!(relative_time(now - 30, now), "30 seconds ago");
+        assert_eq!(relative_time(now - 60, now), "About a minute ago");
+        assert_eq!(relative_time(now - 300, now), "5 minutes ago");
+        assert_eq!(relative_time(now - 3600, now), "About an hour ago");
+    }
+
+    #[test]
+    fn process_helpers_render_running_and_stopped_states() {
+        assert_eq!(process_status_label(MachineStatus::Stopped), "stopped");
+        assert_eq!(process_started_at(MachineStatus::Stopped), None);
+
+        let started = process_started_at(MachineStatus::Running {
+            started_at: now_unix() - 60,
+        })
+        .expect("running machine should have started_at");
+        assert!(!started.is_empty());
     }
 }

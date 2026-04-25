@@ -36,6 +36,8 @@ pub struct Cmd {
     pub empty_rootfs: Option<u64>,
     #[arg(long, help = "Enable nested virtualization for supported VZ guests")]
     pub nested_virtualization: bool,
+    #[arg(long, help = "Enable the Bento guest agent")]
+    pub agent: bool,
     #[arg(
         long,
         help = "Enable Rosetta for x86_64 Linux binaries in supported VZ guests"
@@ -51,8 +53,6 @@ pub struct Cmd {
     pub mounts: Vec<MountConfig>,
     #[arg(long, value_name = "MODE", value_parser = crate::commands::create::parse_network_mode)]
     pub network: Option<NetworkMode>,
-    #[arg(long = "profile", value_name = "PROFILE")]
-    pub profiles: Vec<String>,
 }
 
 impl Display for Cmd {
@@ -72,11 +72,11 @@ impl Cmd {
             rootfs: resolve_optional_path(self.rootfs.as_deref(), "rootfs")?,
             empty_rootfs_gb: self.empty_rootfs,
             nested_virtualization: self.nested_virtualization,
+            agent: self.agent,
             rosetta: self.rosetta,
             disks: resolve_existing_paths(&self.disks, "disk")?,
             mounts: self.mounts.iter().cloned().map(mount_to_spec).collect(),
             network: self.network.map(map_network_mode),
-            profiles: self.profiles.clone(),
         };
 
         libvm.create_raw(request)?;
@@ -119,7 +119,6 @@ fn map_network_mode(mode: NetworkMode) -> bento_core::NetworkMode {
         NetworkMode::VzNat => bento_core::NetworkMode::User,
         NetworkMode::None => bento_core::NetworkMode::None,
         NetworkMode::Bridged => bento_core::NetworkMode::Bridged,
-        NetworkMode::Cni => bento_core::NetworkMode::User,
     }
 }
 
