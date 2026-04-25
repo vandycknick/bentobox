@@ -5,8 +5,9 @@ use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bento_core::capabilities::DnsCapabilityConfig;
-use bento_core::services::{GuestForwardConfig, GuestRuntimeConfig, GuestUdsForwardConfig};
+use bento_core::agent::{
+    AgentConfig, AgentDnsConfig, AgentForwardConfig, AgentSshConfig, AgentUdsForwardConfig,
+};
 use bento_core::{resolve_mount_location, InstanceFile, NetworkMode as SpecNetworkMode, VmSpec};
 use bento_protocol::{agent_port_arg, parse_agent_port_args, KERNEL_PARAM_AGENT_PORT};
 use eyre::Context;
@@ -186,24 +187,24 @@ mod tests {
     }
 }
 
-fn resolve_guest_runtime_config(spec: &VmSpec) -> GuestRuntimeConfig {
-    GuestRuntimeConfig {
-        ssh: bento_core::capabilities::SshCapabilityConfig {
+fn resolve_guest_runtime_config(spec: &VmSpec) -> AgentConfig {
+    AgentConfig {
+        ssh: AgentSshConfig {
             enabled: spec.settings.guest_enabled,
         },
-        dns: DnsCapabilityConfig {
+        dns: AgentDnsConfig {
             enabled: spec.settings.guest_enabled,
-            ..DnsCapabilityConfig::default()
+            ..AgentDnsConfig::default()
         },
-        forward: GuestForwardConfig {
+        forward: AgentForwardConfig {
             enabled: false,
             port: 0,
-            uds: Vec::<GuestUdsForwardConfig>::new(),
+            uds: Vec::<AgentUdsForwardConfig>::new(),
         },
     }
 }
 
-fn requires_bootstrap(spec: &VmSpec, guest_runtime: &GuestRuntimeConfig) -> bool {
+fn requires_bootstrap(spec: &VmSpec, guest_runtime: &AgentConfig) -> bool {
     spec.boot.bootstrap.is_some()
         || guest_runtime.ssh.enabled
         || guest_runtime.dns.enabled
@@ -214,7 +215,7 @@ fn requires_bootstrap(spec: &VmSpec, guest_runtime: &GuestRuntimeConfig) -> bool
 fn rebuild_bootstrap(
     instance_dir: &Path,
     spec: &VmSpec,
-    guest_runtime: &GuestRuntimeConfig,
+    guest_runtime: &AgentConfig,
 ) -> eyre::Result<()> {
     let iso_path = instance_dir.join(InstanceFile::CidataDisk.as_str());
     if !requires_bootstrap(spec, guest_runtime) {
@@ -242,7 +243,7 @@ fn build_cidata_disk(
     spec: &VmSpec,
     host_user: &HostUser,
     ssh_public_key: &str,
-    guest_runtime: &GuestRuntimeConfig,
+    guest_runtime: &AgentConfig,
 ) -> eyre::Result<()> {
     let global_config = GlobalConfig::load()?;
     let agent_binary_path = ensure_guest_agent_binary(&global_config)?;
@@ -597,7 +598,7 @@ fn mounts(spec: &VmSpec) -> Vec<MonitorMount> {
         .collect()
 }
 
-fn render_agent_config(guest_runtime: &GuestRuntimeConfig) -> eyre::Result<String> {
+fn render_agent_config(guest_runtime: &AgentConfig) -> eyre::Result<String> {
     serde_yaml_ng::to_string(guest_runtime).context("serialize agent config")
 }
 

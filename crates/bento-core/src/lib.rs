@@ -1,9 +1,7 @@
-pub mod capabilities;
-pub mod forward;
+pub mod agent;
 mod instance_file;
 mod machine_id;
 mod mount_path;
-pub mod services;
 mod spec;
 
 pub use crate::instance_file::InstanceFile;

@@ -16,7 +16,7 @@ mod server;
 
 use std::io;
 
-use bento_core::services::RESERVED_SHELL_PORT;
+use bento_core::agent::RESERVED_SHELL_PORT;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
 

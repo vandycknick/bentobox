@@ -1,8 +1,6 @@
-use bento_core::services::GuestRuntimeConfig;
+use bento_core::agent::AgentConfig;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/bento/agent.yaml";
-
-pub type AgentConfig = GuestRuntimeConfig;
 
 pub fn load_agent_config() -> eyre::Result<AgentConfig> {
     let path = std::path::Path::new(DEFAULT_CONFIG_PATH);

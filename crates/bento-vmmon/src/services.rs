@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_core::services::RESERVED_SHELL_PORT;
+use bento_core::agent::RESERVED_SHELL_PORT;
 use bento_protocol::negotiate::Upgrade;
 use bento_protocol::v1::vm_monitor_service_server::{VmMonitorService, VmMonitorServiceServer};
 use bento_protocol::v1::{

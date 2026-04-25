@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use bento_core::services::GuestRuntimeConfig;
+use bento_core::agent::AgentConfig;
 use bento_protocol::v1::agent_service_server::{AgentService, AgentServiceServer};
 use bento_protocol::v1::{
     AgentPingRequest, AgentPingResponse, Empty, HealthRequest, HealthResponse, ServiceHealth,
@@ -59,11 +59,11 @@ impl AsyncWrite for ConnectedVsock {
 
 #[derive(Clone)]
 pub struct AgentContext {
-    config: Arc<GuestRuntimeConfig>,
+    config: Arc<AgentConfig>,
 }
 
 impl AgentContext {
-    pub fn new(config: GuestRuntimeConfig) -> Self {
+    pub fn new(config: AgentConfig) -> Self {
         Self {
             config: Arc::new(config),
         }
@@ -110,7 +110,7 @@ impl AgentService for AgentContext {
     }
 }
 
-async fn subsystem_health(config: &GuestRuntimeConfig) -> Vec<ServiceHealth> {
+async fn subsystem_health(config: &AgentConfig) -> Vec<ServiceHealth> {
     let mut statuses = Vec::new();
 
     if config.ssh.enabled {
@@ -135,7 +135,7 @@ async fn subsystem_health(config: &GuestRuntimeConfig) -> Vec<ServiceHealth> {
     statuses
 }
 
-async fn dns_health(config: &GuestRuntimeConfig) -> (bool, String, Vec<String>) {
+async fn dns_health(config: &AgentConfig) -> (bool, String, Vec<String>) {
     let listen = config.dns.listen_address;
     let configured = std::path::Path::new("/etc/resolv.conf").exists();
 
@@ -170,7 +170,7 @@ async fn probe_ssh() -> ServiceHealth {
     }
 }
 
-async fn probe_forward(config: &GuestRuntimeConfig) -> ServiceHealth {
+async fn probe_forward(config: &AgentConfig) -> ServiceHealth {
     let healthy = config.forward.port != 0;
     let (summary, problems) = if healthy {
         (

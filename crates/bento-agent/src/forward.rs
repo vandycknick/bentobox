@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 use std::io;
 use std::sync::Arc;
 
-use bento_core::forward::{ForwardApiRequest, ForwardApiResponse, ForwardStreamRequest};
-use bento_core::services::GuestForwardConfig;
+use bento_core::agent::{
+    AgentForwardConfig, ForwardApiRequest, ForwardApiResponse, ForwardStreamRequest,
+};
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
 use tokio_vsock::VsockStream;
@@ -13,12 +14,12 @@ const MIN_DISCOVER_PORT: u16 = 1025;
 
 #[derive(Clone)]
 pub struct ForwardService {
-    config: GuestForwardConfig,
+    config: AgentForwardConfig,
     baseline_ports: Arc<BTreeSet<u16>>,
 }
 
 impl ForwardService {
-    pub fn new(config: GuestForwardConfig) -> io::Result<Self> {
+    pub fn new(config: AgentForwardConfig) -> io::Result<Self> {
         let baseline_ports = discover_listening_tcp_ports()?;
         Ok(Self {
             config,
@@ -74,7 +75,7 @@ async fn handle_tcp(mut stream: VsockStream, guest_port: u16) -> io::Result<()> 
 
 async fn handle_uds(
     mut stream: VsockStream,
-    config: &GuestForwardConfig,
+    config: &AgentForwardConfig,
     guest_path: &str,
 ) -> io::Result<()> {
     if !config

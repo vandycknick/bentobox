@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_core::capabilities::{ForwardCapabilityConfig, TcpPortForwardConfig};
-use bento_core::forward::{ForwardApiRequest, ForwardApiResponse, ForwardStreamRequest};
+use bento_core::agent::{ForwardApiRequest, ForwardApiResponse, ForwardStreamRequest};
 use bento_plugins::Plugin;
+use serde::Deserialize;
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tokio::sync::oneshot;
@@ -15,6 +15,34 @@ use tracing::warn;
 
 const AUTO_DISCOVER_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_PREAMBLE_BYTES: usize = 4096;
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+struct ForwardPluginConfig {
+    #[serde(default)]
+    tcp: TcpForwardPluginConfig,
+    #[serde(default)]
+    uds: Vec<UdsForwardPluginConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+struct TcpForwardPluginConfig {
+    #[serde(default)]
+    auto_discover: bool,
+    #[serde(default)]
+    ports: Vec<TcpPortForwardPluginConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct TcpPortForwardPluginConfig {
+    guest_port: u16,
+    host_port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct UdsForwardPluginConfig {
+    guest_path: String,
+    host_path: String,
+}
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
@@ -29,7 +57,7 @@ async fn main() -> io::Result<()> {
 }
 
 async fn run(plugin: Arc<Plugin>) -> io::Result<()> {
-    let config: ForwardCapabilityConfig = plugin.config()?;
+    let config: ForwardPluginConfig = plugin.config()?;
 
     let static_tcp_count = config.tcp.ports.len();
     let uds_count = config.uds.len();
@@ -128,7 +156,7 @@ fn spawn_uds_listener(
 
 async fn run_auto_discover(
     plugin: Arc<Plugin>,
-    static_ports: Vec<TcpPortForwardConfig>,
+    static_ports: Vec<TcpPortForwardPluginConfig>,
 ) -> io::Result<()> {
     let static_host_ports: BTreeSet<u16> = static_ports
         .iter()

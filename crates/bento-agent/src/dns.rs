@@ -5,8 +5,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_core::capabilities::{
-    DnsCapabilityConfig, DnsRecordValue, DnsZone, DNS_RECORD_HOST_BENTO_INTERNAL,
+use bento_core::agent::{
+    AgentDnsConfig, AgentDnsRecord, AgentDnsRecordValue, AgentDnsZone,
+    DNS_RECORD_HOST_BENTO_INTERNAL,
 };
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
@@ -33,7 +34,7 @@ pub struct DnsServer {
 struct DnsState {
     upstream_servers: Vec<SocketAddr>,
     authoritative_zones: HashSet<String>,
-    records: HashMap<String, Vec<DnsRecordValue>>,
+    records: HashMap<String, Vec<AgentDnsRecordValue>>,
 }
 
 #[derive(Clone, Copy)]
@@ -43,7 +44,7 @@ enum Transport {
 }
 
 impl DnsServer {
-    pub async fn new(config: &DnsCapabilityConfig) -> eyre::Result<Self> {
+    pub async fn new(config: &AgentDnsConfig) -> eyre::Result<Self> {
         let discovery = discover_gateways().await?;
         let upstreams = select_upstreams(&discovery, &config.upstream_servers)?;
         let zones = with_builtin_bento_zone(config.zones.clone(), discovery.ipv4, discovery.ipv6);
@@ -63,7 +64,7 @@ impl DnsServer {
         self.state.write().await.upstream_servers = upstream_servers;
     }
 
-    pub async fn set_zones(&self, zones: Vec<DnsZone>) {
+    pub async fn set_zones(&self, zones: Vec<AgentDnsZone>) {
         let mut state = self.state.write().await;
         state.authoritative_zones.clear();
         state.records.clear();
@@ -207,9 +208,9 @@ fn answer_local_query(
 // record is a CNAME, include it and keep following the target through Bento's
 // local records so zone-backed aliases still resolve fully.
 fn expand_local_records(
-    records_by_name: &HashMap<String, Vec<DnsRecordValue>>,
+    records_by_name: &HashMap<String, Vec<AgentDnsRecordValue>>,
     name: &str,
-    records: &[DnsRecordValue],
+    records: &[AgentDnsRecordValue],
     qtype: RecordType,
     visited: &mut HashSet<String>,
 ) -> eyre::Result<Vec<Record>> {
@@ -242,18 +243,21 @@ fn expand_local_records(
     Ok(answers)
 }
 
-fn should_include_record(value: &DnsRecordValue, qtype: RecordType) -> bool {
+fn should_include_record(value: &AgentDnsRecordValue, qtype: RecordType) -> bool {
     record_type(value) == qtype
-        || matches!(value, DnsRecordValue::Cname(_)) && qtype != RecordType::CNAME
+        || matches!(value, AgentDnsRecordValue::Cname(_)) && qtype != RecordType::CNAME
 }
 
-fn cname_target_for_query<'a>(value: &'a DnsRecordValue, qtype: RecordType) -> Option<&'a str> {
+fn cname_target_for_query<'a>(
+    value: &'a AgentDnsRecordValue,
+    qtype: RecordType,
+) -> Option<&'a str> {
     if qtype == RecordType::CNAME {
         return None;
     }
 
     match value {
-        DnsRecordValue::Cname(target) => Some(target),
+        AgentDnsRecordValue::Cname(target) => Some(target),
         _ => None,
     }
 }
@@ -270,13 +274,13 @@ fn build_response(request: &Message, code: ResponseCode, answers: Vec<Record>) -
     response.to_vec().unwrap_or_default()
 }
 
-fn record_from_value(name: &str, value: &DnsRecordValue) -> eyre::Result<Record> {
+fn record_from_value(name: &str, value: &AgentDnsRecordValue) -> eyre::Result<Record> {
     let record_name = Name::from_ascii(format!("{}.", normalize_name(name)))?;
     let mut record = Record::with(record_name, record_type(value), 5);
     let rdata = match value {
-        DnsRecordValue::A(ip) => RData::A((*ip).into()),
-        DnsRecordValue::Aaaa(ip) => RData::AAAA((*ip).into()),
-        DnsRecordValue::Cname(target) => {
+        AgentDnsRecordValue::A(ip) => RData::A((*ip).into()),
+        AgentDnsRecordValue::Aaaa(ip) => RData::AAAA((*ip).into()),
+        AgentDnsRecordValue::Cname(target) => {
             let target = Name::from_ascii(format!("{}.", normalize_name(target)))?;
             RData::CNAME(hickory_proto::rr::rdata::CNAME(target))
         }
@@ -285,11 +289,11 @@ fn record_from_value(name: &str, value: &DnsRecordValue) -> eyre::Result<Record>
     Ok(record)
 }
 
-fn record_type(value: &DnsRecordValue) -> RecordType {
+fn record_type(value: &AgentDnsRecordValue) -> RecordType {
     match value {
-        DnsRecordValue::A(_) => RecordType::A,
-        DnsRecordValue::Aaaa(_) => RecordType::AAAA,
-        DnsRecordValue::Cname(_) => RecordType::CNAME,
+        AgentDnsRecordValue::A(_) => RecordType::A,
+        AgentDnsRecordValue::Aaaa(_) => RecordType::AAAA,
+        AgentDnsRecordValue::Cname(_) => RecordType::CNAME,
     }
 }
 
@@ -358,10 +362,10 @@ fn normalize_record_name(name: &str, zone: &str) -> String {
 }
 
 fn with_builtin_bento_zone(
-    mut zones: Vec<DnsZone>,
+    mut zones: Vec<AgentDnsZone>,
     ipv4: Option<Ipv4Addr>,
     ipv6: Option<Ipv6Addr>,
-) -> Vec<DnsZone> {
+) -> Vec<AgentDnsZone> {
     let zone = ensure_bento_zone(&mut zones);
     zone.authoritative = true;
     zone.records.retain(|record| {
@@ -371,27 +375,30 @@ fn with_builtin_bento_zone(
             return true;
         }
 
-        !matches!(record.value, DnsRecordValue::A(_) | DnsRecordValue::Aaaa(_))
+        !matches!(
+            record.value,
+            AgentDnsRecordValue::A(_) | AgentDnsRecordValue::Aaaa(_)
+        )
     });
 
     if let Some(ip) = ipv4 {
-        zone.records.push(bento_core::capabilities::DnsRecord {
+        zone.records.push(AgentDnsRecord {
             name: String::from("host"),
-            value: DnsRecordValue::A(ip),
+            value: AgentDnsRecordValue::A(ip),
         });
     }
 
     if let Some(ip) = ipv6 {
-        zone.records.push(bento_core::capabilities::DnsRecord {
+        zone.records.push(AgentDnsRecord {
             name: String::from("host"),
-            value: DnsRecordValue::Aaaa(ip),
+            value: AgentDnsRecordValue::Aaaa(ip),
         });
     }
 
     zones
 }
 
-fn ensure_bento_zone(zones: &mut Vec<DnsZone>) -> &mut DnsZone {
+fn ensure_bento_zone(zones: &mut Vec<AgentDnsZone>) -> &mut AgentDnsZone {
     if let Some(index) = zones
         .iter()
         .position(|zone| normalize_name(&zone.domain) == "bento.internal")
@@ -399,7 +406,7 @@ fn ensure_bento_zone(zones: &mut Vec<DnsZone>) -> &mut DnsZone {
         return &mut zones[index];
     }
 
-    zones.push(DnsZone {
+    zones.push(AgentDnsZone {
         domain: String::from("bento.internal"),
         authoritative: true,
         records: Vec::new(),
@@ -454,7 +461,6 @@ fn select_upstreams(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bento_core::capabilities::{DnsRecord, DnsZone};
 
     #[test]
     fn write_resolv_conf_replaces_existing_file_with_symlink() {
@@ -483,20 +489,20 @@ mod tests {
         };
         server
             .set_zones(vec![
-                DnsZone {
+                AgentDnsZone {
                     domain: String::from("docker.internal"),
                     authoritative: false,
-                    records: vec![DnsRecord {
+                    records: vec![AgentDnsRecord {
                         name: String::from("host"),
-                        value: DnsRecordValue::Cname(String::from("host.bento.internal")),
+                        value: AgentDnsRecordValue::Cname(String::from("host.bento.internal")),
                     }],
                 },
-                DnsZone {
+                AgentDnsZone {
                     domain: String::from("bento.internal"),
                     authoritative: true,
-                    records: vec![DnsRecord {
+                    records: vec![AgentDnsRecord {
                         name: String::from("host.bento.internal"),
-                        value: DnsRecordValue::A(Ipv4Addr::new(192, 168, 64, 1)),
+                        value: AgentDnsRecordValue::A(Ipv4Addr::new(192, 168, 64, 1)),
                     }],
                 },
             ])
@@ -520,7 +526,7 @@ mod tests {
             state: Arc::new(RwLock::new(DnsState::default())),
         };
         server
-            .set_zones(vec![DnsZone {
+            .set_zones(vec![AgentDnsZone {
                 domain: String::from("bento.internal"),
                 authoritative: true,
                 records: Vec::new(),
@@ -541,12 +547,12 @@ mod tests {
     #[test]
     fn host_record_injection_overrides_bento_internal() {
         let zones = with_builtin_bento_zone(
-            vec![DnsZone {
+            vec![AgentDnsZone {
                 domain: String::from("bento.internal"),
                 authoritative: false,
-                records: vec![DnsRecord {
+                records: vec![AgentDnsRecord {
                     name: String::from("host.bento.internal"),
-                    value: DnsRecordValue::A(Ipv4Addr::new(10, 0, 0, 1)),
+                    value: AgentDnsRecordValue::A(Ipv4Addr::new(10, 0, 0, 1)),
                 }],
             }],
             Some(Ipv4Addr::new(192, 168, 64, 1)),
@@ -559,7 +565,7 @@ mod tests {
         assert_eq!(zones[0].records[0].name, "host");
         assert_eq!(
             zones[0].records[0].value,
-            DnsRecordValue::A(Ipv4Addr::new(192, 168, 64, 1))
+            AgentDnsRecordValue::A(Ipv4Addr::new(192, 168, 64, 1))
         );
     }
 
