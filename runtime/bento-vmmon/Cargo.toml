@@ -8,9 +8,9 @@ name = "vmmon"
 path = "src/main.rs"
 
 [dependencies]
-bento-core = { path = "../bento-core" }
-bento-vmm = { path = "../bento-vmm" }
-bento-protocol = { path = "../bento-protocol" }
+bento-core = { path = "../../common/bento-core" }
+bento-vmm = { path = "../../virt/bento-vmm" }
+bento-protocol = { path = "../../wire/bento-protocol" }
 clap = { version = "4.5.31", features = ["derive"] }
 eyre = "0.6.12"
 futures = "0.3.31"

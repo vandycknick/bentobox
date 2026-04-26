@@ -25,23 +25,25 @@
             inherit system;
             overlays = [ (import rust-overlay) ];
           };
-          bentoctlToml = fromTOML (builtins.readFile ./crates/bentoctl/Cargo.toml);
-          pname = bentoctlToml.package.name;
+          bentoctlToml = fromTOML (builtins.readFile ./app/bentoctl/Cargo.toml);
           version = bentoctlToml.package.version or "0.1.0";
         in
         {
           bentoctl = pkgs.rustPlatform.buildRustPackage {
-            inherit pname version;
+            pname = "bentobox";
+            inherit version;
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [
               "-p"
               "bentoctl"
+              "-p"
+              "bento-vmmon"
             ];
 
             postFixup = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
-              /usr/bin/codesign -f --entitlements ${./app.entitlements} -s - "$out/bin/bentoctl"
-              /usr/bin/codesign --verify --verbose=4 "$out/bin/bentoctl"
+              /usr/bin/codesign -f --entitlements ${./runtime/bento-vmmon/vmmon.entitlements} -s - "$out/bin/vmmon"
+              /usr/bin/codesign --verify --verbose=4 "$out/bin/vmmon"
             '';
           };
 

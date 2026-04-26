@@ -2,6 +2,19 @@ GUEST_TARGET := aarch64-unknown-linux-musl
 GUEST_BIN := $(CURDIR)/target/$(GUEST_TARGET)/release/bento-agent
 BENTO_CONFIG := $(HOME)/.config/bento/config.yaml
 ARCH ?= arm64
+PROFILE ?= debug
+
+ifeq ($(PROFILE),release)
+CARGO_PROFILE_FLAGS := --release
+TARGET_PROFILE_DIR := release
+else ifeq ($(PROFILE),debug)
+CARGO_PROFILE_FLAGS :=
+TARGET_PROFILE_DIR := debug
+else
+$(error PROFILE must be debug or release)
+endif
+
+VMMON_BIN := target/$(TARGET_PROFILE_DIR)/vmmon
 
 .PHONY: build-guest-agent
 build-guest-agent:
@@ -9,6 +22,15 @@ build-guest-agent:
 	mkdir -p "$(HOME)/.config/bento"
 	printf "guest:\n  agent_binary: \"%s\"\n" "$(GUEST_BIN)" > "$(BENTO_CONFIG)"
 	@echo "Updated $(BENTO_CONFIG) -> $(GUEST_BIN)"
+
+.PHONY: build
+build: vmmon
+	cargo build $(CARGO_PROFILE_FLAGS) -p bentoctl
+
+.PHONY: vmmon
+vmmon:
+	cargo build $(CARGO_PROFILE_FLAGS) -p bento-vmmon
+	runtime/bento-vmmon/scripts/sign-vmmon "$(VMMON_BIN)"
 
 .PHONY: kernel
 kernel:
@@ -41,26 +63,3 @@ rootfs:
 	@docker run -v $(shell pwd)/.tmp:/output \
 			busybox-builder \
 			cp /build/busybox /output
-
-.PHONY: debug
-debug:
-	cargo build -p bentoctl -p bento-vmmon
-	codesign -f --entitlement ./app.entitlements -s - target/debug/bentoctl
-	codesign -f --entitlement ./app.entitlements -s - target/debug/vmmon
-	./target/debug/bentoctl create macos:15.0.1 -a arm64
-	# truncate -s 34g ./disk.img
-	# truncate -s 34m ./aux.img
-
-.PHONY: debug-start
-debug-start:
-	cargo build -p bentoctl -p bento-vmmon
-	codesign -f --entitlement ./app.entitlements -s - target/debug/bentoctl
-	codesign -f --entitlement ./app.entitlements -s - target/debug/vmmon
-	./target/debug/bentoctl start macos
-
-
-.PHONY: linux
-linux:
-	cargo build --bin linux
-	codesign -f --entitlement ./app.entitlements -s - target/debug/linux
-	RUST_BACKTRACE=full ./target/debug/linux

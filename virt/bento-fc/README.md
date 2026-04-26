@@ -104,7 +104,7 @@ The generated API still lives under `bento_fc::api`, but the primary crate surfa
 ## Regenerating the API
 
 ```bash
-python3 crates/bento-fc/spec/convert_openapi.py
+python3 virt/bento-fc/spec/convert_openapi.py
 cargo build -p bento-fc
 ```
 

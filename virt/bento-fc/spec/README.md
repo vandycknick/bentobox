@@ -10,7 +10,7 @@ This directory vendors the Firecracker API description used by `bento-fc`.
 ## Refreshing the specs
 
 1. Replace `firecracker-swagger.yaml` with the upstream version you want to pin.
-2. Run `python3 crates/bento-fc/spec/convert_openapi.py`.
+2. Run `python3 virt/bento-fc/spec/convert_openapi.py`.
 3. Run `cargo build -p bento-fc`.
 
 ## Notes

@@ -1,4 +1,16 @@
 [workspace]
-members = ["crates/bento-core", "crates/bento-libvm", "crates/bentoctl", "crates/bento-agent", "crates/bento-protocol", "crates/bento-vmmon", "crates/bento-vmm", "crates/bento-vz", "crates/bento-fc", "crates/bento-ch", "crates/bento-plugins"]
-default-members = ["crates/bentoctl", "crates/bento-vmmon"]
+members = [
+    "app/bentoctl",
+    "common/bento-core",
+    "guest/bento-agent",
+    "runtime/bento-libvm",
+    "runtime/bento-plugins",
+    "runtime/bento-vmmon",
+    "virt/bento-ch",
+    "virt/bento-fc",
+    "virt/bento-vmm",
+    "virt/bento-vz",
+    "wire/bento-protocol",
+]
+default-members = ["app/bentoctl", "runtime/bento-vmmon"]
 resolver = "2"

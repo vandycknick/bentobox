@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bento-protocol = { path = "../bento-protocol" }
-bento-core = { path = "../bento-core" }
+bento-protocol = { path = "../../wire/bento-protocol" }
+bento-core = { path = "../../common/bento-core" }
 chrono = "0.4.43"
 eyre = "0.6.12"
 fatfs = "0.3.6"

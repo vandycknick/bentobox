@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 bento-ch = { path = "../bento-ch" }
 bento-fc = { path = "../bento-fc" }
-bento-protocol = { path = "../bento-protocol" }
+bento-protocol = { path = "../../wire/bento-protocol" }
 crossbeam = "0.8.4"
 nix = { version = "0.31.1", features = ["fs", "process", "signal", "socket"] }
 thiserror = "2.0.18"
