@@ -12,7 +12,7 @@ use bento_core::{resolve_mount_location, InstanceFile, NetworkMode as SpecNetwor
 use bento_protocol::{agent_port_arg, parse_agent_port_args, KERNEL_PARAM_AGENT_PORT};
 use eyre::Context;
 use fatfs::{format_volume, FileSystem, FormatVolumeOptions, FsOptions};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::global_config::{ensure_guest_agent_binary, GlobalConfig};
 use crate::host_user::{self, HostUser};
@@ -27,9 +27,21 @@ const GUEST_BOOTSTRAP_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-boot
 const GUEST_INSTALL_SCRIPT_CONTENT: &str = include_str!("../scripts/guest-install.sh");
 const TASK_REGISTER_AGENT_CONTENT: &str = include_str!("../scripts/tasks/10-register-agent.sh");
 const TASK_SETUP_ROSETTA_CONTENT: &str = include_str!("../scripts/tasks/20-setup-rosetta.sh");
+const FORWARD_ENDPOINT_NAME: &str = "forward";
 const CIDATA_VOLUME_LABEL: &str = "CIDATA";
 const CIDATA_MIN_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 const CIDATA_SIZE_OVERHEAD_BYTES: u64 = 4 * 1024 * 1024;
+
+#[derive(Debug, Deserialize, Default)]
+struct ForwardPluginAgentConfig {
+    #[serde(default)]
+    uds: Vec<ForwardPluginUdsConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForwardPluginUdsConfig {
+    guest_path: String,
+}
 
 #[derive(Debug, Clone)]
 struct CidataEntry {
@@ -47,7 +59,7 @@ struct MonitorMount {
 pub(crate) fn prepare_instance_runtime(instance_dir: &Path) -> eyre::Result<()> {
     let mut spec = read_vm_spec_from_dir(instance_dir)?;
     reconcile_agent_kernel_cmdline(&mut spec);
-    let guest_runtime = resolve_guest_runtime_config(&spec);
+    let guest_runtime = resolve_guest_runtime_config(&spec)?;
 
     write_vm_spec_to_dir(instance_dir, &spec)?;
     rebuild_bootstrap(instance_dir, &spec, &guest_runtime)?;
@@ -86,9 +98,12 @@ fn reconcile_agent_kernel_cmdline(spec: &mut VmSpec) {
 mod tests {
     use super::{reconcile_agent_kernel_cmdline, resolve_guest_runtime_config};
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, Network, NetworkMode, Platform, Resources, Settings,
-        Storage, VmSpec,
+        Architecture, Backend, Boot, EndpointMode, EndpointSpec, GuestOs, LifecycleSpec, Network,
+        NetworkMode, Platform, PluginSpec, Resources, Settings, Storage, VmSpec,
     };
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
 
     fn sample_spec(kernel_cmdline: Vec<String>, guest_enabled: bool) -> VmSpec {
         VmSpec {
@@ -120,6 +135,22 @@ mod tests {
                 rosetta: false,
                 guest_enabled,
             },
+        }
+    }
+
+    fn forward_endpoint(port: u32, config: Option<serde_json::Value>) -> EndpointSpec {
+        EndpointSpec {
+            name: "forward".to_string(),
+            port,
+            mode: EndpointMode::Connect,
+            plugin: PluginSpec {
+                command: PathBuf::from("/usr/local/bin/forward"),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                working_dir: None,
+                config,
+            },
+            lifecycle: LifecycleSpec::default(),
         }
     }
 
@@ -170,7 +201,8 @@ mod tests {
 
     #[test]
     fn guest_runtime_defaults_to_ssh_and_dns_when_guest_is_enabled() {
-        let runtime = resolve_guest_runtime_config(&sample_spec(Vec::new(), true));
+        let runtime = resolve_guest_runtime_config(&sample_spec(Vec::new(), true))
+            .expect("runtime config should resolve");
 
         assert!(runtime.ssh.enabled);
         assert!(runtime.dns.enabled);
@@ -179,16 +211,73 @@ mod tests {
 
     #[test]
     fn guest_runtime_disables_ssh_dns_and_forward_when_guest_is_disabled() {
-        let runtime = resolve_guest_runtime_config(&sample_spec(Vec::new(), false));
+        let runtime = resolve_guest_runtime_config(&sample_spec(Vec::new(), false))
+            .expect("runtime config should resolve");
 
         assert!(!runtime.ssh.enabled);
         assert!(!runtime.dns.enabled);
         assert!(!runtime.forward.enabled);
     }
+
+    #[test]
+    fn guest_runtime_enables_forward_from_named_endpoint() {
+        let mut spec = sample_spec(Vec::new(), true);
+        spec.endpoints.push(forward_endpoint(4100, None));
+
+        let runtime = resolve_guest_runtime_config(&spec).expect("runtime config should resolve");
+
+        assert!(runtime.forward.enabled);
+        assert_eq!(runtime.forward.port, 4100);
+        assert!(runtime.forward.uds.is_empty());
+    }
+
+    #[test]
+    fn guest_runtime_injects_forward_uds_guest_paths() {
+        let mut spec = sample_spec(Vec::new(), true);
+        spec.endpoints.push(forward_endpoint(
+            4100,
+            Some(json!({
+                "tcp": {
+                    "auto_discover": true,
+                    "ports": [
+                        { "guest_port": 8080, "host_port": 8080 }
+                    ]
+                },
+                "uds": [
+                    { "guest_path": "/var/run/docker.sock", "host_path": "docker.sock" },
+                    { "guest_path": "/tmp/app.sock", "host_path": "app.sock" }
+                ]
+            })),
+        ));
+
+        let runtime = resolve_guest_runtime_config(&spec).expect("runtime config should resolve");
+
+        assert_eq!(
+            runtime
+                .forward
+                .uds
+                .iter()
+                .map(|uds| uds.guest_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/var/run/docker.sock", "/tmp/app.sock"]
+        );
+    }
+
+    #[test]
+    fn guest_runtime_ignores_forward_endpoint_when_guest_is_disabled() {
+        let mut spec = sample_spec(Vec::new(), false);
+        spec.endpoints.push(forward_endpoint(4100, None));
+
+        let runtime = resolve_guest_runtime_config(&spec).expect("runtime config should resolve");
+
+        assert!(!runtime.forward.enabled);
+        assert_eq!(runtime.forward.port, 0);
+        assert!(runtime.forward.uds.is_empty());
+    }
 }
 
-fn resolve_guest_runtime_config(spec: &VmSpec) -> AgentConfig {
-    AgentConfig {
+fn resolve_guest_runtime_config(spec: &VmSpec) -> eyre::Result<AgentConfig> {
+    Ok(AgentConfig {
         ssh: AgentSshConfig {
             enabled: spec.settings.guest_enabled,
         },
@@ -196,12 +285,43 @@ fn resolve_guest_runtime_config(spec: &VmSpec) -> AgentConfig {
             enabled: spec.settings.guest_enabled,
             ..AgentDnsConfig::default()
         },
-        forward: AgentForwardConfig {
-            enabled: false,
-            port: 0,
-            uds: Vec::<AgentUdsForwardConfig>::new(),
-        },
+        forward: resolve_forward_runtime_config(spec)?,
+    })
+}
+
+fn resolve_forward_runtime_config(spec: &VmSpec) -> eyre::Result<AgentForwardConfig> {
+    if !spec.settings.guest_enabled {
+        return Ok(AgentForwardConfig::default());
     }
+
+    let Some(endpoint) = spec
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.name == FORWARD_ENDPOINT_NAME)
+    else {
+        return Ok(AgentForwardConfig::default());
+    };
+
+    let config = endpoint
+        .plugin
+        .config
+        .clone()
+        .map(serde_json::from_value::<ForwardPluginAgentConfig>)
+        .transpose()
+        .context("decode forward endpoint plugin config")?
+        .unwrap_or_default();
+
+    Ok(AgentForwardConfig {
+        enabled: true,
+        port: endpoint.port,
+        uds: config
+            .uds
+            .into_iter()
+            .map(|uds| AgentUdsForwardConfig {
+                guest_path: uds.guest_path,
+            })
+            .collect(),
+    })
 }
 
 fn requires_bootstrap(spec: &VmSpec, guest_runtime: &AgentConfig) -> bool {
