@@ -386,10 +386,9 @@ This file tracks kernel-side config changes identified while debugging package u
 
 ### What this enables
 
-These are the important guest kernel bits for Apple Silicon requestStop() support.
-Userspace side
-You need something in userspace to react to the power-button event and actually call shutdown.
-The wiki specifically suggests:
+These are the guest-kernel pieces needed for Apple Silicon `requestStop()` support.
+
+Kernel support only gets you the event. You still need userspace to react to the virtual power button and actually shut the machine down. The VZ Linux wiki suggests `acpid` with a simple handler like this:
 
 - acpid
   with a handler like:
@@ -404,3 +403,57 @@ The wiki specifically suggests:
 - For Bento's current Firecracker arm64 flow, `CONFIG_SERIAL_OF_PLATFORM=y` was the key missing option that made the initramfs shell and userspace console behavior start working correctly.
 - The matching kernel boot args should still include `console=ttyS0`, and on arm64 Firecracker it is worth considering `keep_bootcon` during early bring-up.
 - These options are not Firecracker-exclusive in a strict kernel sense, but they are part of the practical minimum for reliable Firecracker serial-console behavior on arm64.
+
+## 16) Idle guest CPU behavior and host CPU usage
+
+### Required config changes
+
+- `CONFIG_TICK_ONESHOT=y`
+- `CONFIG_NO_HZ_COMMON=y`
+- `CONFIG_NO_HZ_FULL=y`
+- `CONFIG_NO_HZ=y`
+- `CONFIG_HIGH_RES_TIMERS=y`
+- `CONFIG_CPU_IDLE=y`
+- At least one CPU idle governor enabled:
+    - `CONFIG_CPU_IDLE_GOV_LADDER=y`
+    - or `CONFIG_CPU_IDLE_GOV_MENU=y`
+    - or `CONFIG_CPU_IDLE_GOV_TEO=y`
+
+### Optional but worth testing on arm64 VZ guests
+
+- `CONFIG_ARM_PSCI_CPUIDLE=y`
+
+### What this enables
+
+- Suppression of periodic scheduler ticks while guest CPUs are idle.
+- Better odds that the guest can stay asleep long enough for the host `Virtualization.framework` process to stop getting poked for pointless timer housekeeping.
+- A path to stricter adaptive-ticks CPU isolation later if a workload actually benefits from it.
+
+### Why this is needed
+
+- In practice, a Linux guest that keeps taking periodic scheduler ticks while otherwise idle can still make the host VM process burn a surprising amount of CPU.
+- Tickless idle is the first obvious lever for reducing host-side CPU use when the guest is doing nothing useful.
+- The upstream kernel docs explicitly call out tickless idle as important for highly virtualized systems because otherwise guest timer interrupts keep firing when the guest should be asleep.
+
+### `NO_HZ_FULL` versus idle-only tickless
+
+- `CONFIG_NO_HZ_IDLE` is the usual "stop scheduler ticks on idle CPUs" mode.
+- `CONFIG_NO_HZ_FULL` is the stricter adaptive-ticks configuration intended for CPUs that should avoid scheduler ticks even while running a single task.
+- For Bento's arm64 baseline, keeping `CONFIG_NO_HZ_FULL=y` is a reasonable choice because it still gives the ordinary idle tick suppression behavior, while leaving the door open for stricter tuning later.
+- In other words, without a `nohz_full=` CPU list on the kernel command line, `CONFIG_NO_HZ_FULL=y` mostly behaves like ordinary idle tickless operation for this VM use case.
+- Once `nohz_full=` is provided, the selected CPUs become adaptive-ticks CPUs and the extra housekeeping and RCU constraints start to matter.
+- That makes `NO_HZ_FULL` a decent baseline if you want room to experiment later, not because every dev VM wants full adaptive-ticks isolation on day one.
+
+### Boot parameters for stricter isolation later
+
+- `nohz_full=<cpu-list>` selects adaptive-ticks CPUs.
+- `rcu_nocbs=<cpu-list>` offloads RCU callbacks away from those CPUs so RCU does not keep waking them.
+- Leave at least one housekeeping CPU outside that set. In practice, keeping CPU 0 out of it is the usual move.
+- Example:
+
+```text
+nohz_full=1-N rcu_nocbs=1-N
+```
+
+- That example means "leave CPU 0 for housekeeping, try to keep the rest quieter".
+- This is useful for dedicated low-jitter or pinned workloads. It is not a great default for ordinary devbox-style guests.
