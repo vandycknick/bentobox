@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LIBKRUN_VERSION="${LIBKRUN_VERSION:-1.18.0}"
+LIBKRUNFW_VERSION="${LIBKRUNFW_VERSION:-5.2.1}"
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+TARGET_TRIPLE="${TARGET_TRIPLE:-$(rustc -vV | awk '/host:/ { print $2 }')}"
+BUILD_ROOT="${KRUN_BUILD_DIR:-$ROOT_DIR/target/build/libkrun/$TARGET_TRIPLE}"
+PREFIX="${KRUN_PREFIX_DIR:-$BUILD_ROOT/prefix}"
+OUT_DIR="${KRUN_DEPS_DIR:-$ROOT_DIR/target/libs/krun/$TARGET_TRIPLE}"
+
+require_tool() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'missing required tool: %s\nRun this from `nix develop` so the flake-provided krun toolchain is active.\n' "$1" >&2
+    exit 1
+  fi
+}
+
+require_common_tools() {
+  require_tool curl
+  require_tool git
+  require_tool make
+  require_tool pkg-config
+  require_tool rustc
+}
+
+jobs() {
+  if command -v nproc >/dev/null 2>&1; then
+    nproc
+  elif command -v sysctl >/dev/null 2>&1; then
+    sysctl -n hw.ncpu
+  else
+    printf '1\n'
+  fi
+}
+
+clone_libkrun() {
+  local dest="$BUILD_ROOT/libkrun-src"
+  if [ ! -d "$dest/.git" ]; then
+    git clone --depth 1 --branch "v$LIBKRUN_VERSION" --recurse-submodules \
+      https://github.com/containers/libkrun.git "$dest"
+  else
+    git -C "$dest" fetch --depth 1 origin "refs/tags/v$LIBKRUN_VERSION:refs/tags/v$LIBKRUN_VERSION"
+    git -C "$dest" checkout --detach "v$LIBKRUN_VERSION"
+    git -C "$dest" submodule update --init --recursive --depth 1
+  fi
+}
+
+prepare_dirs() {
+  mkdir -p "$BUILD_ROOT" "$PREFIX" "$OUT_DIR"
+}
+
+build_linux() {
+  require_tool patchelf
+  require_tool clang
+
+  local arch
+  arch="$(uname -m)"
+  local fw_url="https://github.com/containers/libkrunfw/releases/download/v$LIBKRUNFW_VERSION/libkrunfw-$arch.tgz"
+
+  printf 'Downloading prebuilt libkrunfw %s for %s\n' "$LIBKRUNFW_VERSION" "$arch"
+  curl -fsSL "$fw_url" | tar xz -C "$PREFIX"
+
+  clone_libkrun
+  export PKG_CONFIG_PATH="$PREFIX/lib64/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  make -C "$BUILD_ROOT/libkrun-src" -j"$(jobs)" NET=1 BLK=1
+  make -C "$BUILD_ROOT/libkrun-src" PREFIX="$PREFIX" install
+
+  cp -L "$PREFIX/lib64/libkrun.so" "$OUT_DIR/libkrun.so"
+  cp -L "$PREFIX/lib64/libkrunfw.so" "$OUT_DIR/libkrunfw.so"
+  patchelf --set-soname libkrun.so "$OUT_DIR/libkrun.so"
+  patchelf --set-soname libkrunfw.so "$OUT_DIR/libkrunfw.so"
+}
+
+build_macos() {
+  require_tool clang
+  require_tool docker
+  require_tool install_name_tool
+  require_tool codesign
+
+  if [ "$(uname -m)" != "arm64" ]; then
+    printf 'macOS libkrun builds are only supported on arm64 hosts.\n' >&2
+    exit 1
+  fi
+
+  local fw_archive="$BUILD_ROOT/libkrunfw-prebuilt-aarch64.tgz"
+  local fw_src="$BUILD_ROOT/libkrunfw-prebuilt"
+  local fw_url="https://github.com/containers/libkrunfw/releases/download/v$LIBKRUNFW_VERSION/libkrunfw-prebuilt-aarch64.tgz"
+
+  # macOS cannot practically build libkrunfw's embedded Linux kernel payload
+  # from scratch. Upstream publishes a prebuilt kernel-payload source bundle
+  # generated on Linux; this step only compiles that bundle into a local dylib.
+  printf 'Downloading prebuilt libkrunfw kernel-payload source %s\n' "$LIBKRUNFW_VERSION"
+  curl -fsSL "$fw_url" -o "$fw_archive"
+  rm -rf "$fw_src"
+  mkdir -p "$fw_src"
+  tar xzf "$fw_archive" -C "$fw_src"
+
+  make -C "$fw_src/libkrunfw" -j"$(jobs)"
+  make -C "$fw_src/libkrunfw" PREFIX="$PREFIX" install
+
+  clone_libkrun
+  export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
+  build_macos_libkrun_init_with_docker
+
+  # The upstream Makefile tries to cross-compile init/init on macOS when
+  # SYSROOT_LINUX is unset. It also currently trips over a no-op Darwin
+  # `mv target/release/libkrun.dylib target/release/libkrun.dylib`. Build the
+  # Linux ELF in Docker, then build/copy the macOS dylib directly with Cargo.
+  KRUN_INIT_BINARY_PATH="$BUILD_ROOT/libkrun-src/init/init" \
+    cargo build --manifest-path "$BUILD_ROOT/libkrun-src/Cargo.toml" --release --features blk --features net
+
+  local libkrun_dylib="$BUILD_ROOT/libkrun-src/target/release/libkrun.dylib"
+  if [ ! -f "$libkrun_dylib" ]; then
+    printf 'libkrun build did not produce %s\n' "$libkrun_dylib" >&2
+    exit 1
+  fi
+
+  cp -L "$libkrun_dylib" "$OUT_DIR/libkrun.dylib"
+  cp -L "$PREFIX/lib/libkrunfw.dylib" "$OUT_DIR/libkrunfw.dylib"
+
+  install_name_tool -id "@rpath/libkrun.dylib" "$OUT_DIR/libkrun.dylib"
+  install_name_tool -id "@rpath/libkrunfw.dylib" "$OUT_DIR/libkrunfw.dylib"
+
+  local old_fw_ref
+  old_fw_ref="$(otool -L "$OUT_DIR/libkrun.dylib" | awk '/libkrunfw/ { print $1; exit }')"
+  if [ -n "$old_fw_ref" ]; then
+    install_name_tool -change "$old_fw_ref" "@rpath/libkrunfw.dylib" "$OUT_DIR/libkrun.dylib"
+  fi
+
+  codesign -s - --force "$OUT_DIR/libkrun.dylib"
+  codesign -s - --force "$OUT_DIR/libkrunfw.dylib"
+}
+
+build_macos_libkrun_init_with_docker() {
+  local source_dir="$BUILD_ROOT/libkrun-src"
+  local image="${KRUN_INIT_BUILDER_IMAGE:-fedora:latest}"
+
+  printf 'Building libkrun init/init Linux ELF in Docker image %s\n' "$image"
+  docker run --rm --platform linux/arm64 \
+    -v "$source_dir:/work" \
+    -w /work \
+    "$image" \
+      /bin/sh -lc 'dnf install -y glibc-static gcc && cc -O2 -static -Wall -o init/init init/init.c init/dhcp.c'
+
+  if [ ! -f "$source_dir/init/init" ]; then
+    printf 'Docker build did not produce %s\n' "$source_dir/init/init" >&2
+    exit 1
+  fi
+
+  file "$source_dir/init/init"
+}
+
+require_common_tools
+prepare_dirs
+
+case "$(uname -s)" in
+  Linux)
+    build_linux
+    ;;
+  Darwin)
+    build_macos
+    ;;
+  *)
+    printf 'unsupported host OS: %s\n' "$(uname -s)" >&2
+    exit 1
+    ;;
+esac
+
+printf 'Built libkrun dependencies in %s\n' "$OUT_DIR"
+printf 'Use: export KRUN_DEPS_DIR=%q\n' "$OUT_DIR"

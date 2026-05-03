@@ -1,0 +1,15 @@
+[package]
+name = "bento-krun"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "krun"
+path = "src/bin/krun.rs"
+
+[dependencies]
+bento-krun-sys = { path = "../bento-krun-sys" }
+clap = { version = "4.5.31", features = ["derive"] }
+eyre = "0.6.12"
+thiserror = "2.0.18"

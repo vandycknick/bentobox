@@ -185,7 +185,7 @@ impl LibVm {
             mounts: assign_mount_tags(request.mounts),
             endpoints: Vec::new(),
             network: Network {
-                mode: request.network.unwrap_or(NetworkMode::User),
+                mode: request.network.unwrap_or_else(default_network_mode),
             },
             settings: Settings {
                 nested_virtualization: request.nested_virtualization,
@@ -273,7 +273,7 @@ impl LibVm {
             mounts: assign_mount_tags(request.mounts),
             endpoints: Vec::new(),
             network: Network {
-                mode: request.network.unwrap_or(NetworkMode::User),
+                mode: request.network.unwrap_or_else(default_network_mode),
             },
             settings: Settings {
                 nested_virtualization: request.nested_virtualization,
@@ -610,6 +610,16 @@ fn gigabytes_to_bytes(size_gb: u64) -> u64 {
 
 fn gigabytes_to_bytes_checked(size_gb: Option<u64>) -> Option<u64> {
     size_gb.map(gigabytes_to_bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn default_network_mode() -> NetworkMode {
+    NetworkMode::User
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_network_mode() -> NetworkMode {
+    NetworkMode::None
 }
 
 fn canonicalize_optional_existing_path(

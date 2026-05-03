@@ -9,6 +9,7 @@ pub enum Backend {
     Vz,
     Firecracker,
     CloudHypervisor,
+    Krun,
 }
 
 #[derive(Debug, Default)]
@@ -272,6 +273,7 @@ pub(crate) fn resolve_backend(backend: Backend) -> Result<Backend, VmmError> {
         Backend::Vz => Ok(Backend::Vz),
         Backend::Firecracker => Ok(Backend::Firecracker),
         Backend::CloudHypervisor => Ok(Backend::CloudHypervisor),
+        Backend::Krun => Ok(Backend::Krun),
     }
 }
 
@@ -282,7 +284,7 @@ fn auto_backend() -> Result<Backend, VmmError> {
 
 #[cfg(target_os = "linux")]
 fn auto_backend() -> Result<Backend, VmmError> {
-    Ok(Backend::Firecracker)
+    Ok(Backend::Krun)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -303,10 +305,16 @@ mod tests {
         assert_eq!(backend, Backend::CloudHypervisor);
     }
 
+    #[test]
+    fn resolve_backend_preserves_explicit_krun() {
+        let backend = resolve_backend(Backend::Krun).expect("backend should resolve");
+        assert_eq!(backend, Backend::Krun);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
-    fn auto_backend_still_defaults_to_firecracker_on_linux() {
+    fn auto_backend_defaults_to_krun_on_linux() {
         let backend = resolve_backend(Backend::Auto).expect("backend should resolve");
-        assert_eq!(backend, Backend::Firecracker);
+        assert_eq!(backend, Backend::Krun);
     }
 }

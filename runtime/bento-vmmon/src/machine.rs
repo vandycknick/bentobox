@@ -181,14 +181,16 @@ fn resolve_spec_path(data_dir: &Path, path: &Path) -> PathBuf {
 }
 
 fn backend_needs_machine_identifier(backend: SpecBackend) -> bool {
-    matches!(backend, SpecBackend::Auto | SpecBackend::Vz)
+    matches!(backend, SpecBackend::Vz)
 }
 
 pub(crate) fn machine_backend_from_vm_spec(spec: &VmSpec) -> Result<Backend, VmmError> {
     match spec.platform.backend {
-        SpecBackend::Auto | SpecBackend::Vz => Ok(Backend::Vz),
+        SpecBackend::Auto => Ok(Backend::Auto),
+        SpecBackend::Vz => Ok(Backend::Vz),
         SpecBackend::Firecracker => Ok(Backend::Firecracker),
         SpecBackend::CloudHypervisor => Ok(Backend::CloudHypervisor),
+        SpecBackend::Krun => Ok(Backend::Krun),
     }
 }
 

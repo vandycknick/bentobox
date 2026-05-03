@@ -76,18 +76,38 @@
               "rust-analyzer"
             ];
           };
+          llvm = pkgs.llvmPackages;
         in
         {
           default = pkgs.mkShell {
             packages = [
               rustToolchain
+              pkgs.curl
+              pkgs.git
+              pkgs.gnumake
+              pkgs.pkg-config
               pkgs.zig
               pkgs.cargo-zigbuild
               pkgs.docker
+              pkgs.docker-credential-helpers
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              pkgs.dtc
+              pkgs.gcc
+              pkgs.libcap_ng
+              pkgs.patchelf
+              llvm.clang
+              llvm.libclang
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              pkgs.lld
+              llvm.clang
+              llvm.libclang
             ];
 
             shellHook = ''
               export PATH="$PWD/scripts:$PATH"
+              export LIBCLANG_PATH="${llvm.libclang.lib}/lib"
               echo "Entering bentobox dev shell."
             '';
           };

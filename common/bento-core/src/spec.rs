@@ -201,6 +201,7 @@ pub enum Backend {
     Vz,
     Firecracker,
     CloudHypervisor,
+    Krun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

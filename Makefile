@@ -27,6 +27,10 @@ build-guest-agent:
 build: vmmon
 	cargo build $(CARGO_PROFILE_FLAGS) -p bentoctl
 
+.PHONY: build-libkrun
+build-libkrun:
+	scripts/build-libkrun-deps
+
 .PHONY: vmmon
 vmmon:
 	cargo build $(CARGO_PROFILE_FLAGS) -p bento-vmmon
