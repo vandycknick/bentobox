@@ -131,7 +131,7 @@ mod tests {
 
     fn sample_spec(kernel_cmdline: Vec<String>) -> VmSpec {
         VmSpec {
-            version: 1,
+            version: 2,
             name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -150,7 +150,7 @@ mod tests {
             },
             storage: Storage { disks: Vec::new() },
             mounts: Vec::new(),
-            endpoints: Vec::new(),
+            vsock_endpoints: Vec::new(),
             network: Network {
                 mode: NetworkMode::User,
             },

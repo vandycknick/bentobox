@@ -98,8 +98,8 @@ fn reconcile_agent_kernel_cmdline(spec: &mut VmSpec) {
 mod tests {
     use super::{reconcile_agent_kernel_cmdline, resolve_guest_runtime_config};
     use bento_core::{
-        Architecture, Backend, Boot, EndpointMode, EndpointSpec, GuestOs, LifecycleSpec, Network,
-        NetworkMode, Platform, PluginSpec, Resources, Settings, Storage, VmSpec,
+        Architecture, Backend, Boot, GuestOs, LifecycleSpec, Network, NetworkMode, Platform,
+        PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -107,7 +107,7 @@ mod tests {
 
     fn sample_spec(kernel_cmdline: Vec<String>, guest_enabled: bool) -> VmSpec {
         VmSpec {
-            version: 1,
+            version: 2,
             name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -126,7 +126,7 @@ mod tests {
             },
             storage: Storage { disks: Vec::new() },
             mounts: Vec::new(),
-            endpoints: Vec::new(),
+            vsock_endpoints: Vec::new(),
             network: Network {
                 mode: NetworkMode::User,
             },
@@ -138,11 +138,11 @@ mod tests {
         }
     }
 
-    fn forward_endpoint(port: u32, config: Option<serde_json::Value>) -> EndpointSpec {
-        EndpointSpec {
+    fn forward_endpoint(port: u32, config: Option<serde_json::Value>) -> VsockEndpointSpec {
+        VsockEndpointSpec {
             name: "forward".to_string(),
             port,
-            mode: EndpointMode::Connect,
+            mode: VsockEndpointMode::Connect,
             plugin: PluginSpec {
                 command: PathBuf::from("/usr/local/bin/forward"),
                 args: Vec::new(),
@@ -210,6 +210,18 @@ mod tests {
     }
 
     #[test]
+    fn guest_runtime_disables_dns_but_keeps_ssh_without_guest_networking() {
+        let mut spec = sample_spec(Vec::new(), true);
+        spec.network.mode = NetworkMode::None;
+
+        let runtime = resolve_guest_runtime_config(&spec).expect("runtime config should resolve");
+
+        assert!(runtime.ssh.enabled);
+        assert!(!runtime.dns.enabled);
+        assert!(!runtime.forward.enabled);
+    }
+
+    #[test]
     fn guest_runtime_disables_ssh_dns_and_forward_when_guest_is_disabled() {
         let runtime = resolve_guest_runtime_config(&sample_spec(Vec::new(), false))
             .expect("runtime config should resolve");
@@ -222,7 +234,7 @@ mod tests {
     #[test]
     fn guest_runtime_enables_forward_from_named_endpoint() {
         let mut spec = sample_spec(Vec::new(), true);
-        spec.endpoints.push(forward_endpoint(4100, None));
+        spec.vsock_endpoints.push(forward_endpoint(4100, None));
 
         let runtime = resolve_guest_runtime_config(&spec).expect("runtime config should resolve");
 
@@ -234,7 +246,7 @@ mod tests {
     #[test]
     fn guest_runtime_injects_forward_uds_guest_paths() {
         let mut spec = sample_spec(Vec::new(), true);
-        spec.endpoints.push(forward_endpoint(
+        spec.vsock_endpoints.push(forward_endpoint(
             4100,
             Some(json!({
                 "tcp": {
@@ -266,7 +278,7 @@ mod tests {
     #[test]
     fn guest_runtime_ignores_forward_endpoint_when_guest_is_disabled() {
         let mut spec = sample_spec(Vec::new(), false);
-        spec.endpoints.push(forward_endpoint(4100, None));
+        spec.vsock_endpoints.push(forward_endpoint(4100, None));
 
         let runtime = resolve_guest_runtime_config(&spec).expect("runtime config should resolve");
 
@@ -282,7 +294,7 @@ fn resolve_guest_runtime_config(spec: &VmSpec) -> eyre::Result<AgentConfig> {
             enabled: spec.settings.guest_enabled,
         },
         dns: AgentDnsConfig {
-            enabled: spec.settings.guest_enabled,
+            enabled: spec.settings.guest_enabled && spec.network.mode != SpecNetworkMode::None,
             ..AgentDnsConfig::default()
         },
         forward: resolve_forward_runtime_config(spec)?,
@@ -295,7 +307,7 @@ fn resolve_forward_runtime_config(spec: &VmSpec) -> eyre::Result<AgentForwardCon
     }
 
     let Some(endpoint) = spec
-        .endpoints
+        .vsock_endpoints
         .iter()
         .find(|endpoint| endpoint.name == FORWARD_ENDPOINT_NAME)
     else {

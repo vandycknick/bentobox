@@ -1,11 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use bento_core::{
-    resolve_mount_location, Backend as SpecBackend, DiskKind, InstanceFile,
-    NetworkMode as SpecNetworkMode, VmSpec,
+    agent::RESERVED_SHELL_PORT, resolve_mount_location, Backend as SpecBackend, DiskKind,
+    InstanceFile, NetworkMode as SpecNetworkMode, VmSpec, VsockEndpointMode,
 };
+use bento_protocol::parse_agent_port_args;
 use bento_vmm::{
     Backend, DiskImage, MachineIdentifier, NetworkMode, SharedDirectory, VmConfig, VmmError,
+    VsockPort, VsockPortMode,
 };
 use thiserror::Error;
 
@@ -98,10 +100,44 @@ pub(crate) fn vm_spec_machine_config(
         });
     }
 
+    for port in vm_spec_vsock_ports(inputs.spec) {
+        builder = builder.vsock_port(port);
+    }
+
     Ok(InstanceVmConfig {
         config: builder.build(),
         machine_identifier,
     })
+}
+
+fn vm_spec_vsock_ports(spec: &VmSpec) -> Vec<VsockPort> {
+    let mut ports = Vec::new();
+    for endpoint in &spec.vsock_endpoints {
+        ports.push(VsockPort {
+            port: endpoint.port,
+            mode: map_vsock_endpoint_mode(endpoint.mode),
+        });
+    }
+
+    if spec.settings.guest_enabled {
+        ports.push(VsockPort {
+            port: parse_agent_port_args(spec.boot.kernel_cmdline.iter().map(String::as_str)),
+            mode: VsockPortMode::Connect,
+        });
+        ports.push(VsockPort {
+            port: RESERVED_SHELL_PORT,
+            mode: VsockPortMode::Connect,
+        });
+    }
+
+    ports
+}
+
+fn map_vsock_endpoint_mode(mode: VsockEndpointMode) -> VsockPortMode {
+    match mode {
+        VsockEndpointMode::Connect => VsockPortMode::Connect,
+        VsockEndpointMode::Listen => VsockPortMode::Listen,
+    }
 }
 
 pub(crate) fn machine_identifier_path_from_dir(data_dir: &Path) -> PathBuf {
@@ -206,10 +242,10 @@ fn map_vm_spec_network_mode(mode: SpecNetworkMode) -> NetworkMode {
 mod tests {
     use super::{machine_backend_from_vm_spec, vm_spec_machine_config, VmSpecInputs};
     use bento_core::{
-        Architecture, Backend as SpecBackend, Boot, GuestOs, Network,
+        agent::RESERVED_SHELL_PORT, Architecture, Backend as SpecBackend, Boot, GuestOs, Network,
         NetworkMode as SpecNetworkMode, Platform, Resources, Settings, Storage, VmSpec,
     };
-    use bento_vmm::Backend;
+    use bento_vmm::{Backend, VsockPortMode};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -225,7 +261,7 @@ mod tests {
     #[test]
     fn machine_backend_maps_cloud_hypervisor_engine() {
         let spec = VmSpec {
-            version: 1,
+            version: 2,
             name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -244,7 +280,7 @@ mod tests {
             },
             storage: Storage { disks: Vec::new() },
             mounts: Vec::new(),
-            endpoints: Vec::new(),
+            vsock_endpoints: Vec::new(),
             network: Network {
                 mode: SpecNetworkMode::None,
             },
@@ -268,7 +304,7 @@ mod tests {
         fs::write(&initramfs, b"initramfs").expect("write initramfs");
 
         let spec = VmSpec {
-            version: 1,
+            version: 2,
             name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -300,7 +336,7 @@ mod tests {
             },
             storage: Storage { disks: Vec::new() },
             mounts: Vec::new(),
-            endpoints: Vec::new(),
+            vsock_endpoints: Vec::new(),
             network: Network {
                 mode: SpecNetworkMode::None,
             },
@@ -322,6 +358,16 @@ mod tests {
             machine_config.config.kernel_cmdline,
             spec.boot.kernel_cmdline
         );
+        assert!(machine_config
+            .config
+            .vsock_ports
+            .iter()
+            .any(|port| port.port == 1027 && port.mode == VsockPortMode::Connect));
+        assert!(machine_config
+            .config
+            .vsock_ports
+            .iter()
+            .any(|port| port.port == RESERVED_SHELL_PORT && port.mode == VsockPortMode::Connect));
 
         let _ = fs::remove_dir_all(&dir);
     }

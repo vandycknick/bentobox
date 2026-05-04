@@ -338,6 +338,7 @@ dependencies = [
  "bento-krun-sys",
  "clap",
  "eyre",
+ "nix 0.31.1",
  "thiserror 2.0.18",
 ]
 

@@ -6,8 +6,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_core::{EndpointMode, EndpointSpec, RestartPolicy};
-use bento_protocol::v1::{EndpointKind, EndpointStatus};
+use bento_core::{RestartPolicy, VsockEndpointMode, VsockEndpointSpec};
+use bento_protocol::v1::{VsockEndpointKind, VsockEndpointStatus};
 use nix::errno::Errno;
 use nix::sys::socket::{
     recvmsg, sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType,
@@ -31,18 +31,18 @@ pub(crate) fn start_endpoint_supervisor(
     ctx: DaemonContext,
     instance_dir: PathBuf,
 ) -> Option<JoinHandle<()>> {
-    if ctx.spec.endpoints.is_empty() {
+    if ctx.spec.vsock_endpoints.is_empty() {
         return None;
     }
 
-    for endpoint in &ctx.spec.endpoints {
+    for endpoint in &ctx.spec.vsock_endpoints {
         ctx.store
-            .dispatch(Action::upsert_endpoint(base_status(endpoint)));
+            .dispatch(Action::upsert_vsock_endpoint(base_status(endpoint)));
     }
 
     Some(tokio::spawn(async move {
         let mut handles = Vec::new();
-        for endpoint in ctx.spec.endpoints.clone() {
+        for endpoint in ctx.spec.vsock_endpoints.clone() {
             if !endpoint.lifecycle.autostart {
                 continue;
             }
@@ -64,7 +64,11 @@ pub(crate) fn start_endpoint_supervisor(
     }))
 }
 
-async fn supervise_endpoint(ctx: DaemonContext, instance_dir: PathBuf, endpoint: EndpointSpec) {
+async fn supervise_endpoint(
+    ctx: DaemonContext,
+    instance_dir: PathBuf,
+    endpoint: VsockEndpointSpec,
+) {
     let mut backoff = endpoint_backoff_initial(&endpoint);
 
     tracing::info!(
@@ -84,8 +88,10 @@ async fn supervise_endpoint(ctx: DaemonContext, instance_dir: PathBuf, endpoint:
 
         let started_at = Instant::now();
         let outcome = match endpoint.mode {
-            EndpointMode::Connect => run_connect_endpoint(&ctx, &instance_dir, &endpoint).await,
-            EndpointMode::Listen => run_listen_endpoint(&ctx, &instance_dir, &endpoint).await,
+            VsockEndpointMode::Connect => {
+                run_connect_endpoint(&ctx, &instance_dir, &endpoint).await
+            }
+            VsockEndpointMode::Listen => run_listen_endpoint(&ctx, &instance_dir, &endpoint).await,
         };
 
         let should_restart = match (&endpoint.lifecycle.restart, &outcome) {
@@ -161,7 +167,7 @@ async fn supervise_endpoint(ctx: DaemonContext, instance_dir: PathBuf, endpoint:
 async fn run_connect_endpoint(
     ctx: &DaemonContext,
     instance_dir: &Path,
-    endpoint: &EndpointSpec,
+    endpoint: &VsockEndpointSpec,
 ) -> EndpointOutcome {
     let (control_parent, mut plugin) = match start_endpoint_plugin(instance_dir, endpoint) {
         Ok(value) => value,
@@ -190,7 +196,7 @@ async fn run_connect_endpoint(
 async fn run_listen_endpoint(
     ctx: &DaemonContext,
     instance_dir: &Path,
-    endpoint: &EndpointSpec,
+    endpoint: &VsockEndpointSpec,
 ) -> EndpointOutcome {
     let listener = match ctx.machine.listen_vsock(endpoint.port).await {
         Ok(listener) => listener,
@@ -223,7 +229,7 @@ async fn run_listen_endpoint(
 
 fn start_endpoint_plugin(
     instance_dir: &Path,
-    endpoint: &EndpointSpec,
+    endpoint: &VsockEndpointSpec,
 ) -> Result<(OwnedFd, RunningPlugin), EndpointOutcome> {
     let (control_parent, control_child) = match socketpair(
         AddressFamily::Unix,
@@ -267,7 +273,7 @@ fn start_endpoint_plugin(
 
 async fn wait_for_plugin_ready(
     ctx: &DaemonContext,
-    endpoint: &EndpointSpec,
+    endpoint: &VsockEndpointSpec,
     plugin: &mut RunningPlugin,
 ) -> Result<(), EndpointOutcome> {
     let timeout = Duration::from_millis(endpoint.lifecycle.startup_timeout_ms);
@@ -309,7 +315,7 @@ async fn wait_for_plugin_ready(
                         let _ = terminate_plugin(&mut plugin.child).await;
                         return Err(EndpointOutcome::Failed(message));
                     }
-                    Some(PluginEvent::EndpointStatus { active, summary, problems }) => {
+                    Some(PluginEvent::VsockEndpointStatus { active, summary, problems }) => {
                         set_endpoint_status(ctx, endpoint, active, &summary, problems);
                     }
                     Some(PluginEvent::Healthy) => {
@@ -330,7 +336,7 @@ async fn wait_for_plugin_ready(
 
 async fn run_plugin_event_loop(
     ctx: &DaemonContext,
-    endpoint: &EndpointSpec,
+    endpoint: &VsockEndpointSpec,
     plugin: &mut RunningPlugin,
     broker: Option<JoinHandle<Result<(), String>>>,
 ) -> EndpointOutcome {
@@ -396,7 +402,7 @@ async fn await_broker(broker: &mut Option<JoinHandle<Result<(), String>>>) -> Re
 
 fn handle_plugin_event(
     ctx: &DaemonContext,
-    endpoint: &EndpointSpec,
+    endpoint: &VsockEndpointSpec,
     event: Option<PluginEvent>,
 ) -> Option<EndpointOutcome> {
     match event {
@@ -411,7 +417,7 @@ fn handle_plugin_event(
             );
             Some(EndpointOutcome::Failed(message))
         }
-        Some(PluginEvent::EndpointStatus {
+        Some(PluginEvent::VsockEndpointStatus {
             active,
             summary,
             problems,
@@ -438,7 +444,7 @@ fn handle_plugin_event(
 }
 
 fn spawn_plugin(
-    endpoint: &EndpointSpec,
+    endpoint: &VsockEndpointSpec,
     fd3: OwnedFd,
     startup: &StartupMessage,
 ) -> io::Result<RunningPlugin> {
@@ -557,7 +563,7 @@ async fn terminate_plugin(child: &mut Child) -> io::Result<()> {
 
 async fn send_incoming_conn_with_retry(
     ctx: &DaemonContext,
-    endpoint: &EndpointSpec,
+    endpoint: &VsockEndpointSpec,
     control: &OwnedFd,
     conn_fd: OwnedFd,
     conn_id: u64,
@@ -586,7 +592,7 @@ async fn send_incoming_conn_with_retry(
 
 async fn run_connect_broker(
     ctx: DaemonContext,
-    endpoint: EndpointSpec,
+    endpoint: VsockEndpointSpec,
     control: OwnedFd,
 ) -> Result<(), String> {
     let control = Arc::new(
@@ -662,7 +668,7 @@ async fn run_connect_broker(
 
 async fn run_listen_dispatch(
     ctx: DaemonContext,
-    endpoint: EndpointSpec,
+    endpoint: VsockEndpointSpec,
     mut listener: bento_vmm::VsockListener,
     control: OwnedFd,
 ) -> Result<(), String> {
@@ -699,8 +705,8 @@ async fn run_listen_dispatch(
     }
 }
 
-fn base_status(endpoint: &EndpointSpec) -> EndpointStatus {
-    EndpointStatus {
+fn base_status(endpoint: &VsockEndpointSpec) -> VsockEndpointStatus {
+    VsockEndpointStatus {
         name: endpoint.name.clone(),
         kind: endpoint_kind(endpoint.mode) as i32,
         port: endpoint.port,
@@ -712,7 +718,7 @@ fn base_status(endpoint: &EndpointSpec) -> EndpointStatus {
 
 fn set_endpoint_status(
     ctx: &DaemonContext,
-    endpoint: &EndpointSpec,
+    endpoint: &VsockEndpointSpec,
     active: bool,
     summary: impl Into<String>,
     problems: Vec<String>,
@@ -721,21 +727,21 @@ fn set_endpoint_status(
     status.active = active;
     status.summary = summary.into();
     status.problems = problems;
-    ctx.store.dispatch(Action::upsert_endpoint(status));
+    ctx.store.dispatch(Action::upsert_vsock_endpoint(status));
 }
 
-fn endpoint_kind(mode: EndpointMode) -> EndpointKind {
+fn endpoint_kind(mode: VsockEndpointMode) -> VsockEndpointKind {
     match mode {
-        EndpointMode::Connect => EndpointKind::VsockConnect,
-        EndpointMode::Listen => EndpointKind::VsockListen,
+        VsockEndpointMode::Connect => VsockEndpointKind::Connect,
+        VsockEndpointMode::Listen => VsockEndpointKind::Listen,
     }
 }
 
-fn endpoint_backoff_initial(endpoint: &EndpointSpec) -> Duration {
+fn endpoint_backoff_initial(endpoint: &VsockEndpointSpec) -> Duration {
     Duration::from_millis(endpoint.lifecycle.backoff_ms.initial)
 }
 
-fn endpoint_backoff_max(endpoint: &EndpointSpec) -> Duration {
+fn endpoint_backoff_max(endpoint: &VsockEndpointSpec) -> Duration {
     Duration::from_millis(endpoint.lifecycle.backoff_ms.max)
 }
 
@@ -764,8 +770,8 @@ struct RunningPlugin {
 #[derive(Debug, serde::Serialize)]
 struct StartupMessage {
     api_version: u32,
-    endpoint: String,
-    mode: EndpointMode,
+    vsock_endpoint: String,
+    mode: VsockEndpointMode,
     port: u32,
     transport: PluginTransport,
     runtime_dir: String,
@@ -775,10 +781,10 @@ struct StartupMessage {
 }
 
 impl StartupMessage {
-    fn new(endpoint: &EndpointSpec, runtime_dir: PathBuf, fd: i32) -> Self {
+    fn new(endpoint: &VsockEndpointSpec, runtime_dir: PathBuf, fd: i32) -> Self {
         Self {
-            api_version: 1,
-            endpoint: endpoint.name.clone(),
+            api_version: 2,
+            vsock_endpoint: endpoint.name.clone(),
             mode: endpoint.mode,
             port: endpoint.port,
             transport: PluginTransport::for_mode(endpoint.mode),
@@ -797,10 +803,10 @@ enum PluginTransport {
 }
 
 impl PluginTransport {
-    fn for_mode(mode: EndpointMode) -> Self {
+    fn for_mode(mode: VsockEndpointMode) -> Self {
         match mode {
-            EndpointMode::Connect => Self::BrokeredConnect,
-            EndpointMode::Listen => Self::ListenAccept,
+            VsockEndpointMode::Connect => Self::BrokeredConnect,
+            VsockEndpointMode::Listen => Self::ListenAccept,
         }
     }
 }
@@ -1067,7 +1073,7 @@ enum PluginStdoutEvent {
     Stopping {
         message: String,
     },
-    EndpointStatus {
+    VsockEndpointStatus {
         active: bool,
         #[serde(default)]
         summary: String,
@@ -1084,11 +1090,11 @@ impl From<PluginStdoutEvent> for PluginEvent {
             PluginStdoutEvent::Healthy => Self::Healthy,
             PluginStdoutEvent::Degraded { message } => Self::Degraded(message),
             PluginStdoutEvent::Stopping { message } => Self::Stopping(message),
-            PluginStdoutEvent::EndpointStatus {
+            PluginStdoutEvent::VsockEndpointStatus {
                 active,
                 summary,
                 problems,
-            } => Self::EndpointStatus {
+            } => Self::VsockEndpointStatus {
                 active,
                 summary,
                 problems,
@@ -1104,17 +1110,17 @@ enum PluginEvent {
     Healthy,
     Degraded(String),
     Stopping(String),
-    EndpointStatus {
+    VsockEndpointStatus {
         active: bool,
         summary: String,
         problems: Vec<String>,
     },
 }
 
-fn endpoint_mode_name(mode: EndpointMode) -> &'static str {
+fn endpoint_mode_name(mode: VsockEndpointMode) -> &'static str {
     match mode {
-        EndpointMode::Connect => "connect",
-        EndpointMode::Listen => "listen",
+        VsockEndpointMode::Connect => "connect",
+        VsockEndpointMode::Listen => "listen",
     }
 }
 
@@ -1131,12 +1137,11 @@ mod tests {
     use super::PluginStdoutEvent;
 
     #[test]
-    fn parse_endpoint_status_event() {
-        let raw =
-            r#"{"event":"endpoint_status","active":true,"summary":"ready","problems":["none"]}"#;
+    fn parse_vsock_endpoint_status_event() {
+        let raw = r#"{"event":"vsock_endpoint_status","active":true,"summary":"ready","problems":["none"]}"#;
         let event: PluginStdoutEvent = serde_json::from_str(raw).expect("event should parse");
         match event {
-            PluginStdoutEvent::EndpointStatus {
+            PluginStdoutEvent::VsockEndpointStatus {
                 active,
                 summary,
                 problems,
@@ -1145,7 +1150,7 @@ mod tests {
                 assert_eq!(summary, "ready");
                 assert_eq!(problems, vec!["none"]);
             }
-            _ => panic!("expected endpoint_status event"),
+            _ => panic!("expected vsock_endpoint_status event"),
         }
     }
 }

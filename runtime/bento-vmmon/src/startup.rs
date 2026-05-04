@@ -22,14 +22,22 @@ pub struct StartupReporter {
 impl StartupReporter {
     pub fn from(startup_fd: Option<i32>) -> io::Result<Self> {
         match startup_fd {
-            Some(fd) => Ok(Self::from_startup_fd(fd)),
+            Some(fd) => Self::from_startup_fd(fd),
             None => Self::from_stdout(),
         }
     }
 
-    fn from_startup_fd(fd: i32) -> Self {
+    fn from_startup_fd(fd: i32) -> io::Result<Self> {
+        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+        let flags =
+            nix::fcntl::fcntl(borrowed, nix::fcntl::FcntlArg::F_GETFD).map_err(io::Error::other)?;
+        let mut fd_flags = nix::fcntl::FdFlag::from_bits_retain(flags);
+        fd_flags.insert(nix::fcntl::FdFlag::FD_CLOEXEC);
+        nix::fcntl::fcntl(borrowed, nix::fcntl::FcntlArg::F_SETFD(fd_flags))
+            .map_err(io::Error::other)?;
+
         let file = unsafe { File::from_raw_fd(fd) };
-        Self { file: Some(file) }
+        Ok(Self { file: Some(file) })
     }
 
     fn from_stdout() -> io::Result<Self> {

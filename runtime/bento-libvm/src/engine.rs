@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, BufRead};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -152,7 +152,7 @@ impl LibVm {
             .unwrap_or(selected_image.metadata.defaults.memory_mib);
 
         let spec = VmSpec {
-            version: 1,
+            version: 2,
             name: request.name.clone(),
             platform: Platform {
                 guest_os: guest_os_from_image(&selected_image.metadata.os)?,
@@ -183,7 +183,7 @@ impl LibVm {
                 .collect(),
             },
             mounts: assign_mount_tags(request.mounts),
-            endpoints: Vec::new(),
+            vsock_endpoints: Vec::new(),
             network: Network {
                 mode: request.network.unwrap_or_else(default_network_mode),
             },
@@ -252,7 +252,7 @@ impl LibVm {
         }));
 
         let spec = VmSpec {
-            version: 1,
+            version: 2,
             name: request.name.clone(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -271,7 +271,7 @@ impl LibVm {
             },
             storage: Storage { disks },
             mounts: assign_mount_tags(request.mounts),
-            endpoints: Vec::new(),
+            vsock_endpoints: Vec::new(),
             network: Network {
                 mode: request.network.unwrap_or_else(default_network_mode),
             },
@@ -740,7 +740,7 @@ async fn wait_for_monitor_start(
 fn read_startup_pipe(startup_pipe: OwnedFd) -> io::Result<StartupResult> {
     let mut input = String::new();
     let mut file = std::fs::File::from(startup_pipe);
-    file.read_to_string(&mut input)?;
+    std::io::BufReader::new(&mut file).read_line(&mut input)?;
 
     if input == "started\n" {
         return Ok(StartupResult::Started);
@@ -895,7 +895,7 @@ mod tests {
 
     fn sample_vm_spec(name: &str) -> VmSpec {
         VmSpec {
-            version: 1,
+            version: 2,
             name: name.to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -914,7 +914,7 @@ mod tests {
             },
             storage: Storage { disks: Vec::new() },
             mounts: Vec::new(),
-            endpoints: Vec::new(),
+            vsock_endpoints: Vec::new(),
             network: Network {
                 mode: NetworkMode::User,
             },

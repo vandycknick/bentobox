@@ -1,8 +1,8 @@
 use std::sync::Mutex;
 
 use bento_protocol::v1::{
-    EndpointStatus, InspectResponse, LifecycleState, PingResponse, ServiceHealth, StatusSource,
-    StatusUpdate,
+    InspectResponse, LifecycleState, PingResponse, ServiceHealth, StatusSource, StatusUpdate,
+    VsockEndpointStatus,
 };
 use tokio::sync::broadcast;
 
@@ -90,7 +90,7 @@ pub(crate) struct InstanceState {
     guest: LifecycleState,
     guest_message: String,
     services: Vec<ServiceHealth>,
-    endpoints: Vec<EndpointStatus>,
+    vsock_endpoints: Vec<VsockEndpointStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,8 +106,8 @@ pub(crate) enum Action {
     SetServices {
         services: Vec<ServiceHealth>,
     },
-    UpsertEndpoint {
-        endpoint: EndpointStatus,
+    UpsertVsockEndpoint {
+        endpoint: VsockEndpointStatus,
     },
 }
 
@@ -151,8 +151,8 @@ impl Action {
         Self::SetServices { services }
     }
 
-    pub(crate) fn upsert_endpoint(endpoint: EndpointStatus) -> Self {
-        Self::UpsertEndpoint { endpoint }
+    pub(crate) fn upsert_vsock_endpoint(endpoint: VsockEndpointStatus) -> Self {
+        Self::UpsertVsockEndpoint { endpoint }
     }
 }
 
@@ -182,7 +182,7 @@ pub(crate) fn select_current_inspect(state: &InstanceState) -> InspectResponse {
         ready: state.vm == LifecycleState::Running && state.guest == LifecycleState::Running,
         summary: status_summary(state),
         services: state.services.clone(),
-        endpoints: state.endpoints.clone(),
+        vsock_endpoints: state.vsock_endpoints.clone(),
     }
 }
 
@@ -228,16 +228,16 @@ fn reduce_instance_state(current: &InstanceState, action: &Action) -> InstanceSt
         Action::SetServices { services } => {
             next.services = services.clone();
         }
-        Action::UpsertEndpoint { endpoint } => {
+        Action::UpsertVsockEndpoint { endpoint } => {
             if let Some(existing) = next
-                .endpoints
+                .vsock_endpoints
                 .iter_mut()
                 .find(|item| item.name == endpoint.name)
             {
                 *existing = endpoint.clone();
             } else {
-                next.endpoints.push(endpoint.clone());
-                next.endpoints
+                next.vsock_endpoints.push(endpoint.clone());
+                next.vsock_endpoints
                     .sort_by(|left, right| left.name.cmp(&right.name));
             }
         }
@@ -256,7 +256,7 @@ fn project_status_update(action: &Action) -> Option<StatusUpdate> {
             *state,
             message.clone(),
         )),
-        Action::SetServices { .. } | Action::UpsertEndpoint { .. } => None,
+        Action::SetServices { .. } | Action::UpsertVsockEndpoint { .. } => None,
     }
 }
 

@@ -65,10 +65,7 @@ impl VmBackend {
     pub(crate) async fn listen_vsock(&self, port: u32) -> Result<VsockListener, VmmError> {
         match self {
             #[cfg(target_os = "linux")]
-            Self::Krun(_) => Err(VmmError::Unimplemented {
-                kind: Backend::Krun,
-                operation: "listen_vsock",
-            }),
+            Self::Krun(backend) => backend.listen_vsock(port).await,
             #[cfg(target_os = "linux")]
             Self::CloudHypervisor(_) => Err(VmmError::Unimplemented {
                 kind: Backend::CloudHypervisor,

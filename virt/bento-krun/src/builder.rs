@@ -1,75 +1,36 @@
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::fs::File;
+use std::io;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
-use bento_krun_sys::{ctx, DiskFormat, KernelFormat, SyncMode};
+use nix::pty::openpty;
+use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
 
-use crate::error::{KrunBackendError, Result};
+use crate::config::{validate_config, Disk, KrunConfig};
+use crate::error::Result;
+use crate::serial::SerialConnection;
+use crate::vm::VirtualMachine;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KrunConfig {
-    pub cpus: u8,
-    pub memory_mib: u32,
-    pub kernel: Option<PathBuf>,
-    pub initramfs: Option<PathBuf>,
-    pub kernel_cmdline: Vec<String>,
-    pub root: Option<PathBuf>,
-    pub disks: Vec<Disk>,
-    pub mounts: Vec<Mount>,
-    pub vsock_ports: Vec<VsockPort>,
-    pub console_output: Option<PathBuf>,
-    pub root_disk_remount: Option<RootDiskRemount>,
-    pub disable_implicit_vsock: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Disk {
-    pub block_id: String,
-    pub path: PathBuf,
-    pub read_only: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mount {
-    pub tag: String,
-    pub path: PathBuf,
-    pub read_only: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VsockPort {
-    pub port: u32,
-    pub path: PathBuf,
-    pub listen: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RootDiskRemount {
-    pub device: String,
-    pub fstype: Option<String>,
-    pub options: Option<String>,
+#[derive(Debug)]
+struct KrunSerialPty {
+    child_stdin: Stdio,
+    child_stdout: Stdio,
+    child_stderr: Stdio,
+    serial: SerialConnection,
 }
 
 #[derive(Debug, Clone)]
 pub struct VirtualMachineBuilder {
+    krun_binary: PathBuf,
     config: KrunConfig,
 }
 
 impl VirtualMachineBuilder {
-    pub fn new() -> Self {
+    pub fn new(krun_binary: impl Into<PathBuf>) -> Self {
         Self {
-            config: KrunConfig {
-                cpus: 1,
-                memory_mib: 512,
-                kernel: None,
-                initramfs: None,
-                kernel_cmdline: Vec::new(),
-                root: None,
-                disks: Vec::new(),
-                mounts: Vec::new(),
-                vsock_ports: Vec::new(),
-                console_output: None,
-                root_disk_remount: None,
-                disable_implicit_vsock: false,
-            },
+            krun_binary: krun_binary.into(),
+            config: KrunConfig::default(),
         }
     }
 
@@ -93,13 +54,8 @@ impl VirtualMachineBuilder {
         self
     }
 
-    pub fn kernel_cmdline(mut self, args: Vec<String>) -> Self {
-        self.config.kernel_cmdline = args;
-        self
-    }
-
-    pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
-        self.config.root = Some(root.into());
+    pub fn cmdline(mut self, args: Vec<String>) -> Self {
+        self.config.cmdline = args;
         self
     }
 
@@ -108,32 +64,18 @@ impl VirtualMachineBuilder {
         self
     }
 
-    pub fn mount(mut self, mount: Mount) -> Self {
+    pub fn mount(mut self, mount: crate::Mount) -> Self {
         self.config.mounts.push(mount);
         self
     }
 
-    pub fn vsock_port(mut self, port: VsockPort) -> Self {
+    pub fn vsock_port(mut self, port: crate::VsockPort) -> Self {
         self.config.vsock_ports.push(port);
         self
     }
 
-    pub fn console_output(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.console_output = Some(path.into());
-        self
-    }
-
-    pub fn root_disk_remount(
-        mut self,
-        device: impl Into<String>,
-        fstype: Option<String>,
-        options: Option<String>,
-    ) -> Self {
-        self.config.root_disk_remount = Some(RootDiskRemount {
-            device: device.into(),
-            fstype,
-            options,
-        });
+    pub fn stdio_console(mut self, enabled: bool) -> Self {
+        self.config.stdio_console = enabled;
         self
     }
 
@@ -143,133 +85,150 @@ impl VirtualMachineBuilder {
     }
 
     pub fn build(self) -> Result<KrunConfig> {
-        validate(&self.config)?;
+        validate_config(&self.config)?;
         Ok(self.config)
     }
 
-    pub fn start_enter(self) -> Result<()> {
-        let config = self.build()?;
-        start_enter(config)
+    pub fn start(self) -> Result<VirtualMachine> {
+        validate_config(&self.config)?;
+
+        let mut command = Command::new(&self.krun_binary);
+        for arg in command_args(&self.config) {
+            command.arg(arg);
+        }
+        let serial = if self.config.stdio_console {
+            let serial_pty = open_krun_serial_pty()?;
+            command
+                .stdin(serial_pty.child_stdin)
+                .stdout(serial_pty.child_stdout)
+                .stderr(serial_pty.child_stderr);
+            Some(serial_pty.serial)
+        } else {
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            None
+        };
+
+        let child = command.spawn()?;
+        Ok(VirtualMachine::new(
+            child,
+            self.krun_binary,
+            self.config,
+            serial,
+        ))
     }
 }
 
 impl Default for VirtualMachineBuilder {
     fn default() -> Self {
-        Self::new()
+        Self::new("krun")
     }
 }
 
-pub fn start_enter(config: KrunConfig) -> Result<()> {
-    validate(&config)?;
-    let ctx_id = ctx::create_ctx()?;
-    let configured = configure_ctx(ctx_id, &config);
-    if let Err(err) = configured {
-        let _ = ctx::free_ctx(ctx_id);
-        return Err(err);
-    }
-    ctx::start_enter(ctx_id)?;
-    Ok(())
-}
-
-fn configure_ctx(ctx_id: u32, config: &KrunConfig) -> Result<()> {
-    ctx::set_vm_config(ctx_id, config.cpus, config.memory_mib)?;
-
-    if let Some(root) = config.root.as_ref() {
-        ctx::set_root(ctx_id, &path_string(root))?;
-    }
+pub(crate) fn command_args(config: &KrunConfig) -> Vec<OsString> {
+    let mut args = Vec::new();
+    push_arg(&mut args, "--cpus", config.cpus.to_string());
+    push_arg(&mut args, "--memory-mib", config.memory_mib.to_string());
 
     if let Some(kernel) = config.kernel.as_ref() {
-        let cmdline = (!config.kernel_cmdline.is_empty()).then(|| config.kernel_cmdline.join(" "));
-        ctx::set_kernel(
-            ctx_id,
-            &path_string(kernel),
-            KernelFormat::Raw,
-            config
-                .initramfs
-                .as_ref()
-                .map(|path| path_string(path))
-                .as_deref(),
-            cmdline.as_deref(),
-        )?;
+        push_arg(&mut args, "--kernel", kernel.as_os_str());
     }
-
+    if let Some(initramfs) = config.initramfs.as_ref() {
+        push_arg(&mut args, "--initramfs", initramfs.as_os_str());
+    }
+    for arg in &config.cmdline {
+        push_arg(&mut args, "--cmdline", arg);
+    }
     for disk in &config.disks {
-        ctx::add_disk3(
-            ctx_id,
-            &disk.block_id,
-            &path_string(&disk.path),
-            DiskFormat::Raw,
-            disk.read_only,
-            false,
-            SyncMode::Relaxed,
-        )?;
+        push_arg(&mut args, "--disk", format_disk(disk));
     }
-
     for mount in &config.mounts {
-        ctx::add_virtiofs3(
-            ctx_id,
-            &mount.tag,
-            &path_string(&mount.path),
-            0,
-            mount.read_only,
-        )?;
+        push_arg(&mut args, "--mount", format_mount(mount));
     }
-
     for port in &config.vsock_ports {
-        ctx::add_vsock_port2(ctx_id, port.port, &path_string(&port.path), port.listen)?;
+        push_arg(&mut args, "--vsock-port", format_vsock_port(port));
     }
-
-    if let Some(path) = config.console_output.as_ref() {
-        ctx::set_console_output(ctx_id, &path_string(path))?;
+    if config.stdio_console {
+        args.push("--stdio-console".into());
     }
-
     if config.disable_implicit_vsock {
-        ctx::disable_implicit_vsock(ctx_id)?;
+        args.push("--disable-implicit-vsock".into());
     }
-
-    if let Some(remount) = config.root_disk_remount.as_ref() {
-        ctx::set_root_disk_remount(
-            ctx_id,
-            &remount.device,
-            remount.fstype.as_deref(),
-            remount.options.as_deref(),
-        )?;
-    }
-
-    Ok(())
+    args
 }
 
-fn validate(config: &KrunConfig) -> Result<()> {
-    if config.cpus == 0 {
-        return Err(KrunBackendError::InvalidConfig(
-            "krun requires at least one vCPU".to_string(),
-        ));
-    }
-    if config.memory_mib == 0 {
-        return Err(KrunBackendError::InvalidConfig(
-            "krun requires memory_mib to be greater than zero".to_string(),
-        ));
-    }
-    if config.kernel.is_none() && config.root.is_none() {
-        return Err(KrunBackendError::InvalidConfig(
-            "krun requires either a kernel or a root filesystem".to_string(),
-        ));
-    }
-    Ok(())
+fn push_arg(value: &mut Vec<OsString>, name: impl Into<OsString>, arg: impl Into<OsString>) {
+    value.push(name.into());
+    value.push(arg.into());
 }
 
-fn path_string(path: &Path) -> String {
-    path.display().to_string()
+fn format_disk(disk: &Disk) -> String {
+    format!(
+        "{}:{}:{}",
+        disk.block_id,
+        disk.path.display(),
+        format_ro(disk.read_only)
+    )
+}
+
+fn format_mount(mount: &crate::Mount) -> String {
+    format!(
+        "{}:{}:{}",
+        mount.tag,
+        mount.path.display(),
+        format_ro(mount.read_only)
+    )
+}
+
+fn format_vsock_port(port: &crate::VsockPort) -> String {
+    format!(
+        "{}:{}:{}",
+        port.port,
+        port.path.display(),
+        if port.listen { "connect" } else { "listen" }
+    )
+}
+
+fn format_ro(read_only: bool) -> &'static str {
+    if read_only {
+        "ro"
+    } else {
+        "rw"
+    }
+}
+
+fn open_krun_serial_pty() -> io::Result<KrunSerialPty> {
+    let pty = openpty(None, None).map_err(io::Error::other)?;
+    let mut termios = tcgetattr(&pty.slave).map_err(io::Error::other)?;
+    cfmakeraw(&mut termios);
+    tcsetattr(&pty.slave, SetArg::TCSANOW, &termios).map_err(io::Error::other)?;
+
+    let master = File::from(pty.master);
+    let slave = File::from(pty.slave);
+
+    // libkrun checks isatty(0/1/2). The helper must see a real TTY or hvc0
+    // does not get wired to stdin/stdout/stderr.
+    Ok(KrunSerialPty {
+        child_stdin: Stdio::from(slave.try_clone()?),
+        child_stdout: Stdio::from(slave.try_clone()?),
+        child_stderr: Stdio::from(slave),
+        serial: SerialConnection::new(master.try_clone()?, master),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Disk, VirtualMachineBuilder};
     use std::path::PathBuf;
+
+    use crate::{Disk, VirtualMachineBuilder};
+
+    use super::command_args;
 
     #[test]
     fn builder_rejects_zero_cpus() {
-        let err = VirtualMachineBuilder::new()
+        let err = VirtualMachineBuilder::new("krun")
             .cpus(0)
             .kernel("/kernel")
             .build()
@@ -279,7 +238,7 @@ mod tests {
 
     #[test]
     fn builder_accepts_disks() {
-        let config = VirtualMachineBuilder::new()
+        let config = VirtualMachineBuilder::new("krun")
             .kernel("/kernel")
             .disk(Disk {
                 block_id: "root".to_string(),
@@ -289,5 +248,21 @@ mod tests {
             .build()
             .expect("config should be valid");
         assert_eq!(config.disks.len(), 1);
+    }
+
+    #[test]
+    fn start_arguments_are_flat_krun_arguments() {
+        let config = VirtualMachineBuilder::new("krun")
+            .cpus(2)
+            .memory_mib(1024)
+            .kernel("/kernel")
+            .stdio_console(true)
+            .build()
+            .expect("config should be valid");
+
+        let args = command_args(&config);
+
+        assert!(!args.iter().any(|arg| arg == "run"));
+        assert!(args.iter().any(|arg| arg == "--stdio-console"));
     }
 }

@@ -1,6 +1,5 @@
 use std::fs::OpenOptions;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 use bento_core::InstanceFile;
 use clap::Parser;
@@ -109,6 +108,7 @@ fn format_error_chain(err: &eyre::Report) -> String {
 #[cfg(target_os = "macos")]
 fn daemonize(args: &Args) -> eyre::Result<()> {
     use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
 
     if nix::unistd::getsid(None)? == nix::unistd::getpid() {
         return Ok(());

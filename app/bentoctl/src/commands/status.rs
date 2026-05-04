@@ -68,9 +68,9 @@ impl Cmd {
             }
         }
 
-        if !status.endpoints.is_empty() {
-            println!("endpoints:");
-            for endpoint in status.endpoints {
+        if !status.vsock_endpoints.is_empty() {
+            println!("vsock_endpoints:");
+            for endpoint in status.vsock_endpoints {
                 println!(
                     "  - {} port={} active={}",
                     endpoint.name, endpoint.port, endpoint.active
@@ -246,7 +246,7 @@ mod tests {
 
     fn sample_spec(guest_enabled: bool, kernel_cmdline: Vec<String>, bootstrap: bool) -> VmSpec {
         VmSpec {
-            version: 1,
+            version: 2,
             name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -265,7 +265,7 @@ mod tests {
             },
             storage: Storage { disks: Vec::new() },
             mounts: Vec::new(),
-            endpoints: Vec::new(),
+            vsock_endpoints: Vec::new(),
             network: Network {
                 mode: NetworkMode::User,
             },

@@ -172,6 +172,30 @@ pub fn set_console_output(ctx: u32, path: &str) -> Result<()> {
     })
 }
 
+pub fn disable_implicit_console(ctx: u32) -> Result<()> {
+    check("disable_implicit_console", unsafe {
+        sys::krun_disable_implicit_console(ctx)
+    })
+}
+
+pub fn set_kernel_console(ctx: u32, console_id: &str) -> Result<()> {
+    let console_id = CString::new(console_id)?;
+    check("set_kernel_console", unsafe {
+        sys::krun_set_kernel_console(ctx, console_id.as_ptr())
+    })
+}
+
+pub fn add_virtio_console_default(
+    ctx: u32,
+    input_fd: i32,
+    output_fd: i32,
+    err_fd: i32,
+) -> Result<()> {
+    check("add_virtio_console_default", unsafe {
+        sys::krun_add_virtio_console_default(ctx, input_fd, output_fd, err_fd)
+    })
+}
+
 pub fn disable_implicit_vsock(ctx: u32) -> Result<()> {
     check("disable_implicit_vsock", unsafe {
         sys::krun_disable_implicit_vsock(ctx)
@@ -278,7 +302,7 @@ pub unsafe fn set_display_backend(
 
 #[cfg(test)]
 mod tests {
-    use super::{DiskFormat, KernelFormat, LogStyle, SyncMode};
+    use crate::ctx::{DiskFormat, KernelFormat, LogStyle, SyncMode};
 
     #[test]
     fn enums_match_libkrun_constants() {

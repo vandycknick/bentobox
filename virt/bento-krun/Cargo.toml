@@ -7,9 +7,14 @@ build = "build.rs"
 [[bin]]
 name = "krun"
 path = "src/bin/krun.rs"
+required-features = ["krun-bin"]
+
+[features]
+krun-bin = ["dep:bento-krun-sys"]
 
 [dependencies]
-bento-krun-sys = { path = "../bento-krun-sys" }
+bento-krun-sys = { path = "../bento-krun-sys", optional = true }
 clap = { version = "4.5.31", features = ["derive"] }
 eyre = "0.6.12"
+nix = { version = "0.31.1", features = ["term"] }
 thiserror = "2.0.18"

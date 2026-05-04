@@ -8,7 +8,7 @@ bento-ch = { path = "../bento-ch" }
 bento-fc = { path = "../bento-fc" }
 bento-protocol = { path = "../../wire/bento-protocol" }
 crossbeam = "0.8.4"
-nix = { version = "0.31.1", features = ["fs", "process", "signal", "socket"] }
+nix = { version = "0.31.1", features = ["fs", "process", "signal", "socket", "term"] }
 thiserror = "2.0.18"
 tokio = { version = "1.48.0", features = ["rt", "fs", "io-util", "net", "process", "sync", "time"] }
 tracing = "0.1.41"

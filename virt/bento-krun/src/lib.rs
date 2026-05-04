@@ -1,5 +1,13 @@
-mod builder;
-mod error;
+//! Process-backed libkrun helper API for BentoBox.
 
-pub use crate::builder::{Disk, KrunConfig, Mount, VirtualMachineBuilder, VsockPort};
+mod builder;
+mod config;
+mod error;
+mod serial;
+mod vm;
+
+pub use crate::builder::VirtualMachineBuilder;
+pub use crate::config::{validate_config, Disk, KrunConfig, Mount, VsockPort};
 pub use crate::error::{KrunBackendError, Result};
+pub use crate::serial::SerialConnection;
+pub use crate::vm::VirtualMachine;

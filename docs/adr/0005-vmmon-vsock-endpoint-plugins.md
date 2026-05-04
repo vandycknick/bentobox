@@ -20,7 +20,7 @@ The first implementation target is macOS Virtualization.framework. The plugin co
 
 ## Decision
 
-Bentobox will add declarative `endpoints` to `VmSpec` and `vmmon` will supervise endpoint plugins for them.
+Bentobox will add declarative `vsock_endpoints` to `VmSpec` and `vmmon` will supervise vsock endpoint plugins for them.
 
 Each configured endpoint binds together:
 
@@ -32,9 +32,9 @@ Each configured endpoint binds together:
 
 ### Config model
 
-The top-level `VmSpec` field is named `endpoints`.
+The top-level `VmSpec` field is named `vsock_endpoints`.
 
-Each endpoint uses a config enum named `EndpointMode` with these values:
+Each vsock endpoint uses a config enum named `VsockEndpointMode` with these values:
 
 - `connect`, meaning the host initiates a connection to a guest vsock port,
 - `listen`, meaning the host accepts guest-initiated connections for a host vsock port.
@@ -154,7 +154,7 @@ flowchart TD
 
 ### Runtime reporting
 
-`InspectResponse.endpoints` reports runtime endpoint health only. It does not expose the full configured endpoint specification.
+`InspectResponse.vsock_endpoints` reports runtime vsock endpoint health only. It does not expose the full configured endpoint specification.
 
 Endpoint status is summarized by the plugin protocol and projected into monitor state.
 
@@ -169,12 +169,12 @@ Endpoint failures are visible through endpoint status, not by redefining overall
 
 The runtime reporting contract in `bento-protocol` becomes the source of truth for endpoint status returned by `InspectResponse`.
 
-The protocol enum `EndpointKind` is used for runtime reporting. It is distinct from config-time `EndpointMode`.
+The protocol enum `VsockEndpointKind` is used for runtime reporting. It is distinct from config-time `VsockEndpointMode`.
 
-For this ADR, `EndpointKind` is defined in terms of endpoint runtime type:
+For this ADR, `VsockEndpointKind` is defined in terms of endpoint runtime type:
 
-- `ENDPOINT_KIND_VSOCK_CONNECT`
-- `ENDPOINT_KIND_VSOCK_LISTEN`
+- `VSOCK_ENDPOINT_KIND_CONNECT`
+- `VSOCK_ENDPOINT_KIND_LISTEN`
 
 ### Scope of first implementation
 
@@ -207,10 +207,10 @@ This ADR does not require the first implementation to add missing Linux `listen_
 
 ## Appendix A: Config Schema
 
-This ADR extends `VmSpec` with an optional top-level `endpoints` field.
+This ADR extends `VmSpec` with an optional top-level `vsock_endpoints` field.
 
 ```yaml
-endpoints:
+vsock_endpoints:
   - name: string
     port: 1..4294967295
     mode: connect|listen
@@ -244,10 +244,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EndpointSpec {
+pub struct VsockEndpointSpec {
     pub name: String,
     pub port: u32,
-    pub mode: EndpointMode,
+    pub mode: VsockEndpointMode,
     pub plugin: PluginSpec,
     #[serde(default)]
     pub lifecycle: LifecycleSpec,
@@ -255,7 +255,7 @@ pub struct EndpointSpec {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EndpointMode {
+pub enum VsockEndpointMode {
     Connect,
     Listen,
 }
@@ -300,7 +300,7 @@ pub struct BackoffSpec {
 }
 ```
 
-Existing configs without `endpoints` remain valid by defaulting to an empty list.
+Existing configs without `vsock_endpoints` remain valid by defaulting to an empty list. Legacy configs that still use `endpoints` are rejected by the current schema.
 
 ## Appendix B: Plugin Protocol
 
@@ -310,8 +310,8 @@ Existing configs without `endpoints` remain valid by defaulting to an empty list
 
 ```json
 {
-  "api_version": 1,
-  "endpoint": "string",
+  "api_version": 2,
+  "vsock_endpoint": "string",
   "mode": "connect" | "listen",
   "transport": "brokered_connect" | "listen_accept",
   "port": 0,
@@ -321,8 +321,8 @@ Existing configs without `endpoints` remain valid by defaulting to an empty list
 
 Rules:
 
-- `api_version` must be `1`.
-- `endpoint` matches the configured endpoint name.
+- `api_version` must be `2`.
+- `vsock_endpoint` matches the configured endpoint name.
 - `mode` matches the configured endpoint mode.
 - `transport` describes the control-socket contract for the selected mode.
 - `port` matches the configured endpoint port.
@@ -358,14 +358,14 @@ Optional events:
 
 ```json
 {
-  "event": "endpoint_status",
+  "event": "vsock_endpoint_status",
   "active": true,
   "summary": "string",
   "problems": ["string"]
 }
 ```
 
-The `endpoint_status` event is the plugin's way to report its current runtime state into `InspectResponse.endpoints`.
+The `vsock_endpoint_status` event is the plugin's way to report its current runtime state into `InspectResponse.vsock_endpoints`.
 
 ### fd 3 semantics
 
@@ -461,20 +461,20 @@ That contract is compatible with the macOS-first implementation and with future 
 
 ## Appendix C: Runtime Reporting
 
-`InspectResponse.endpoints` returns a high-level runtime view, not the full configured endpoint definition.
+`InspectResponse.vsock_endpoints` returns a high-level runtime view, not the full configured endpoint definition.
 
 The runtime protocol shape is:
 
 ```proto
-enum EndpointKind {
-  ENDPOINT_KIND_UNSPECIFIED = 0;
-  ENDPOINT_KIND_VSOCK_CONNECT = 1;
-  ENDPOINT_KIND_VSOCK_LISTEN = 2;
+enum VsockEndpointKind {
+  VSOCK_ENDPOINT_KIND_UNSPECIFIED = 0;
+  VSOCK_ENDPOINT_KIND_CONNECT = 1;
+  VSOCK_ENDPOINT_KIND_LISTEN = 2;
 }
 
-message EndpointStatus {
+message VsockEndpointStatus {
   string name = 1;
-  EndpointKind kind = 2;
+  VsockEndpointKind kind = 2;
   uint32 port = 3;
   bool active = 4;
   string summary = 5;

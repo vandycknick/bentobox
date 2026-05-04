@@ -1,11 +1,11 @@
 use std::fmt;
 #[cfg(unix)]
 use std::fs::File;
-use std::io;
+use std::io::{self, Read, Write};
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 
 #[cfg(target_os = "linux")]
 use bento_ch::VsockConnection as ChVsockConnection;
@@ -18,7 +18,7 @@ use bento_vz::device::{
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 #[cfg(unix)]
-use tokio::net::UnixStream as TokioUnixStream;
+use tokio::net::{UnixListener as TokioUnixListener, UnixStream as TokioUnixStream};
 
 pub struct VsockStream {
     inner: VsockStreamInner,
@@ -46,6 +46,9 @@ enum VsockStreamInner {
 enum MachineSerialStreamInner {
     #[allow(dead_code)]
     #[cfg(unix)]
+    SplitFile(SplitFileStream),
+    #[allow(dead_code)]
+    #[cfg(unix)]
     Unix(TokioUnixStream),
     #[cfg(target_os = "linux")]
     Firecracker(FcSerialConnection),
@@ -54,6 +57,9 @@ enum MachineSerialStreamInner {
 }
 
 enum VsockListenerInner {
+    #[allow(dead_code)]
+    #[cfg(unix)]
+    Unix(TokioUnixListener),
     #[cfg(target_os = "macos")]
     Vz(VzVsockListener),
 }
@@ -96,6 +102,14 @@ impl VsockStream {
     pub(crate) fn from_vz(stream: VzVsockConnection) -> Self {
         Self {
             inner: VsockStreamInner::Vz(stream),
+        }
+    }
+
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub(crate) fn from_unix_stream(stream: TokioUnixStream) -> Self {
+        Self {
+            inner: VsockStreamInner::Unix(stream),
         }
     }
 
@@ -154,6 +168,14 @@ impl VsockStream {
 }
 
 impl VsockListener {
+    #[cfg(unix)]
+    #[allow(dead_code)]
+    pub(crate) fn from_unix_listener(listener: TokioUnixListener) -> Self {
+        Self {
+            inner: VsockListenerInner::Unix(listener),
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub(crate) fn from_vz(listener: VzVsockListener) -> Self {
         Self {
@@ -166,6 +188,12 @@ impl VsockListener {
     /// Returns the next available connection for this listener.
     pub async fn accept(&mut self) -> io::Result<VsockStream> {
         match &mut self.inner {
+            #[cfg(unix)]
+            VsockListenerInner::Unix(listener) => {
+                listener.accept().await.map(|(stream, _)| VsockStream {
+                    inner: VsockStreamInner::Unix(stream),
+                })
+            }
             #[cfg(target_os = "macos")]
             VsockListenerInner::Vz(listener) => listener
                 .accept()
@@ -180,6 +208,12 @@ impl VsockListener {
     /// Returns `Ok(None)` if no connection is currently available.
     pub fn try_accept(&mut self) -> io::Result<Option<VsockStream>> {
         match &mut self.inner {
+            #[cfg(unix)]
+            VsockListenerInner::Unix(listener) => try_accept_unix(listener).map(|stream| {
+                stream.map(|stream| VsockStream {
+                    inner: VsockStreamInner::Unix(stream),
+                })
+            }),
             #[cfg(target_os = "macos")]
             VsockListenerInner::Vz(listener) => listener
                 .try_accept()
@@ -189,7 +223,117 @@ impl VsockListener {
     }
 }
 
+#[cfg(unix)]
+fn try_accept_unix(listener: &TokioUnixListener) -> io::Result<Option<TokioUnixStream>> {
+    use nix::errno::Errno;
+    use nix::sys::socket::accept;
+
+    match accept(listener.as_raw_fd()) {
+        Ok(fd) => {
+            let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+            stream.set_nonblocking(true)?;
+            TokioUnixStream::from_std(stream).map(Some)
+        }
+        Err(Errno::EAGAIN) => Ok(None),
+        Err(err) => Err(io::Error::other(err)),
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct SplitFileStream {
+    read: tokio::io::unix::AsyncFd<File>,
+    write: tokio::io::unix::AsyncFd<File>,
+}
+
+#[cfg(unix)]
+impl SplitFileStream {
+    #[allow(dead_code)]
+    fn new(read: File, write: File) -> io::Result<Self> {
+        set_nonblocking(&read)?;
+        set_nonblocking(&write)?;
+        Ok(Self {
+            read: tokio::io::unix::AsyncFd::new(read)?,
+            write: tokio::io::unix::AsyncFd::new(write)?,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl AsyncRead for SplitFileStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let bytes =
+            unsafe { &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]) };
+
+        loop {
+            let mut guard = ready!(self.read.poll_read_ready(cx))?;
+            match guard.try_io(|inner| inner.get_ref().read(bytes)) {
+                Ok(Ok(n)) => {
+                    unsafe {
+                        buf.assume_init(n);
+                    }
+                    buf.advance(n);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Ok(Err(err)) => return Poll::Ready(Err(err)),
+                Err(_) => continue,
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl AsyncWrite for SplitFileStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        loop {
+            let mut guard = ready!(self.write.poll_write_ready(cx))?;
+            match guard.try_io(|inner| inner.get_ref().write(buf)) {
+                Ok(Ok(n)) => return Poll::Ready(Ok(n)),
+                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Ok(Err(err)) => return Poll::Ready(Err(err)),
+                Err(_) => continue,
+            }
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.write.get_ref().flush()?;
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.write.get_ref().flush()?;
+        shutdown_write(self.write.get_ref())?;
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(unix)]
+fn shutdown_write<F: AsRawFd>(file: &F) -> io::Result<()> {
+    match nix::sys::socket::shutdown(file.as_raw_fd(), nix::sys::socket::Shutdown::Write) {
+        Ok(()) => Ok(()),
+        Err(nix::errno::Errno::ENOTSOCK | nix::errno::Errno::ENOTCONN) => Ok(()),
+        Err(err) => Err(io::Error::other(format!("shutdown(SHUT_WR) failed: {err}"))),
+    }
+}
+
 impl MachineSerialStream {
+    #[cfg(unix)]
+    pub(crate) fn from_files(read: File, write: File) -> io::Result<Self> {
+        Ok(Self {
+            inner: MachineSerialStreamInner::SplitFile(SplitFileStream::new(read, write)?),
+        })
+    }
+
     #[allow(dead_code)]
     #[cfg(unix)]
     pub(crate) fn from_unix_stream(stream: TokioUnixStream) -> Self {
@@ -285,6 +429,8 @@ impl AsyncRead for MachineSerialStream {
     ) -> Poll<io::Result<()>> {
         match &mut self.inner {
             #[cfg(unix)]
+            MachineSerialStreamInner::SplitFile(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(unix)]
             MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(target_os = "linux")]
             MachineSerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_read(cx, buf),
@@ -302,6 +448,8 @@ impl AsyncWrite for MachineSerialStream {
     ) -> Poll<io::Result<usize>> {
         match &mut self.inner {
             #[cfg(unix)]
+            MachineSerialStreamInner::SplitFile(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(unix)]
             MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(target_os = "linux")]
             MachineSerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_write(cx, buf),
@@ -313,6 +461,8 @@ impl AsyncWrite for MachineSerialStream {
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
             #[cfg(unix)]
+            MachineSerialStreamInner::SplitFile(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(unix)]
             MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(target_os = "linux")]
             MachineSerialStreamInner::Firecracker(stream) => Pin::new(stream).poll_flush(cx),
@@ -323,6 +473,8 @@ impl AsyncWrite for MachineSerialStream {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
+            #[cfg(unix)]
+            MachineSerialStreamInner::SplitFile(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(unix)]
             MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(target_os = "linux")]
@@ -362,10 +514,21 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
     use std::os::unix::net::UnixStream as StdUnixStream;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use nix::libc;
+    use tokio::net::{UnixListener, UnixStream};
 
-    use super::VsockStream;
+    use crate::stream::{VsockListener, VsockStream};
+
+    fn temp_socket_path(name: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        PathBuf::from("/tmp").join(format!("bv-{name}-{}-{now}.sock", std::process::id()))
+    }
 
     #[tokio::test]
     async fn dup_fd_returns_valid_nonblocking_descriptor() {
@@ -396,5 +559,22 @@ mod tests {
         }
 
         assert_eq!(&buf, b"ping");
+    }
+
+    #[tokio::test]
+    async fn unix_listener_accepts_vsock_streams() {
+        let path = temp_socket_path("accept");
+        let listener = UnixListener::bind(&path).expect("listener should bind");
+        let mut listener = VsockListener::from_unix_listener(listener);
+
+        let client = tokio::spawn(UnixStream::connect(path.clone()));
+        let accepted = listener.accept().await.expect("accept should succeed");
+        let _client = client
+            .await
+            .expect("client task should complete")
+            .expect("client should connect");
+
+        assert_eq!(accepted.destination_port(), 0);
+        let _ = std::fs::remove_file(path);
     }
 }

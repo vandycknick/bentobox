@@ -91,6 +91,7 @@ pub struct VmConfig {
     pub root_disk: Option<DiskImage>,
     pub data_disks: Vec<DiskImage>,
     pub mounts: Vec<SharedDirectory>,
+    pub vsock_ports: Vec<VsockPort>,
 }
 
 impl VmConfig {
@@ -110,6 +111,7 @@ impl VmConfig {
             root_disk: None,
             data_disks: Vec::new(),
             mounts: Vec::new(),
+            vsock_ports: Vec::new(),
         }
     }
 
@@ -208,6 +210,11 @@ impl VmConfigBuilder {
         self
     }
 
+    pub fn vsock_port(mut self, port: VsockPort) -> Self {
+        self.config.vsock_ports.push(port);
+        self
+    }
+
     pub fn build(self) -> VmConfig {
         self.config
     }
@@ -224,6 +231,18 @@ pub struct SharedDirectory {
     pub host_path: PathBuf,
     pub tag: String,
     pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VsockPort {
+    pub port: u32,
+    pub mode: VsockPortMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VsockPortMode {
+    Connect,
+    Listen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,7 +316,7 @@ fn auto_backend() -> Result<Backend, VmmError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_backend, Backend};
+    use crate::types::{resolve_backend, Backend};
 
     #[test]
     fn resolve_backend_preserves_explicit_cloud_hypervisor() {

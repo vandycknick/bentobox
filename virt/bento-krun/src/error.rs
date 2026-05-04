@@ -7,6 +7,12 @@ pub enum KrunBackendError {
     #[error("invalid krun config: {0}")]
     InvalidConfig(String),
 
+    #[error("krun serial stream was already taken")]
+    SerialAlreadyTaken,
+
+    #[error("krun serial stream is not configured; enable stdio_console first")]
+    SerialNotConfigured,
+
     #[error(transparent)]
-    Krun(#[from] bento_krun_sys::KrunError),
+    Io(#[from] std::io::Error),
 }

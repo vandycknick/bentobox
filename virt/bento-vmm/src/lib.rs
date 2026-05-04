@@ -9,5 +9,5 @@ pub use crate::serial::{spawn_serial_tunnel, SerialAccess, SerialConsole, Serial
 pub use crate::stream::{VsockListener, VsockStream};
 pub use crate::types::{
     Backend, DiskImage, MachineIdentifier, NetworkMode, SharedDirectory, VmConfig, VmConfigBuilder,
-    VmExit, VmmError,
+    VmExit, VmmError, VsockPort, VsockPortMode,
 };

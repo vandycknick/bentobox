@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VmSpec {
     pub version: u32,
     pub name: String,
@@ -14,16 +15,16 @@ pub struct VmSpec {
     #[serde(default)]
     pub mounts: Vec<Mount>,
     #[serde(default)]
-    pub endpoints: Vec<EndpointSpec>,
+    pub vsock_endpoints: Vec<VsockEndpointSpec>,
     pub network: Network,
     pub settings: Settings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EndpointSpec {
+pub struct VsockEndpointSpec {
     pub name: String,
     pub port: u32,
-    pub mode: EndpointMode,
+    pub mode: VsockEndpointMode,
     pub plugin: PluginSpec,
     #[serde(default)]
     pub lifecycle: LifecycleSpec,
@@ -31,7 +32,7 @@ pub struct EndpointSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum EndpointMode {
+pub enum VsockEndpointMode {
     Connect,
     Listen,
 }
@@ -215,16 +216,16 @@ pub enum NetworkMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        Architecture, Backend, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, EndpointMode,
-        EndpointSpec, GuestOs, LifecycleSpec, Mount, Network, NetworkMode, Platform, PluginSpec,
-        Resources, RestartPolicy, Settings, Storage, VmSpec,
+        Architecture, Backend, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, GuestOs,
+        LifecycleSpec, Mount, Network, NetworkMode, Platform, PluginSpec, Resources, RestartPolicy,
+        Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     fn sample_vm_spec() -> VmSpec {
         VmSpec {
-            version: 1,
+            version: 2,
             name: "dev".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -262,10 +263,10 @@ mod tests {
                 tag: "workspace".to_string(),
                 read_only: false,
             }],
-            endpoints: vec![EndpointSpec {
+            vsock_endpoints: vec![VsockEndpointSpec {
                 name: "api".to_string(),
                 port: 8080,
-                mode: EndpointMode::Connect,
+                mode: VsockEndpointMode::Connect,
                 plugin: PluginSpec {
                     command: PathBuf::from("/usr/local/bin/bento-endpoint"),
                     args: vec!["--serve".to_string()],
@@ -312,14 +313,15 @@ mod tests {
         assert!(yaml.contains("backend: auto"));
         assert!(yaml.contains("kind: root"));
         assert!(yaml.contains("kind: seed"));
+        assert!(yaml.contains("vsock_endpoints:"));
         assert!(yaml.contains("mode: user"));
         assert!(yaml.contains("mode: connect"));
     }
 
     #[test]
-    fn vm_spec_defaults_missing_endpoints() {
+    fn vm_spec_defaults_missing_vsock_endpoints() {
         let yaml = r#"
-version: 1
+version: 2
 name: dev
 platform:
   guest_os: linux
@@ -346,6 +348,40 @@ settings:
 "#;
 
         let decoded: VmSpec = serde_yaml_ng::from_str(yaml).expect("deserialize vm spec");
-        assert!(decoded.endpoints.is_empty());
+        assert!(decoded.vsock_endpoints.is_empty());
+    }
+
+    #[test]
+    fn vm_spec_rejects_legacy_endpoints_field() {
+        let yaml = r#"
+version: 2
+name: dev
+platform:
+  guest_os: linux
+  architecture: aarch64
+  backend: auto
+resources:
+  cpus: 4
+  memory_mib: 4096
+boot:
+  kernel: /kernel
+  initramfs: /initramfs
+  kernel_cmdline: []
+  bootstrap: null
+storage:
+  disks: []
+mounts: []
+endpoints: []
+network:
+  mode: user
+settings:
+  nested_virtualization: false
+  rosetta: true
+  guest_enabled: true
+"#;
+
+        let err = serde_yaml_ng::from_str::<VmSpec>(yaml)
+            .expect_err("legacy endpoints field should be rejected");
+        assert!(err.to_string().contains("endpoints"));
     }
 }

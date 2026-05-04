@@ -95,8 +95,6 @@ impl SerialConsole {
     }
 
     pub async fn stream_to_file(&self, path: &Path) -> Result<(), crate::types::VmmError> {
-        self.ensure_attached().await?;
-
         let file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -105,6 +103,8 @@ impl SerialConsole {
             .map_err(crate::types::VmmError::from)?;
 
         self.file_sinks.lock().await.push(file);
+        tracing::info!(path = %path.display(), "serial log sink attached");
+        self.ensure_attached().await?;
         Ok(())
     }
 
@@ -118,6 +118,7 @@ impl SerialConsole {
             let mut hub = self.hub.lock().await;
             hub.attach(access)?
         };
+        tracing::info!(client_id, access = ?access, "serial client attached");
 
         Ok(SerialStream {
             console: self.clone(),
@@ -138,6 +139,7 @@ impl SerialConsole {
         }
 
         let stream = self.open_serial_device().await?;
+        tracing::info!("serial backend stream opened");
         let (guest_output, guest_input) = tokio::io::split(stream);
         let output_tx = self.output_tx.clone();
         let file_sinks = self.file_sinks.clone();
@@ -169,6 +171,11 @@ impl SerialConsole {
             return Err(io::Error::other("serial console is not attached"));
         };
 
+        tracing::debug!(
+            client_id,
+            bytes = chunk.len(),
+            "serial input forwarded to guest"
+        );
         attachment.guest_input.write_all(chunk).await?;
         attachment.guest_input.flush().await
     }
@@ -214,10 +221,15 @@ async fn run_serial_reader(
     output_tx: broadcast::Sender<Vec<u8>>,
 ) {
     let mut buf = [0u8; 8192];
+    let mut saw_output = false;
+    tracing::info!("serial reader started");
 
     loop {
         let n = match guest_output.read(&mut buf).await {
-            Ok(0) => break,
+            Ok(0) => {
+                tracing::warn!(saw_output, "serial reader reached EOF");
+                break;
+            }
             Ok(n) => n,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err) => {
@@ -226,16 +238,33 @@ async fn run_serial_reader(
             }
         };
 
+        if !saw_output {
+            tracing::info!(bytes = n, "serial reader received first output");
+            saw_output = true;
+        } else {
+            tracing::debug!(bytes = n, "serial reader received output");
+        }
+
         let chunk = buf[..n].to_vec();
 
         {
             let mut sinks = file_sinks.lock().await;
+            let sink_count = sinks.len();
+            if sink_count == 0 {
+                tracing::debug!(bytes = chunk.len(), "serial output has no file sinks");
+            }
             let mut index = 0;
             while index < sinks.len() {
                 let file = &mut sinks[index];
                 match file.write_all(&chunk).await {
                     Ok(()) => {
                         let _ = file.flush().await;
+                        tracing::debug!(
+                            bytes = chunk.len(),
+                            sink_index = index,
+                            sink_count,
+                            "serial log wrote output"
+                        );
                         index += 1;
                     }
                     Err(err) => {

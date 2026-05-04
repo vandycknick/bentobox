@@ -26,21 +26,21 @@ message SystemInfo {
   repeated string ip_addresses = 11;
 }
 
-enum EndpointKind {
-  ENDPOINT_KIND_UNSPECIFIED = 0;
-  ENDPOINT_KIND_VSOCK_CONNECT = 1;
-  ENDPOINT_KIND_VSOCK_LISTEN = 2;
+enum VsockEndpointKind {
+  VSOCK_ENDPOINT_KIND_UNSPECIFIED = 0;
+  VSOCK_ENDPOINT_KIND_CONNECT = 1;
+  VSOCK_ENDPOINT_KIND_LISTEN = 2;
 }
 
-message EndpointDescriptor {
+message VsockEndpointDescriptor {
   string name = 1;
-  EndpointKind kind = 2;
+  VsockEndpointKind kind = 2;
   uint32 port = 3;
 }
 
-message EndpointStatus {
+message VsockEndpointStatus {
   string name = 1;
-  EndpointKind kind = 2;
+  VsockEndpointKind kind = 2;
   uint32 port = 3;
   bool active = 4;
   string summary = 5;

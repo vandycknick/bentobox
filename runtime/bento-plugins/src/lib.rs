@@ -28,7 +28,7 @@ static RUNTIME: OnceCell<Arc<PluginRuntime>> = OnceCell::const_new();
 #[derive(Debug, Deserialize)]
 pub struct StartupMessage {
     pub api_version: u32,
-    pub endpoint: String,
+    pub vsock_endpoint: String,
     pub mode: String,
     pub port: u32,
     pub transport: PluginTransport,
@@ -39,8 +39,8 @@ pub struct StartupMessage {
 }
 
 impl StartupMessage {
-    fn expect_api_v1(&self) -> io::Result<()> {
-        if self.api_version != 1 {
+    fn expect_api_v2(&self) -> io::Result<()> {
+        if self.api_version != 2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported api_version {}", self.api_version),
@@ -56,7 +56,7 @@ impl StartupMessage {
     }
 
     fn expect_connect(&self) -> io::Result<()> {
-        self.expect_api_v1()?;
+        self.expect_api_v2()?;
         if self.mode != "connect" {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -76,7 +76,7 @@ impl StartupMessage {
     }
 
     fn expect_listen(&self) -> io::Result<()> {
-        self.expect_api_v1()?;
+        self.expect_api_v2()?;
         if self.mode != "listen" {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -161,7 +161,7 @@ impl Plugin {
     }
 
     pub fn status(&self, active: bool, summary: &str, problems: &[&str]) -> io::Result<()> {
-        emit_event(PluginEvent::EndpointStatus {
+        emit_event(PluginEvent::VsockEndpointStatus {
             active,
             summary,
             problems,
@@ -195,8 +195,8 @@ impl Plugin {
         })
     }
 
-    pub fn endpoint(&self) -> &str {
-        &self.runtime.startup.endpoint
+    pub fn vsock_endpoint(&self) -> &str {
+        &self.runtime.startup.vsock_endpoint
     }
 
     pub fn port(&self) -> u32 {
@@ -217,7 +217,7 @@ enum PluginEvent<'a> {
     Failed {
         message: &'a str,
     },
-    EndpointStatus {
+    VsockEndpointStatus {
         active: bool,
         summary: &'a str,
         problems: &'a [&'a str],
@@ -238,7 +238,7 @@ async fn runtime() -> io::Result<&'static PluginRuntime> {
 
 async fn init_runtime() -> io::Result<Arc<PluginRuntime>> {
     let startup = read_startup_message()?;
-    startup.expect_api_v1()?;
+    startup.expect_api_v2()?;
 
     let control = ControlSocket::from_fd(startup.fd)?;
     let runtime_dir = PathBuf::from(&startup.runtime_dir);

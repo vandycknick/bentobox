@@ -91,7 +91,7 @@ impl VirtualMachine {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::{VirtualMachine, Vmm};
+    use crate::machine::{VirtualMachine, Vmm};
     use crate::types::{Backend, NetworkMode, VmConfig};
     use std::fs;
     use std::path::PathBuf;
