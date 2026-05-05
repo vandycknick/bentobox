@@ -225,7 +225,7 @@ mod tests {
 
     fn sample_vm_spec() -> VmSpec {
         VmSpec {
-            version: 2,
+            version: 1,
             name: "dev".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn vm_spec_defaults_missing_vsock_endpoints() {
         let yaml = r#"
-version: 2
+version: 1
 name: dev
 platform:
   guest_os: linux
@@ -354,7 +354,7 @@ settings:
     #[test]
     fn vm_spec_rejects_legacy_endpoints_field() {
         let yaml = r#"
-version: 2
+version: 1
 name: dev
 platform:
   guest_os: linux

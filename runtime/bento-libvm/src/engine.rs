@@ -152,7 +152,7 @@ impl LibVm {
             .unwrap_or(selected_image.metadata.defaults.memory_mib);
 
         let spec = VmSpec {
-            version: 2,
+            version: 1,
             name: request.name.clone(),
             platform: Platform {
                 guest_os: guest_os_from_image(&selected_image.metadata.os)?,
@@ -252,7 +252,7 @@ impl LibVm {
         }));
 
         let spec = VmSpec {
-            version: 2,
+            version: 1,
             name: request.name.clone(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -895,7 +895,7 @@ mod tests {
 
     fn sample_vm_spec(name: &str) -> VmSpec {
         VmSpec {
-            version: 2,
+            version: 1,
             name: name.to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,

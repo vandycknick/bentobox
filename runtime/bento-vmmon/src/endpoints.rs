@@ -783,7 +783,7 @@ struct StartupMessage {
 impl StartupMessage {
     fn new(endpoint: &VsockEndpointSpec, runtime_dir: PathBuf, fd: i32) -> Self {
         Self {
-            api_version: 2,
+            api_version: 1,
             vsock_endpoint: endpoint.name.clone(),
             mode: endpoint.mode,
             port: endpoint.port,

@@ -310,7 +310,7 @@ Existing configs without `vsock_endpoints` remain valid by defaulting to an empt
 
 ```json
 {
-  "api_version": 2,
+  "api_version": 1,
   "vsock_endpoint": "string",
   "mode": "connect" | "listen",
   "transport": "brokered_connect" | "listen_accept",
@@ -321,7 +321,7 @@ Existing configs without `vsock_endpoints` remain valid by defaulting to an empt
 
 Rules:
 
-- `api_version` must be `2`.
+- `api_version` must be `1`.
 - `vsock_endpoint` matches the configured endpoint name.
 - `mode` matches the configured endpoint mode.
 - `transport` describes the control-socket contract for the selected mode.

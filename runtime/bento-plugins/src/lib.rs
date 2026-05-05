@@ -39,8 +39,8 @@ pub struct StartupMessage {
 }
 
 impl StartupMessage {
-    fn expect_api_v2(&self) -> io::Result<()> {
-        if self.api_version != 2 {
+    fn expect_api_v1(&self) -> io::Result<()> {
+        if self.api_version != 1 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported api_version {}", self.api_version),
@@ -56,7 +56,7 @@ impl StartupMessage {
     }
 
     fn expect_connect(&self) -> io::Result<()> {
-        self.expect_api_v2()?;
+        self.expect_api_v1()?;
         if self.mode != "connect" {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -76,7 +76,7 @@ impl StartupMessage {
     }
 
     fn expect_listen(&self) -> io::Result<()> {
-        self.expect_api_v2()?;
+        self.expect_api_v1()?;
         if self.mode != "listen" {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -238,7 +238,7 @@ async fn runtime() -> io::Result<&'static PluginRuntime> {
 
 async fn init_runtime() -> io::Result<Arc<PluginRuntime>> {
     let startup = read_startup_message()?;
-    startup.expect_api_v2()?;
+    startup.expect_api_v1()?;
 
     let control = ControlSocket::from_fd(startup.fd)?;
     let runtime_dir = PathBuf::from(&startup.runtime_dir);

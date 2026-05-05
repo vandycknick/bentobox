@@ -107,7 +107,7 @@ mod tests {
 
     fn sample_spec(kernel_cmdline: Vec<String>, guest_enabled: bool) -> VmSpec {
         VmSpec {
-            version: 2,
+            version: 1,
             name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -661,7 +661,7 @@ fn render_network_config() -> eyre::Result<String> {
     );
 
     let cfg = NetworkConfigV2 {
-        version: 2,
+        version: 1,
         ethernets,
     };
     serde_yaml_ng::to_string(&cfg).context("serialize cloud-init network-config")

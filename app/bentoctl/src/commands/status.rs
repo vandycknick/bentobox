@@ -246,7 +246,7 @@ mod tests {
 
     fn sample_spec(guest_enabled: bool, kernel_cmdline: Vec<String>, bootstrap: bool) -> VmSpec {
         VmSpec {
-            version: 2,
+            version: 1,
             name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,

@@ -131,7 +131,7 @@ mod tests {
 
     fn sample_spec(kernel_cmdline: Vec<String>) -> VmSpec {
         VmSpec {
-            version: 2,
+            version: 1,
             name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,

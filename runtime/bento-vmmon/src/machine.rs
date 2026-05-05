@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn machine_backend_maps_cloud_hypervisor_engine() {
         let spec = VmSpec {
-            version: 2,
+            version: 1,
             name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
@@ -304,7 +304,7 @@ mod tests {
         fs::write(&initramfs, b"initramfs").expect("write initramfs");
 
         let spec = VmSpec {
-            version: 2,
+            version: 1,
             name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
