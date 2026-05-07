@@ -10,10 +10,7 @@ mod monitor;
 pub mod ssh_keys;
 mod state;
 
-pub use crate::engine::{
-    CreateMachineRequest, CreateRawMachineRequest, LibVm, MachineRecord, MachineStatus,
-    PendingMachine,
-};
+pub use crate::engine::{CreateMachineRequest, LibVm, MachineRecord, MachineStatus};
 pub use crate::error::LibVmError;
 pub use crate::layout::{resolve_default_data_dir, Layout, CONFIG_FILE_NAME, STATE_DB_FILE_NAME};
 pub use crate::machine_ref::MachineRef;

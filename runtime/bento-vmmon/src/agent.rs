@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bento_core::VmSpec;
-use bento_protocol::parse_agent_port_args;
 use bento_protocol::v1::agent_service_client::AgentServiceClient;
 use bento_protocol::v1::{AgentPingRequest, HealthRequest, HealthResponse};
 use bento_vmm::VirtualMachine;
@@ -117,19 +116,20 @@ async fn connect_agent_client(
 }
 
 fn agent_port_from_spec(spec: &VmSpec) -> u32 {
-    parse_agent_port_args(spec.boot.kernel_cmdline.iter().map(String::as_str))
+    spec.guest_agent()
+        .map(|guest| guest.control_port)
+        .unwrap_or(bento_core::DEFAULT_GUEST_CONTROL_PORT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::agent_port_from_spec;
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, Network, NetworkMode, Platform, Resources, Settings,
-        Storage, VmSpec,
+        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkMode, Platform, Resources,
+        Settings, Storage, VmSpec,
     };
-    use bento_protocol::DEFAULT_AGENT_CONTROL_PORT;
 
-    fn sample_spec(kernel_cmdline: Vec<String>) -> VmSpec {
+    fn sample_spec(guest: Option<GuestSpec>) -> VmSpec {
         VmSpec {
             version: 1,
             name: "devbox".to_string(),
@@ -145,7 +145,7 @@ mod tests {
             boot: Boot {
                 kernel: None,
                 initramfs: None,
-                kernel_cmdline,
+                kernel_cmdline: Vec::new(),
                 bootstrap: None,
             },
             storage: Storage { disks: Vec::new() },
@@ -157,20 +157,23 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
-                guest_enabled: true,
             },
+            guest,
         }
     }
 
     #[test]
-    fn reads_agent_port_from_spec_kernel_cmdline() {
-        let spec = sample_spec(vec!["bento.guest.port=7001".to_string()]);
+    fn reads_agent_port_from_spec_guest_config() {
+        let spec = sample_spec(Some(GuestSpec { control_port: 7001 }));
         assert_eq!(agent_port_from_spec(&spec), 7001);
     }
 
     #[test]
-    fn falls_back_when_spec_kernel_cmdline_is_missing_port() {
-        let spec = sample_spec(vec!["console=hvc0".to_string()]);
-        assert_eq!(agent_port_from_spec(&spec), DEFAULT_AGENT_CONTROL_PORT);
+    fn falls_back_when_spec_guest_config_is_missing() {
+        let spec = sample_spec(None);
+        assert_eq!(
+            agent_port_from_spec(&spec),
+            bento_core::DEFAULT_GUEST_CONTROL_PORT
+        );
     }
 }

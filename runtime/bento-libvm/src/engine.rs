@@ -9,9 +9,10 @@ use crate::images::store::ImageStore;
 use crate::launch::prepare_instance_runtime;
 use bento_core::InstanceFile;
 use bento_core::{
-    Architecture, Backend, Boot, Bootstrap, Disk, DiskKind, GuestOs, MachineId, Mount, Network,
-    NetworkMode, Platform, Resources, Settings, Storage, VmSpec,
+    Architecture, Backend, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec, MachineId, Mount,
+    Network, NetworkMode, Platform, Resources, Settings, Storage, VmSpec,
 };
+use bento_protocol::agent_port_arg;
 use bento_protocol::v1::InspectResponse;
 use nix::{
     sys::signal::Signal,
@@ -39,23 +40,6 @@ pub struct CreateMachineRequest {
     pub agent: bool,
     pub rosetta: bool,
     pub userdata: Option<PathBuf>,
-    pub disks: Vec<PathBuf>,
-    pub mounts: Vec<Mount>,
-    pub network: Option<NetworkMode>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreateRawMachineRequest {
-    pub name: String,
-    pub cpus: u8,
-    pub memory_mib: u32,
-    pub kernel: Option<PathBuf>,
-    pub initramfs: Option<PathBuf>,
-    pub rootfs: Option<PathBuf>,
-    pub empty_rootfs_gb: Option<u64>,
-    pub nested_virtualization: bool,
-    pub agent: bool,
-    pub rosetta: bool,
     pub disks: Vec<PathBuf>,
     pub mounts: Vec<Mount>,
     pub network: Option<NetworkMode>,
@@ -91,7 +75,7 @@ pub struct LibVm {
     state: StateStore,
 }
 
-pub struct PendingMachine {
+struct PendingMachine {
     id: MachineId,
     spec: VmSpec,
     staged_dir: PathBuf,
@@ -140,7 +124,7 @@ impl LibVm {
         let bootstrap = (userdata_path.is_some() || request.rosetta).then(|| Bootstrap {
             cloud_init: userdata_path.clone(),
         });
-        let guest_enabled = should_enable_guest(request.agent, bootstrap.as_ref());
+        let guest = GuestSpec::default();
 
         let resolved_kernel =
             kernel_path.or_else(|| image_store.image_kernel_path(&selected_image));
@@ -166,7 +150,7 @@ impl LibVm {
             boot: Boot {
                 kernel: resolved_kernel,
                 initramfs: resolved_initramfs,
-                kernel_cmdline: Vec::new(),
+                kernel_cmdline: vec![agent_port_arg(guest.control_port)],
                 bootstrap,
             },
             storage: Storage {
@@ -190,8 +174,8 @@ impl LibVm {
             settings: Settings {
                 nested_virtualization: request.nested_virtualization,
                 rosetta: request.rosetta,
-                guest_enabled,
             },
+            guest: Some(guest),
         };
 
         let pending = self.create_pending(spec)?;
@@ -205,94 +189,7 @@ impl LibVm {
         pending.commit(self)
     }
 
-    pub fn create_raw(
-        &self,
-        request: CreateRawMachineRequest,
-    ) -> Result<MachineRecord, LibVmError> {
-        if request.rootfs.is_some() && request.empty_rootfs_gb.is_some() {
-            return Err(LibVmError::InvalidCreateRequest {
-                name: request.name,
-                reason: "--rootfs and --empty-rootfs are mutually exclusive".to_string(),
-            });
-        }
-        if matches!(request.empty_rootfs_gb, Some(0)) {
-            return Err(LibVmError::InvalidCreateRequest {
-                name: request.name,
-                reason: "--empty-rootfs must be greater than 0".to_string(),
-            });
-        }
-
-        let kernel_path = canonicalize_optional_existing_path(request.kernel.as_deref(), "kernel")?;
-        let initramfs_path =
-            canonicalize_optional_existing_path(request.initramfs.as_deref(), "initramfs")?;
-        let rootfs_path = canonicalize_optional_existing_path(request.rootfs.as_deref(), "rootfs")?;
-        let disk_paths = canonicalize_existing_paths(&request.disks, "disk")?;
-
-        let bootstrap = request.rosetta.then_some(Bootstrap { cloud_init: None });
-        let guest_enabled = should_enable_guest(request.agent, bootstrap.as_ref());
-
-        let mut disks = Vec::new();
-        if let Some(path) = rootfs_path.clone() {
-            disks.push(Disk {
-                path,
-                kind: DiskKind::Root,
-                read_only: false,
-            });
-        } else if request.empty_rootfs_gb.is_some() {
-            disks.push(Disk {
-                path: PathBuf::from(InstanceFile::RootDisk.as_str()),
-                kind: DiskKind::Root,
-                read_only: false,
-            });
-        }
-        disks.extend(disk_paths.into_iter().map(|path| Disk {
-            path,
-            kind: DiskKind::Data,
-            read_only: false,
-        }));
-
-        let spec = VmSpec {
-            version: 1,
-            name: request.name.clone(),
-            platform: Platform {
-                guest_os: GuestOs::Linux,
-                architecture: host_architecture(),
-                backend: Backend::Auto,
-            },
-            resources: Resources {
-                cpus: request.cpus,
-                memory_mib: request.memory_mib,
-            },
-            boot: Boot {
-                kernel: kernel_path,
-                initramfs: initramfs_path,
-                kernel_cmdline: Vec::new(),
-                bootstrap,
-            },
-            storage: Storage { disks },
-            mounts: assign_mount_tags(request.mounts),
-            vsock_endpoints: Vec::new(),
-            network: Network {
-                mode: request.network.unwrap_or_else(default_network_mode),
-            },
-            settings: Settings {
-                nested_virtualization: request.nested_virtualization,
-                rosetta: request.rosetta,
-                guest_enabled,
-            },
-        };
-
-        let pending = self.create_pending(spec)?;
-
-        if let Some(size_gb) = request.empty_rootfs_gb {
-            let rootfs = pending.dir().join(InstanceFile::RootDisk.as_str());
-            fs::File::create(&rootfs)?.set_len(size_gb.saturating_mul(BYTES_PER_GB))?;
-        }
-
-        pending.commit(self)
-    }
-
-    pub fn create_pending(&self, spec: VmSpec) -> Result<PendingMachine, LibVmError> {
+    fn create_pending(&self, spec: VmSpec) -> Result<PendingMachine, LibVmError> {
         validate_machine_name(&spec.name)?;
 
         if self
@@ -460,7 +357,7 @@ impl LibVm {
 
         if wait_for_guest_readiness {
             let machine_record = self.machine_record(metadata.clone())?;
-            let should_wait = machine_record.spec.settings.guest_enabled;
+            let should_wait = machine_record.spec.guest_agent().is_some();
 
             if should_wait {
                 monitor::wait_for_shell_with_timeout(
@@ -594,13 +491,6 @@ fn architecture_from_image(arch: &str) -> Result<Architecture, LibVmError> {
         other => Err(LibVmError::UnsupportedImageArchitecture {
             arch: other.to_string(),
         }),
-    }
-}
-
-fn host_architecture() -> Architecture {
-    match std::env::consts::ARCH {
-        "aarch64" => Architecture::Aarch64,
-        _ => Architecture::X86_64,
     }
 }
 
@@ -807,19 +697,11 @@ fn read_monitor_pid(pid_path: &Path) -> io::Result<i32> {
 }
 
 impl PendingMachine {
-    pub fn id(&self) -> MachineId {
-        self.id
-    }
-
-    pub fn dir(&self) -> &Path {
+    fn dir(&self) -> &Path {
         &self.staged_dir
     }
 
-    pub fn spec(&self) -> &VmSpec {
-        &self.spec
-    }
-
-    pub fn commit(mut self, libvm: &LibVm) -> Result<MachineRecord, LibVmError> {
+    fn commit(mut self, libvm: &LibVm) -> Result<MachineRecord, LibVmError> {
         if self.final_dir.exists() {
             return Err(LibVmError::MachineIdAlreadyExists { id: self.id });
         }
@@ -880,17 +762,13 @@ fn create_staging_dir(layout: &Layout) -> Result<PathBuf, LibVmError> {
     })
 }
 
-fn should_enable_guest(agent: bool, bootstrap: Option<&Bootstrap>) -> bool {
-    agent || bootstrap.is_some()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{should_enable_guest, LibVm, MachineStatus};
+    use super::{LibVm, MachineStatus};
     use crate::{Layout, LibVmError, MachineRef};
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, Network, NetworkMode, Platform, Resources, Settings,
-        Storage, VmSpec,
+        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkMode, Platform, Resources,
+        Settings, Storage, VmSpec,
     };
 
     fn sample_vm_spec(name: &str) -> VmSpec {
@@ -921,8 +799,8 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
-                guest_enabled: true,
             },
+            guest: Some(GuestSpec::default()),
         }
     }
 
@@ -934,17 +812,15 @@ mod tests {
         let pending = libvm
             .create_pending(sample_vm_spec("devbox"))
             .expect("create pending machine");
-        let machine_id = pending.id();
 
         assert!(pending.dir().starts_with(libvm.layout().staging_dir()));
 
         let machine = pending.commit(&libvm).expect("commit machine");
 
-        assert_eq!(machine.id, machine_id);
         assert_eq!(machine.spec.name, "devbox");
         assert_eq!(machine.status, MachineStatus::Stopped);
-        assert_eq!(machine.dir, libvm.layout().instance_dir(machine_id));
-        assert!(libvm.layout().instance_config_path(machine_id).exists());
+        assert_eq!(machine.dir, libvm.layout().instance_dir(machine.id));
+        assert!(libvm.layout().instance_config_path(machine.id).exists());
     }
 
     #[test]
@@ -1015,21 +891,5 @@ mod tests {
         ));
         assert!(machine.dir.exists());
         assert_eq!(libvm.list().expect("list machines").len(), 1);
-    }
-
-    #[test]
-    fn should_enable_guest_when_agent_is_requested() {
-        assert!(should_enable_guest(true, None));
-    }
-
-    #[test]
-    fn should_enable_guest_when_bootstrap_is_present() {
-        let bootstrap = bento_core::Bootstrap { cloud_init: None };
-        assert!(should_enable_guest(false, Some(&bootstrap)));
-    }
-
-    #[test]
-    fn should_not_enable_guest_without_agent_or_bootstrap() {
-        assert!(!should_enable_guest(false, None));
     }
 }

@@ -33,5 +33,5 @@ impl Cmd {
 }
 
 fn requires_guest_readiness(machine: &MachineRecord) -> bool {
-    machine.spec.settings.guest_enabled
+    machine.spec.guest_agent().is_some()
 }

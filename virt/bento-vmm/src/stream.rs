@@ -327,6 +327,7 @@ fn shutdown_write<F: AsRawFd>(file: &F) -> io::Result<()> {
 }
 
 impl MachineSerialStream {
+    #[allow(dead_code)]
     #[cfg(unix)]
     pub(crate) fn from_files(read: File, write: File) -> io::Result<Self> {
         Ok(Self {

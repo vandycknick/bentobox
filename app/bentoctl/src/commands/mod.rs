@@ -5,7 +5,6 @@ use std::fmt::{Display, Formatter};
 use eyre::Context;
 
 pub mod create;
-pub mod create_raw;
 pub mod delete;
 pub mod exec;
 pub mod images;
@@ -35,7 +34,6 @@ pub enum Command {
     Create(create::Cmd),
     #[command(name = "new", hide = true)]
     New(create::Cmd),
-    CreateRaw(create_raw::Cmd),
     Start(start::Cmd),
     Stop(stop::Cmd),
     Shell(shell::Cmd),
@@ -54,7 +52,6 @@ impl Display for Command {
         match self {
             Command::Create(cmd) => write!(f, "create {}", cmd),
             Command::New(cmd) => write!(f, "new {}", cmd),
-            Command::CreateRaw(cmd) => write!(f, "create-raw {}", cmd),
             Command::Start(cmd) => write!(f, "start {}", cmd),
             Command::Stop(cmd) => write!(f, "stop {}", cmd),
             Command::Shell(cmd) => write!(f, "shell {}", cmd),
@@ -80,10 +77,6 @@ impl BentoCtlCmd {
                 cmd.run(&libvm).await
             }
             Command::New(cmd) => {
-                let libvm = libvm()?;
-                cmd.run(&libvm).await
-            }
-            Command::CreateRaw(cmd) => {
                 let libvm = libvm()?;
                 cmd.run(&libvm).await
             }

@@ -9,7 +9,6 @@ use bento_core::agent::{
     AgentConfig, AgentDnsConfig, AgentForwardConfig, AgentSshConfig, AgentUdsForwardConfig,
 };
 use bento_core::{resolve_mount_location, InstanceFile, NetworkMode as SpecNetworkMode, VmSpec};
-use bento_protocol::{agent_port_arg, parse_agent_port_args, KERNEL_PARAM_AGENT_PORT};
 use eyre::Context;
 use fatfs::{format_volume, FileSystem, FormatVolumeOptions, FsOptions};
 use serde::{Deserialize, Serialize};
@@ -57,11 +56,9 @@ struct MonitorMount {
 }
 
 pub(crate) fn prepare_instance_runtime(instance_dir: &Path) -> eyre::Result<()> {
-    let mut spec = read_vm_spec_from_dir(instance_dir)?;
-    reconcile_agent_kernel_cmdline(&mut spec);
+    let spec = read_vm_spec_from_dir(instance_dir)?;
     let guest_runtime = resolve_guest_runtime_config(&spec)?;
 
-    write_vm_spec_to_dir(instance_dir, &spec)?;
     rebuild_bootstrap(instance_dir, &spec, &guest_runtime)?;
     Ok(())
 }
@@ -74,38 +71,19 @@ fn read_vm_spec_from_dir(instance_dir: &Path) -> eyre::Result<VmSpec> {
         .map_err(|err| eyre::eyre!("parse vm spec at {}: {}", config_path.display(), err))
 }
 
-fn write_vm_spec_to_dir(instance_dir: &Path, spec: &VmSpec) -> eyre::Result<()> {
-    let config_path = instance_dir.join(InstanceFile::Config.as_str());
-    let raw = serde_yaml_ng::to_string(spec).context("serialize vm spec")?;
-    std::fs::write(&config_path, raw)
-        .with_context(|| format!("write vm spec at {}", config_path.display()))
-}
-
-fn reconcile_agent_kernel_cmdline(spec: &mut VmSpec) {
-    let port = parse_agent_port_args(spec.boot.kernel_cmdline.iter().map(String::as_str));
-    spec.boot
-        .kernel_cmdline
-        .retain(|arg| !arg.starts_with(&format!("{}=", KERNEL_PARAM_AGENT_PORT)));
-
-    if !spec.settings.guest_enabled {
-        return;
-    }
-
-    spec.boot.kernel_cmdline.push(agent_port_arg(port));
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{reconcile_agent_kernel_cmdline, resolve_guest_runtime_config};
+    use super::resolve_guest_runtime_config;
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, LifecycleSpec, Network, NetworkMode, Platform,
-        PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
+        Architecture, Backend, Boot, GuestOs, GuestSpec, LifecycleSpec, Network, NetworkMode,
+        Platform, PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode,
+        VsockEndpointSpec,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    fn sample_spec(kernel_cmdline: Vec<String>, guest_enabled: bool) -> VmSpec {
+    fn sample_spec(kernel_cmdline: Vec<String>, guest_configured: bool) -> VmSpec {
         VmSpec {
             version: 1,
             name: "devbox".to_string(),
@@ -133,8 +111,8 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
-                guest_enabled,
             },
+            guest: guest_configured.then_some(GuestSpec::default()),
         }
     }
 
@@ -152,51 +130,6 @@ mod tests {
             },
             lifecycle: LifecycleSpec::default(),
         }
-    }
-
-    #[test]
-    fn reconcile_agent_kernel_cmdline_replaces_existing_agent_port() {
-        let mut spec = sample_spec(
-            vec![
-                "console=hvc0".to_string(),
-                "bento.guest.port=7001".to_string(),
-            ],
-            true,
-        );
-
-        reconcile_agent_kernel_cmdline(&mut spec);
-
-        assert_eq!(
-            spec.boot.kernel_cmdline,
-            vec![
-                "console=hvc0".to_string(),
-                "bento.guest.port=7001".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn reconcile_agent_kernel_cmdline_injects_default_port_for_guest_instances() {
-        let mut spec = sample_spec(vec!["console=hvc0".to_string()], true);
-
-        reconcile_agent_kernel_cmdline(&mut spec);
-
-        assert_eq!(
-            spec.boot.kernel_cmdline,
-            vec![
-                "console=hvc0".to_string(),
-                "bento.guest.port=1027".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn reconcile_agent_kernel_cmdline_removes_agent_port_when_guest_is_disabled() {
-        let mut spec = sample_spec(vec!["bento.guest.port=7001".to_string()], false);
-
-        reconcile_agent_kernel_cmdline(&mut spec);
-
-        assert!(spec.boot.kernel_cmdline.is_empty());
     }
 
     #[test]
@@ -291,10 +224,10 @@ mod tests {
 fn resolve_guest_runtime_config(spec: &VmSpec) -> eyre::Result<AgentConfig> {
     Ok(AgentConfig {
         ssh: AgentSshConfig {
-            enabled: spec.settings.guest_enabled,
+            enabled: spec.guest_agent().is_some(),
         },
         dns: AgentDnsConfig {
-            enabled: spec.settings.guest_enabled && spec.network.mode != SpecNetworkMode::None,
+            enabled: spec.guest_agent().is_some() && spec.network.mode != SpecNetworkMode::None,
             ..AgentDnsConfig::default()
         },
         forward: resolve_forward_runtime_config(spec)?,
@@ -302,7 +235,7 @@ fn resolve_guest_runtime_config(spec: &VmSpec) -> eyre::Result<AgentConfig> {
 }
 
 fn resolve_forward_runtime_config(spec: &VmSpec) -> eyre::Result<AgentForwardConfig> {
-    if !spec.settings.guest_enabled {
+    if spec.guest_agent().is_none() {
         return Ok(AgentForwardConfig::default());
     }
 

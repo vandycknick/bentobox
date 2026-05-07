@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const DEFAULT_GUEST_CONTROL_PORT: u32 = 1027;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VmSpec {
@@ -18,6 +20,33 @@ pub struct VmSpec {
     pub vsock_endpoints: Vec<VsockEndpointSpec>,
     pub network: Network,
     pub settings: Settings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest: Option<GuestSpec>,
+}
+
+impl VmSpec {
+    pub fn guest_agent(&self) -> Option<GuestSpec> {
+        self.guest.clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestSpec {
+    #[serde(default = "default_guest_control_port")]
+    pub control_port: u32,
+}
+
+impl Default for GuestSpec {
+    fn default() -> Self {
+        Self {
+            control_port: default_guest_control_port(),
+        }
+    }
+}
+
+const fn default_guest_control_port() -> u32 {
+    DEFAULT_GUEST_CONTROL_PORT
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,10 +205,10 @@ pub struct Network {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Settings {
     pub nested_virtualization: bool,
     pub rosetta: bool,
-    pub guest_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,7 +245,7 @@ pub enum NetworkMode {
 #[cfg(test)]
 mod tests {
     use super::{
-        Architecture, Backend, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, GuestOs,
+        Architecture, Backend, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec,
         LifecycleSpec, Mount, Network, NetworkMode, Platform, PluginSpec, Resources, RestartPolicy,
         Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
     };
@@ -290,8 +319,8 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: true,
-                guest_enabled: true,
             },
+            guest: Some(GuestSpec::default()),
         }
     }
 
@@ -314,8 +343,11 @@ mod tests {
         assert!(yaml.contains("kind: root"));
         assert!(yaml.contains("kind: seed"));
         assert!(yaml.contains("vsock_endpoints:"));
+        assert!(yaml.contains("guest:"));
+        assert!(yaml.contains("control_port: 1027"));
         assert!(yaml.contains("mode: user"));
         assert!(yaml.contains("mode: connect"));
+        assert!(!yaml.contains("guest_enabled"));
     }
 
     #[test]
@@ -344,11 +376,46 @@ network:
 settings:
   nested_virtualization: false
   rosetta: true
-  guest_enabled: true
+guest:
+  control_port: 1027
 "#;
 
         let decoded: VmSpec = serde_yaml_ng::from_str(yaml).expect("deserialize vm spec");
         assert!(decoded.vsock_endpoints.is_empty());
+        assert_eq!(decoded.guest_agent(), Some(GuestSpec::default()));
+    }
+
+    #[test]
+    fn vm_spec_rejects_legacy_guest_enabled_setting() {
+        let yaml = r#"
+version: 1
+name: dev
+platform:
+  guest_os: linux
+  architecture: aarch64
+  backend: auto
+resources:
+  cpus: 4
+  memory_mib: 4096
+boot:
+  kernel: /kernel
+  initramfs: /initramfs
+  kernel_cmdline: []
+  bootstrap: null
+storage:
+  disks: []
+mounts: []
+network:
+  mode: user
+settings:
+  nested_virtualization: false
+  rosetta: true
+  guest_enabled: true
+"#;
+
+        let err = serde_yaml_ng::from_str::<VmSpec>(yaml)
+            .expect_err("legacy guest_enabled setting should be rejected");
+        assert!(err.to_string().contains("guest_enabled"));
     }
 
     #[test]
@@ -377,7 +444,8 @@ network:
 settings:
   nested_virtualization: false
   rosetta: true
-  guest_enabled: true
+guest:
+  control_port: 1027
 "#;
 
         let err = serde_yaml_ng::from_str::<VmSpec>(yaml)

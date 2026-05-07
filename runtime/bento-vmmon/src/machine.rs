@@ -4,7 +4,6 @@ use bento_core::{
     agent::RESERVED_SHELL_PORT, resolve_mount_location, Backend as SpecBackend, DiskKind,
     InstanceFile, NetworkMode as SpecNetworkMode, VmSpec, VsockEndpointMode,
 };
-use bento_protocol::parse_agent_port_args;
 use bento_vmm::{
     Backend, DiskImage, MachineIdentifier, NetworkMode, SharedDirectory, VmConfig, VmmError,
     VsockPort, VsockPortMode,
@@ -119,9 +118,9 @@ fn vm_spec_vsock_ports(spec: &VmSpec) -> Vec<VsockPort> {
         });
     }
 
-    if spec.settings.guest_enabled {
+    if let Some(guest) = spec.guest_agent() {
         ports.push(VsockPort {
-            port: parse_agent_port_args(spec.boot.kernel_cmdline.iter().map(String::as_str)),
+            port: guest.control_port,
             mode: VsockPortMode::Connect,
         });
         ports.push(VsockPort {
@@ -242,8 +241,8 @@ fn map_vm_spec_network_mode(mode: SpecNetworkMode) -> NetworkMode {
 mod tests {
     use super::{machine_backend_from_vm_spec, vm_spec_machine_config, VmSpecInputs};
     use bento_core::{
-        agent::RESERVED_SHELL_PORT, Architecture, Backend as SpecBackend, Boot, GuestOs, Network,
-        NetworkMode as SpecNetworkMode, Platform, Resources, Settings, Storage, VmSpec,
+        agent::RESERVED_SHELL_PORT, Architecture, Backend as SpecBackend, Boot, GuestOs, GuestSpec,
+        Network, NetworkMode as SpecNetworkMode, Platform, Resources, Settings, Storage, VmSpec,
     };
     use bento_vmm::{Backend, VsockPortMode};
     use std::fs;
@@ -287,8 +286,8 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
-                guest_enabled: false,
             },
+            guest: None,
         };
         let backend = machine_backend_from_vm_spec(&spec).expect("backend should resolve");
         assert_eq!(backend, Backend::CloudHypervisor);
@@ -343,8 +342,8 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
-                guest_enabled: true,
             },
+            guest: Some(GuestSpec::default()),
         };
 
         let machine_config = vm_spec_machine_config(VmSpecInputs {

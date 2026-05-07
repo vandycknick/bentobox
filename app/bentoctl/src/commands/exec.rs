@@ -4,6 +4,8 @@ use bento_libvm::{LibVm, MachineRef};
 use clap::Args;
 use eyre::bail;
 
+use bento_protocol::v1::LifecycleState;
+
 use crate::ssh;
 
 #[derive(Args, Debug)]
@@ -43,13 +45,35 @@ impl Cmd {
             .into());
         }
 
-        if !machine.spec.settings.guest_enabled {
-            bail!("instance has no guest shell, cannot run remote commands")
-        }
+        ensure_guest_ready(libvm, &machine).await?;
 
         let status = ssh::run_remote_command(&self.name, self.user.as_deref(), &self.command)?;
         std::process::exit(status.code().unwrap_or(1));
     }
+}
+
+async fn ensure_guest_ready(
+    libvm: &LibVm,
+    machine: &bento_libvm::MachineRecord,
+) -> eyre::Result<()> {
+    if machine.spec.guest_agent().is_none() {
+        bail!("instance has no guest agent configured, cannot run remote commands");
+    }
+
+    let status = libvm.get_status(&MachineRef::Id(machine.id)).await?;
+    let guest_state =
+        LifecycleState::try_from(status.guest_state).unwrap_or(LifecycleState::Unspecified);
+
+    if guest_state != LifecycleState::Running || !status.ready {
+        let summary = if status.summary.is_empty() {
+            format!("guest state is {guest_state:?}")
+        } else {
+            status.summary
+        };
+        bail!("guest agent is not ready: {summary}");
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

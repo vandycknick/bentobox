@@ -2,15 +2,14 @@
 
 # What to run
 
-Create an image:
+Create an image-backed VM with `bentoctl create <ref> <name>` using a Linux image that already
+provides the kernel, initramfs, and writable root disk, then run the following commands inside the
+guest.
 
 ```sh
-./target/release/bentoctl create-raw \
-    --kernel ./builders/images/Image \
-    --initramfs ./builders/images/initrd-aarch64.img \
-    --cpus 2 --memory 2048 \
-    --empty-rootfs 20 \
-    archboot
+./target/release/bentoctl create <image-ref> archboot \
+    --cpus 2 \
+    --memory 2048
 ```
 
 # Inside the VM run the following commands:

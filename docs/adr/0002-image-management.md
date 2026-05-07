@@ -113,17 +113,6 @@ tooling.
 - materializes the instance rootfs from the shared image store using `clonefile` on APFS when
   available, otherwise falls back to a normal copy
 
-### Raw instance creation
-
-`bentoctl create-raw <name>` is the lower-level workflow.
-
-- default rootfs mode is no root disk
-- `--rootfs <path>` attaches an existing root disk
-- `--empty-rootfs <gb>` creates a sparse raw root disk in the instance directory
-
-Backends must not assume a root disk always exists. Boot arguments should only include
-`root=/dev/vda` when a root disk is actually attached.
-
 ### Packing local VMs
 
 `bentoctl images pack <vm> <ref>`:

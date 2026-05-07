@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bento_core::{InstanceFile, VmSpec};
 use bento_libvm::{LibVm, MachineRef, MachineStatus};
-use bento_protocol::{parse_agent_port_args, v1::LifecycleState};
+use bento_protocol::v1::LifecycleState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GuestConfigStatus {
@@ -89,17 +89,15 @@ impl Cmd {
 }
 
 fn guest_config_status(spec: &VmSpec, machine_dir: &std::path::Path) -> GuestConfigStatus {
+    let guest = spec.guest_agent();
     GuestConfigStatus {
-        enabled: spec.settings.guest_enabled,
+        enabled: guest.is_some(),
         bootstrap: spec.boot.bootstrap.is_some(),
-        agent_port: spec
-            .settings
-            .guest_enabled
-            .then(|| parse_agent_port_args(spec.boot.kernel_cmdline.iter().map(String::as_str))),
+        agent_port: guest.map(|guest| guest.control_port),
         cidata_present: machine_dir
             .join(InstanceFile::CidataDisk.as_str())
             .is_file(),
-        shell_expected: spec.settings.guest_enabled,
+        shell_expected: spec.guest_agent().is_some(),
     }
 }
 
@@ -237,14 +235,14 @@ mod tests {
         guest_config_status, now_unix, process_started_at, process_status_label, relative_time,
     };
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, Network, NetworkMode, Platform, Resources, Settings,
-        Storage, VmSpec,
+        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkMode, Platform, Resources,
+        Settings, Storage, VmSpec,
     };
     use bento_libvm::MachineStatus;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn sample_spec(guest_enabled: bool, kernel_cmdline: Vec<String>, bootstrap: bool) -> VmSpec {
+    fn sample_spec(guest: Option<GuestSpec>, bootstrap: bool) -> VmSpec {
         VmSpec {
             version: 1,
             name: "devbox".to_string(),
@@ -260,7 +258,7 @@ mod tests {
             boot: Boot {
                 kernel: None,
                 initramfs: None,
-                kernel_cmdline,
+                kernel_cmdline: Vec::new(),
                 bootstrap: bootstrap.then_some(bento_core::Bootstrap { cloud_init: None }),
             },
             storage: Storage { disks: Vec::new() },
@@ -272,8 +270,8 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
-                guest_enabled,
             },
+            guest,
         }
     }
 
@@ -290,7 +288,7 @@ mod tests {
         let dir = temp_dir("disabled");
         fs::create_dir_all(&dir).expect("create temp dir");
 
-        let config = guest_config_status(&sample_spec(false, Vec::new(), false), &dir);
+        let config = guest_config_status(&sample_spec(None, false), &dir);
 
         assert!(!config.enabled);
         assert_eq!(config.agent_port, None);
@@ -307,7 +305,7 @@ mod tests {
         fs::write(dir.join("cidata.img"), b"cidata").expect("write cidata marker");
 
         let config = guest_config_status(
-            &sample_spec(true, vec!["bento.guest.port=7001".to_string()], false),
+            &sample_spec(Some(GuestSpec { control_port: 7001 }), false),
             &dir,
         );
 

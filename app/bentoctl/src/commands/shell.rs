@@ -1,6 +1,9 @@
 use bento_libvm::{LibVm, MachineRef};
 use clap::{Args, ValueEnum};
+use eyre::bail;
 use std::fmt::{Display, Formatter};
+
+use bento_protocol::v1::LifecycleState;
 
 use crate::ssh;
 use crate::terminal;
@@ -67,22 +70,38 @@ impl Cmd {
                 return terminal::attach_serial_stream(stream).await;
             }
             Some(AttachMode::Shell) => {
+                ensure_guest_ready(libvm, &machine).await?;
                 return ssh::exec_remote_shell(&self.name, self.user.as_deref());
             }
             None => {}
         }
 
-        if !machine.spec.settings.guest_enabled {
-            if self.user.is_some() {
-                eprintln!("[bentoctl] --user is ignored for serial attach");
-            }
-            eprintln!("[bentoctl] instance has no guest shell, using serial attach");
-            let stream = libvm
-                .open_serial_stream(&MachineRef::Id(machine.id))
-                .await?;
-            return terminal::attach_serial_stream(stream).await;
-        }
+        ensure_guest_ready(libvm, &machine).await?;
 
         ssh::exec_remote_shell(&self.name, self.user.as_deref())
     }
+}
+
+async fn ensure_guest_ready(
+    libvm: &LibVm,
+    machine: &bento_libvm::MachineRecord,
+) -> eyre::Result<()> {
+    if machine.spec.guest_agent().is_none() {
+        bail!("instance has no guest agent configured, use --attach serial for console access");
+    }
+
+    let status = libvm.get_status(&MachineRef::Id(machine.id)).await?;
+    let guest_state =
+        LifecycleState::try_from(status.guest_state).unwrap_or(LifecycleState::Unspecified);
+
+    if guest_state != LifecycleState::Running || !status.ready {
+        let summary = if status.summary.is_empty() {
+            format!("guest state is {guest_state:?}")
+        } else {
+            status.summary
+        };
+        bail!("guest agent is not ready: {summary}");
+    }
+
+    Ok(())
 }
