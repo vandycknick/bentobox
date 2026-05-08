@@ -5,12 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::global_config::GlobalConfig;
 use crate::images::store::ImageStore;
 use crate::launch::prepare_instance_runtime;
 use bento_core::InstanceFile;
 use bento_core::{
     Architecture, Backend, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec, MachineId, Mount,
-    Network, NetworkMode, Platform, Resources, Settings, Storage, VmSpec,
+    Network, NetworkDriver, Platform, Resources, Settings, Storage, VmSpec,
 };
 use bento_protocol::agent_port_arg;
 use bento_protocol::v1::InspectResponse;
@@ -22,6 +23,7 @@ use nix::{
 use crate::layout::CONFIG_FILE_NAME;
 use crate::machine_ref::validate_machine_name;
 use crate::monitor;
+use crate::network::{prepare_network_runtime, reconcile_network_runtime};
 use crate::state::{metadata_from_path, MachineMetadata, StateStore};
 use crate::{Layout, LibVmError, MachineRef};
 
@@ -42,7 +44,7 @@ pub struct CreateMachineRequest {
     pub userdata: Option<PathBuf>,
     pub disks: Vec<PathBuf>,
     pub mounts: Vec<Mount>,
-    pub network: Option<NetworkMode>,
+    pub network: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -169,7 +171,7 @@ impl LibVm {
             mounts: assign_mount_tags(request.mounts),
             vsock_endpoints: Vec::new(),
             network: Network {
-                mode: request.network.unwrap_or_else(default_network_mode),
+                driver: resolve_create_network_driver(&request.name, request.network.as_deref())?,
             },
             settings: Settings {
                 nested_virtualization: request.nested_virtualization,
@@ -242,6 +244,7 @@ impl LibVm {
     pub fn remove(&self, machine: &MachineRef) -> Result<(), LibVmError> {
         let metadata = self.resolve_metadata(machine)?;
         let pid_path = self.layout.monitor_pid_path(metadata.id);
+        reconcile_network_runtime(&self.layout, &self.state, &metadata, pid_path.exists())?;
 
         if pid_path.exists() {
             return Err(LibVmError::MachineAlreadyRunning {
@@ -261,6 +264,7 @@ impl LibVm {
     pub async fn start(&self, machine: &MachineRef) -> Result<MachineRecord, LibVmError> {
         let metadata = self.resolve_metadata(machine)?;
         let pid_path = self.layout.monitor_pid_path(metadata.id);
+        reconcile_network_runtime(&self.layout, &self.state, &metadata, pid_path.exists())?;
 
         if pid_path.exists() {
             return Err(LibVmError::MachineAlreadyRunning {
@@ -274,6 +278,9 @@ impl LibVm {
                 message: err.to_string(),
             }
         })?;
+
+        let record = self.machine_record(metadata.clone())?;
+        prepare_network_runtime(&self.layout, &self.state, &metadata, &record.spec).await?;
 
         let startup_pipe = spawn_vmmon(Path::new(&metadata.instance_dir))?;
         wait_for_monitor_start(startup_pipe, &self.layout.monitor_trace_path(metadata.id)).await?;
@@ -307,10 +314,14 @@ impl LibVm {
         nix::sys::signal::kill(Pid::from_raw(pid), Signal::SIGINT)
             .map_err(|err| io::Error::other(err.to_string()))?;
         wait_for_monitor_stop(&pid_path, &metadata.name).await?;
+        reconcile_network_runtime(&self.layout, &self.state, &metadata, false)?;
         self.machine_record(metadata)
     }
 
     pub async fn get_status(&self, machine: &MachineRef) -> Result<InspectResponse, LibVmError> {
+        let metadata = self.resolve_metadata(machine)?;
+        let monitor_running = self.layout.monitor_pid_path(metadata.id).exists();
+        reconcile_network_runtime(&self.layout, &self.state, &metadata, monitor_running)?;
         let (metadata, socket_path) = self.resolve_running_socket(machine)?;
         monitor::get_vm_monitor_inspect(&socket_path)
             .await
@@ -502,14 +513,36 @@ fn gigabytes_to_bytes_checked(size_gb: Option<u64>) -> Option<u64> {
     size_gb.map(gigabytes_to_bytes)
 }
 
+fn resolve_create_network_driver(
+    name: &str,
+    requested: Option<&str>,
+) -> Result<NetworkDriver, LibVmError> {
+    match requested {
+        Some("none") => Ok(NetworkDriver::None),
+        Some("vznat") => Ok(NetworkDriver::VzNat),
+        Some("gvisor") => Ok(NetworkDriver::Gvisor),
+        Some("user") => GlobalConfig::load()
+            .map(|config| config.networking.userspace)
+            .map_err(|err| LibVmError::InvalidCreateRequest {
+                name: name.to_string(),
+                reason: format!("resolve userspace network alias from global config: {err}"),
+            }),
+        Some(other) => Err(LibVmError::InvalidCreateRequest {
+            name: name.to_string(),
+            reason: format!("invalid network driver {other:?}"),
+        }),
+        None => Ok(default_network_driver()),
+    }
+}
+
 #[cfg(target_os = "macos")]
-fn default_network_mode() -> NetworkMode {
-    NetworkMode::User
+fn default_network_driver() -> NetworkDriver {
+    NetworkDriver::VzNat
 }
 
 #[cfg(not(target_os = "macos"))]
-fn default_network_mode() -> NetworkMode {
-    NetworkMode::None
+fn default_network_driver() -> NetworkDriver {
+    NetworkDriver::Gvisor
 }
 
 fn canonicalize_optional_existing_path(
@@ -767,8 +800,8 @@ mod tests {
     use super::{LibVm, MachineStatus};
     use crate::{Layout, LibVmError, MachineRef};
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkMode, Platform, Resources,
-        Settings, Storage, VmSpec,
+        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkDriver, Platform,
+        Resources, Settings, Storage, VmSpec,
     };
 
     fn sample_vm_spec(name: &str) -> VmSpec {
@@ -794,7 +827,7 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             network: Network {
-                mode: NetworkMode::User,
+                driver: NetworkDriver::Gvisor,
             },
             settings: Settings {
                 nested_virtualization: false,

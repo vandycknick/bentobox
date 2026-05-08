@@ -9,6 +9,6 @@ pub use crate::machine_id::{looks_like_id_prefix, MachineId, MachineIdParseError
 pub use crate::mount_path::resolve_mount_location;
 pub use crate::spec::{
     Architecture, Backend, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec,
-    LifecycleSpec, Mount, Network, NetworkMode, Platform, PluginSpec, Resources, RestartPolicy,
+    LifecycleSpec, Mount, Network, NetworkDriver, Platform, PluginSpec, Resources, RestartPolicy,
     Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec, DEFAULT_GUEST_CONTROL_PORT,
 };

@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 
 use bento_core::{
     agent::RESERVED_SHELL_PORT, resolve_mount_location, Backend as SpecBackend, DiskKind,
-    InstanceFile, NetworkMode as SpecNetworkMode, VmSpec, VsockEndpointMode,
+    InstanceFile, NetworkDriver, VmSpec, VsockEndpointMode,
 };
 use bento_vmm::{
-    Backend, DiskImage, MachineIdentifier, NetworkMode, SharedDirectory, VmConfig, VmmError,
-    VsockPort, VsockPortMode,
+    Backend, DiskImage, MachineIdentifier, NetworkMode, SharedDirectory, UserNetwork,
+    UserNetworkTransport, VmConfig, VmmError, VsockPort, VsockPortMode,
 };
+use serde::Deserialize;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -49,13 +50,20 @@ pub(crate) fn vm_spec_machine_config(
 
     let mut builder = VmConfig::builder(inputs.name)
         .base_directory(inputs.data_dir.to_path_buf())
-        .network(map_vm_spec_network_mode(inputs.spec.network.mode))
+        .network(map_vm_spec_network_mode(
+            inputs.spec.platform.backend,
+            inputs.spec.network.driver,
+        ))
         .kernel_cmdline(inputs.spec.boot.kernel_cmdline.clone())
         .nested_virtualization(inputs.spec.settings.nested_virtualization)
         .rosetta(inputs.spec.settings.rosetta);
 
     if let Some(machine_identifier) = machine_identifier.clone() {
         builder = builder.machine_identifier(machine_identifier);
+    }
+
+    if let Some(network) = user_network_from_runtime(inputs.data_dir, inputs.spec)? {
+        builder = builder.user_network(network);
     }
 
     builder = builder
@@ -229,12 +237,83 @@ pub(crate) fn machine_backend_from_vm_spec(spec: &VmSpec) -> Result<Backend, Vmm
     }
 }
 
-fn map_vm_spec_network_mode(mode: SpecNetworkMode) -> NetworkMode {
-    match mode {
-        SpecNetworkMode::None => NetworkMode::None,
-        SpecNetworkMode::User => NetworkMode::VzNat,
-        SpecNetworkMode::Bridged => NetworkMode::Bridged,
+fn map_vm_spec_network_mode(backend: SpecBackend, driver: NetworkDriver) -> NetworkMode {
+    match driver {
+        NetworkDriver::None => NetworkMode::None,
+        NetworkDriver::Gvisor if backend_uses_vznat_for_gvisor(backend) => NetworkMode::VzNat,
+        NetworkDriver::Gvisor => NetworkMode::User,
+        NetworkDriver::VzNat => NetworkMode::VzNat,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn backend_uses_vznat_for_gvisor(backend: SpecBackend) -> bool {
+    matches!(backend, SpecBackend::Auto | SpecBackend::Vz)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn backend_uses_vznat_for_gvisor(backend: SpecBackend) -> bool {
+    matches!(backend, SpecBackend::Vz)
+}
+
+#[derive(Debug, Deserialize)]
+struct NetworkRuntimeFile {
+    driver: String,
+    transport: NetworkTransportFile,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum NetworkTransportFile {
+    Unixgram { path: PathBuf, mac: [u8; 6] },
+}
+
+fn user_network_from_runtime(
+    data_dir: &Path,
+    spec: &VmSpec,
+) -> Result<Option<UserNetwork>, MachineSpecError> {
+    if !matches!(spec.network.driver, NetworkDriver::Gvisor)
+        || !backend_uses_user_runtime(spec.platform.backend)
+    {
+        return Ok(None);
+    }
+
+    let path = data_dir.join("net/runtime.json");
+    let raw = std::fs::read_to_string(&path)?;
+    let runtime: NetworkRuntimeFile = serde_json::from_str(&raw).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("parse network runtime {}: {err}", path.display()),
+        )
+    })?;
+
+    if runtime.driver != "gvisor" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "unsupported network runtime {}: driver={}",
+                path.display(),
+                runtime.driver,
+            ),
+        )
+        .into());
+    }
+
+    match runtime.transport {
+        NetworkTransportFile::Unixgram { path, mac } => Ok(Some(UserNetwork {
+            transport: UserNetworkTransport::Unixgram { path, mac },
+        })),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn backend_uses_user_runtime(backend: SpecBackend) -> bool {
+    matches!(backend, SpecBackend::Auto | SpecBackend::Krun)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn backend_uses_user_runtime(_backend: SpecBackend) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -242,7 +321,7 @@ mod tests {
     use super::{machine_backend_from_vm_spec, vm_spec_machine_config, VmSpecInputs};
     use bento_core::{
         agent::RESERVED_SHELL_PORT, Architecture, Backend as SpecBackend, Boot, GuestOs, GuestSpec,
-        Network, NetworkMode as SpecNetworkMode, Platform, Resources, Settings, Storage, VmSpec,
+        Network, NetworkDriver, Platform, Resources, Settings, Storage, VmSpec,
     };
     use bento_vmm::{Backend, VsockPortMode};
     use std::fs;
@@ -281,7 +360,7 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             network: Network {
-                mode: SpecNetworkMode::None,
+                driver: NetworkDriver::None,
             },
             settings: Settings {
                 nested_virtualization: false,
@@ -337,7 +416,7 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             network: Network {
-                mode: SpecNetworkMode::None,
+                driver: NetworkDriver::None,
             },
             settings: Settings {
                 nested_virtualization: false,

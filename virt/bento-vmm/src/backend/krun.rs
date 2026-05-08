@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bento_krun::{
-    Disk as KrunDisk, KrunBackendError, Mount as KrunMount, VirtualMachine, VirtualMachineBuilder,
-    VsockPort as KrunVsockPort,
+    Disk as KrunDisk, KrunBackendError, Mount as KrunMount, NetUnixgram as KrunNetUnixgram,
+    VirtualMachine, VirtualMachineBuilder, VsockPort as KrunVsockPort,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex as AsyncMutex;
@@ -15,7 +15,8 @@ use tokio::time::{sleep, timeout};
 
 use crate::stream::{MachineSerialStream, VsockListener, VsockStream};
 use crate::types::{
-    Backend, DiskImage, NetworkMode, SharedDirectory, VmConfig, VmExit, VmmError, VsockPortMode,
+    Backend, DiskImage, NetworkMode, SharedDirectory, UserNetworkTransport, VmConfig, VmExit,
+    VmmError, VsockPortMode,
 };
 
 const KRUN_BINARY_ENV: &str = "KRUN_BIN";
@@ -92,20 +93,33 @@ pub(crate) fn validate(config: &VmConfig) -> Result<(), VmmError> {
 
     match config.network {
         NetworkMode::None => {}
+        NetworkMode::User => validate_user_network(config)?,
         NetworkMode::VzNat => {
-            return invalid_config(config, "krun networking is not implemented yet")
-        }
-        NetworkMode::Bridged => {
-            return invalid_config(config, "bridged networking is not implemented for krun yet")
-        }
-        NetworkMode::Cni => {
-            return invalid_config(config, "cni networking is not implemented for krun yet")
+            return invalid_config(
+                config,
+                "vznat networking is only supported by the VZ backend",
+            )
         }
     }
 
     validate_vsock_ports(config)?;
 
     Ok(())
+}
+
+fn validate_user_network(config: &VmConfig) -> Result<(), VmmError> {
+    match config
+        .user_network
+        .as_ref()
+        .map(|network| &network.transport)
+    {
+        Some(UserNetworkTransport::Unixgram { path, .. }) if !path.as_os_str().is_empty() => Ok(()),
+        Some(UserNetworkTransport::Unixgram { .. }) => invalid_config(
+            config,
+            "user networking requires a non-empty unixgram socket path",
+        ),
+        None => invalid_config(config, "user networking requires a userspace attachment"),
+    }
 }
 
 fn prepare(config: &VmConfig) -> Result<(), VmmError> {
@@ -408,6 +422,16 @@ fn build_krun_vm(krun_bin: &Path, config: &VmConfig) -> Result<VirtualMachineBui
             path: vsock_path(config, port, mode),
             listen: mode == VsockPortMode::Connect,
         });
+    }
+    if let Some(network) = config.user_network.as_ref() {
+        match &network.transport {
+            UserNetworkTransport::Unixgram { path, mac } => {
+                builder = builder.net_unixgram(KrunNetUnixgram {
+                    path: path.clone(),
+                    mac: *mac,
+                });
+            }
+        }
     }
 
     Ok(builder)

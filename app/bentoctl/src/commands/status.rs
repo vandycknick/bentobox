@@ -235,8 +235,8 @@ mod tests {
         guest_config_status, now_unix, process_started_at, process_status_label, relative_time,
     };
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkMode, Platform, Resources,
-        Settings, Storage, VmSpec,
+        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkDriver, Platform,
+        Resources, Settings, Storage, VmSpec,
     };
     use bento_libvm::MachineStatus;
     use std::fs;
@@ -265,7 +265,7 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             network: Network {
-                mode: NetworkMode::User,
+                driver: NetworkDriver::Gvisor,
             },
             settings: Settings {
                 nested_virtualization: false,

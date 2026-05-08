@@ -4,6 +4,7 @@ use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use bento_utils::format_mac;
 use nix::pty::openpty;
 use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
 
@@ -71,6 +72,11 @@ impl VirtualMachineBuilder {
 
     pub fn vsock_port(mut self, port: crate::VsockPort) -> Self {
         self.config.vsock_ports.push(port);
+        self
+    }
+
+    pub fn net_unixgram(mut self, net: crate::NetUnixgram) -> Self {
+        self.config.net_unixgrams.push(net);
         self
     }
 
@@ -150,6 +156,9 @@ pub(crate) fn command_args(config: &KrunConfig) -> Vec<OsString> {
     for port in &config.vsock_ports {
         push_arg(&mut args, "--vsock-port", format_vsock_port(port));
     }
+    for net in &config.net_unixgrams {
+        push_arg(&mut args, "--net-unixgram", format_net_unixgram(net));
+    }
     if config.stdio_console {
         args.push("--stdio-console".into());
     }
@@ -189,6 +198,10 @@ fn format_vsock_port(port: &crate::VsockPort) -> String {
         port.path.display(),
         if port.listen { "connect" } else { "listen" }
     )
+}
+
+fn format_net_unixgram(net: &crate::NetUnixgram) -> String {
+    format!("{},{}", net.path.display(), format_mac(net.mac))
 }
 
 fn format_ro(read_only: bool) -> &'static str {
@@ -264,5 +277,26 @@ mod tests {
 
         assert!(!args.iter().any(|arg| arg == "run"));
         assert!(args.iter().any(|arg| arg == "--stdio-console"));
+    }
+
+    #[test]
+    fn start_arguments_include_unixgram_networks() {
+        let config = VirtualMachineBuilder::new("krun")
+            .cpus(2)
+            .memory_mib(1024)
+            .kernel("/kernel")
+            .net_unixgram(crate::NetUnixgram {
+                path: PathBuf::from("/tmp/gvproxy.sock"),
+                mac: [0x02, 0x94, 0xef, 0xe4, 0x0c, 0xee],
+            })
+            .build()
+            .expect("config should be valid");
+
+        let args = command_args(&config);
+
+        assert!(args.iter().any(|arg| arg == "--net-unixgram"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "/tmp/gvproxy.sock,02:94:ef:e4:0c:ee"));
     }
 }

@@ -201,7 +201,7 @@ pub struct Mount {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Network {
-    pub mode: NetworkMode,
+    pub driver: NetworkDriver,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,18 +236,18 @@ pub enum Backend {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NetworkMode {
+pub enum NetworkDriver {
     None,
-    User,
-    Bridged,
+    Gvisor,
+    VzNat,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         Architecture, Backend, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec,
-        LifecycleSpec, Mount, Network, NetworkMode, Platform, PluginSpec, Resources, RestartPolicy,
-        Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
+        LifecycleSpec, Mount, Network, NetworkDriver, Platform, PluginSpec, Resources,
+        RestartPolicy, Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -314,7 +314,7 @@ mod tests {
                 },
             }],
             network: Network {
-                mode: NetworkMode::User,
+                driver: NetworkDriver::Gvisor,
             },
             settings: Settings {
                 nested_virtualization: false,
@@ -345,7 +345,7 @@ mod tests {
         assert!(yaml.contains("vsock_endpoints:"));
         assert!(yaml.contains("guest:"));
         assert!(yaml.contains("control_port: 1027"));
-        assert!(yaml.contains("mode: user"));
+        assert!(yaml.contains("driver: gvisor"));
         assert!(yaml.contains("mode: connect"));
         assert!(!yaml.contains("guest_enabled"));
     }
@@ -372,7 +372,7 @@ storage:
   disks: []
 mounts: []
 network:
-  mode: user
+  driver: gvisor
 settings:
   nested_virtualization: false
   rosetta: true
@@ -406,7 +406,7 @@ storage:
   disks: []
 mounts: []
 network:
-  mode: user
+  driver: gvisor
 settings:
   nested_virtualization: false
   rosetta: true
@@ -440,7 +440,7 @@ storage:
 mounts: []
 endpoints: []
 network:
-  mode: user
+  driver: gvisor
 settings:
   nested_virtualization: false
   rosetta: true

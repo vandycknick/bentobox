@@ -125,8 +125,8 @@ fn agent_port_from_spec(spec: &VmSpec) -> u32 {
 mod tests {
     use super::agent_port_from_spec;
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkMode, Platform, Resources,
-        Settings, Storage, VmSpec,
+        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkDriver, Platform,
+        Resources, Settings, Storage, VmSpec,
     };
 
     fn sample_spec(guest: Option<GuestSpec>) -> VmSpec {
@@ -152,7 +152,7 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             network: Network {
-                mode: NetworkMode::User,
+                driver: NetworkDriver::Gvisor,
             },
             settings: Settings {
                 nested_virtualization: false,

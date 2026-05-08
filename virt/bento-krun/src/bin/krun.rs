@@ -26,6 +26,8 @@ struct Cli {
     mounts: Vec<bento_krun::Mount>,
     #[arg(long = "vsock-port", value_parser = parse::vsock_port)]
     vsock_ports: Vec<bento_krun::VsockPort>,
+    #[arg(long = "net-unixgram", value_parser = parse::net_unixgram)]
+    net_unixgrams: Vec<bento_krun::NetUnixgram>,
     #[arg(long)]
     stdio_console: bool,
     #[arg(long)]
@@ -43,6 +45,7 @@ impl Cli {
             disks: self.disks,
             mounts: self.mounts,
             vsock_ports: self.vsock_ports,
+            net_unixgrams: self.net_unixgrams,
             stdio_console: self.stdio_console,
             disable_implicit_vsock: self.disable_implicit_vsock,
         }
@@ -111,6 +114,11 @@ fn configure_ctx(ctx_id: u32, config: &KrunConfig) -> eyre::Result<()> {
 
     for port in &config.vsock_ports {
         ctx::add_vsock_port2(ctx_id, port.port, &path_string(&port.path), port.listen)?;
+    }
+
+    for net in &config.net_unixgrams {
+        require_feature(Feature::Net, "userspace networking (--net-unixgram)")?;
+        ctx::add_net_unixgram(ctx_id, &path_string(&net.path), net.mac)?;
     }
 
     if config.stdio_console {

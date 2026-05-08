@@ -60,6 +60,38 @@ impl Layout {
             .join(InstanceFile::VmmonTraceLog.as_str())
     }
 
+    pub fn net_dir(&self) -> PathBuf {
+        self.data_dir.join("net")
+    }
+
+    pub fn network_instance_dir(&self, network_id: &str) -> PathBuf {
+        self.net_dir().join(network_id)
+    }
+
+    pub fn instance_network_link(&self, machine_id: MachineId) -> PathBuf {
+        self.instance_dir(machine_id).join("net")
+    }
+
+    pub fn network_runtime_path(&self, network_id: &str) -> PathBuf {
+        self.network_instance_dir(network_id).join("runtime.json")
+    }
+
+    pub fn gvproxy_socket_path(&self, network_id: &str) -> PathBuf {
+        self.network_instance_dir(network_id).join("gvproxy.sock")
+    }
+
+    pub fn gvproxy_log_path(&self, network_id: &str) -> PathBuf {
+        self.network_instance_dir(network_id).join("gvproxy.log")
+    }
+
+    pub fn gvproxy_pid_path(&self, network_id: &str) -> PathBuf {
+        self.network_instance_dir(network_id).join("gvproxy.pid")
+    }
+
+    pub fn gvproxy_pcap_path(&self, network_id: &str) -> PathBuf {
+        self.network_instance_dir(network_id).join("capture.pcap")
+    }
+
     pub fn staging_dir(&self) -> PathBuf {
         self.instances_dir().join(".staging")
     }
@@ -155,6 +187,38 @@ mod tests {
             PathBuf::from("/tmp/bento/instances")
                 .join(machine_id.to_string())
                 .join(InstanceFile::VmmonTraceLog.as_str())
+        );
+        assert_eq!(layout.net_dir(), PathBuf::from("/tmp/bento/net"));
+        let network_id = "net123";
+        assert_eq!(
+            layout.network_instance_dir(network_id),
+            PathBuf::from("/tmp/bento/net/net123")
+        );
+        assert_eq!(
+            layout.instance_network_link(machine_id),
+            PathBuf::from("/tmp/bento/instances")
+                .join(machine_id.to_string())
+                .join("net")
+        );
+        assert_eq!(
+            layout.network_runtime_path(network_id),
+            PathBuf::from("/tmp/bento/net/net123/runtime.json")
+        );
+        assert_eq!(
+            layout.gvproxy_socket_path(network_id),
+            PathBuf::from("/tmp/bento/net/net123/gvproxy.sock")
+        );
+        assert_eq!(
+            layout.gvproxy_log_path(network_id),
+            PathBuf::from("/tmp/bento/net/net123/gvproxy.log")
+        );
+        assert_eq!(
+            layout.gvproxy_pid_path(network_id),
+            PathBuf::from("/tmp/bento/net/net123/gvproxy.pid")
+        );
+        assert_eq!(
+            layout.gvproxy_pcap_path(network_id),
+            PathBuf::from("/tmp/bento/net/net123/capture.pcap")
         );
     }
 

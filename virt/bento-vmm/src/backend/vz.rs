@@ -445,16 +445,11 @@ fn validate_machine_config(spec: &VmConfig) -> Result<(), VmmError> {
 
     match spec.network {
         NetworkMode::VzNat | NetworkMode::None => {}
-        NetworkMode::Bridged => {
+        NetworkMode::User => {
             return Err(VmmError::InvalidConfig {
                 name: spec.name.clone(),
-                reason: "network mode 'bridged' is not implemented yet".to_string(),
-            });
-        }
-        NetworkMode::Cni => {
-            return Err(VmmError::InvalidConfig {
-                name: spec.name.clone(),
-                reason: "network mode 'cni' is not implemented yet".to_string(),
+                reason: "network mode 'user' must be resolved before reaching the VZ backend"
+                    .to_string(),
             });
         }
     }

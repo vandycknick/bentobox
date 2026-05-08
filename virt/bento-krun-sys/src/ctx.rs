@@ -165,6 +165,20 @@ pub fn add_vsock_port2(ctx: u32, port: u32, path: &str, listen: bool) -> Result<
     })
 }
 
+pub fn add_net_unixgram(ctx: u32, path: &str, mut mac: [u8; 6]) -> Result<()> {
+    let path = CString::new(path)?;
+    check("add_net_unixgram", unsafe {
+        sys::krun_add_net_unixgram(
+            ctx,
+            path.as_ptr(),
+            -1,
+            mac.as_mut_ptr(),
+            sys::COMPAT_NET_FEATURES,
+            sys::NET_FLAG_VFKIT | sys::NET_FLAG_DHCP_CLIENT,
+        )
+    })
+}
+
 pub fn set_console_output(ctx: u32, path: &str) -> Result<()> {
     let path = CString::new(path)?;
     check("set_console_output", unsafe {

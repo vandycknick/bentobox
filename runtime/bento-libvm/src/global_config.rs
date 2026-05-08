@@ -4,12 +4,26 @@ use eyre::Context;
 use serde::Deserialize;
 
 use crate::layout::resolve_config_dir;
+use bento_core::NetworkDriver;
 
 const CONFIG_FILE_NAME: &str = "config.yaml";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlobalConfig {
     pub guest_agent_binary: PathBuf,
+    pub networking: NetworkingConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkingConfig {
+    pub userspace: NetworkDriver,
+    pub gvisor: GvisorConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GvisorConfig {
+    pub subnet: String,
+    pub pcap: bool,
 }
 
 impl GlobalConfig {
@@ -46,17 +60,73 @@ fn parse_global_config(input: &str) -> eyre::Result<GlobalConfig> {
         ));
     }
 
-    Ok(GlobalConfig { guest_agent_binary })
+    Ok(GlobalConfig {
+        guest_agent_binary,
+        networking: NetworkingConfig {
+            userspace: parsed
+                .networking
+                .as_ref()
+                .map(|networking| networking.userspace)
+                .unwrap_or(NetworkDriver::Gvisor),
+            gvisor: parsed
+                .networking
+                .and_then(|networking| networking.drivers.and_then(|drivers| drivers.gvisor))
+                .map(GvisorConfig::from)
+                .unwrap_or_default(),
+        },
+    })
 }
 
 #[derive(Debug, Deserialize)]
 struct RawGlobalConfig {
     guest: RawGuestConfig,
+    networking: Option<RawNetworkingConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawGuestConfig {
     agent_binary: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawNetworkingConfig {
+    #[serde(default = "default_userspace_driver")]
+    userspace: NetworkDriver,
+    drivers: Option<RawNetworkDriversConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawNetworkDriversConfig {
+    gvisor: Option<RawGvisorConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawGvisorConfig {
+    subnet: Option<String>,
+    pcap: Option<bool>,
+}
+
+impl Default for GvisorConfig {
+    fn default() -> Self {
+        Self {
+            subnet: "192.168.105.0/24".to_string(),
+            pcap: false,
+        }
+    }
+}
+
+impl From<RawGvisorConfig> for GvisorConfig {
+    fn from(raw: RawGvisorConfig) -> Self {
+        let default = Self::default();
+        Self {
+            subnet: raw.subnet.unwrap_or(default.subnet),
+            pcap: raw.pcap.unwrap_or(default.pcap),
+        }
+    }
+}
+
+fn default_userspace_driver() -> NetworkDriver {
+    NetworkDriver::Gvisor
 }
 
 pub fn ensure_guest_agent_binary(config: &GlobalConfig) -> eyre::Result<&Path> {
@@ -89,6 +159,34 @@ guest:
         .expect("parse config");
 
         assert_eq!(cfg.guest_agent_binary, PathBuf::from("/tmp/bento-agent"));
+        assert_eq!(cfg.networking.userspace, NetworkDriver::Gvisor);
+        assert_eq!(cfg.networking.gvisor, GvisorConfig::default());
+    }
+
+    #[test]
+    fn parse_global_config_reads_networking_defaults() {
+        let cfg = parse_global_config(
+            r#"
+guest:
+  agent_binary: "/tmp/bento-agent"
+networking:
+  userspace: gvisor
+  drivers:
+    gvisor:
+      subnet: "192.168.105.0/24"
+      pcap: true
+"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(cfg.networking.userspace, NetworkDriver::Gvisor);
+        assert_eq!(
+            cfg.networking.gvisor,
+            GvisorConfig {
+                subnet: "192.168.105.0/24".to_string(),
+                pcap: true,
+            }
+        );
     }
 
     #[test]

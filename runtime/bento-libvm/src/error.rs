@@ -38,6 +38,9 @@ pub enum LibVmError {
     #[error("instance preparation for {reference} failed: {message}")]
     InstancePreparationFailed { reference: String, message: String },
 
+    #[error("network runtime for {reference} failed: {message}")]
+    NetworkRuntime { reference: String, message: String },
+
     #[error(
         "vmmon executable not found. Expected a sibling binary at {expected_path} or `vmmon` in PATH. Build it with `cargo build -p bento-vmmon` (or `cargo build --release -p bento-vmmon`)."
     )]

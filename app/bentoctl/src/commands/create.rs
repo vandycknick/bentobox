@@ -15,9 +15,10 @@ pub(crate) struct MountConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkMode {
+    User,
+    Gvisor,
     VzNat,
     None,
-    Bridged,
 }
 
 #[derive(Args, Debug)]
@@ -152,20 +153,22 @@ pub(crate) fn parse_mount_arg(input: &str) -> Result<MountConfig, String> {
 
 pub(crate) fn parse_network_mode(input: &str) -> Result<NetworkMode, String> {
     match input {
+        "user" => Ok(NetworkMode::User),
+        "gvisor" => Ok(NetworkMode::Gvisor),
         "vznat" => Ok(NetworkMode::VzNat),
         "none" => Ok(NetworkMode::None),
-        "bridged" => Ok(NetworkMode::Bridged),
         _ => Err(format!(
-            "invalid network mode '{input}', expected one of: vznat, none, bridged"
+            "invalid network mode '{input}', expected one of: user, gvisor, vznat, none"
         )),
     }
 }
 
-fn map_network_mode(mode: NetworkMode) -> bento_core::NetworkMode {
+fn map_network_mode(mode: NetworkMode) -> String {
     match mode {
-        NetworkMode::VzNat => bento_core::NetworkMode::User,
-        NetworkMode::None => bento_core::NetworkMode::None,
-        NetworkMode::Bridged => bento_core::NetworkMode::Bridged,
+        NetworkMode::User => "user".to_string(),
+        NetworkMode::Gvisor => "gvisor".to_string(),
+        NetworkMode::VzNat => "vznat".to_string(),
+        NetworkMode::None => "none".to_string(),
     }
 }
 
@@ -210,16 +213,20 @@ mod tests {
     #[test]
     fn parse_network_mode_accepts_expected_values() {
         assert_eq!(
+            parse_network_mode("user").expect("user should parse"),
+            NetworkMode::User
+        );
+        assert_eq!(
             parse_network_mode("vznat").expect("vznat should parse"),
             NetworkMode::VzNat
         );
         assert_eq!(
-            parse_network_mode("none").expect("none should parse"),
-            NetworkMode::None
+            parse_network_mode("gvisor").expect("gvisor should parse"),
+            NetworkMode::Gvisor
         );
         assert_eq!(
-            parse_network_mode("bridged").expect("bridged should parse"),
-            NetworkMode::Bridged
+            parse_network_mode("none").expect("none should parse"),
+            NetworkMode::None
         );
     }
 

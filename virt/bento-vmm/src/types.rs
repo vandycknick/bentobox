@@ -87,6 +87,7 @@ pub struct VmConfig {
     pub nested_virtualization: bool,
     pub rosetta: bool,
     pub network: NetworkMode,
+    pub user_network: Option<UserNetwork>,
     pub kernel_cmdline: Vec<String>,
     pub root_disk: Option<DiskImage>,
     pub data_disks: Vec<DiskImage>,
@@ -107,6 +108,7 @@ impl VmConfig {
             nested_virtualization: false,
             rosetta: false,
             network: NetworkMode::None,
+            user_network: None,
             kernel_cmdline: Vec::new(),
             root_disk: None,
             data_disks: Vec::new(),
@@ -190,6 +192,11 @@ impl VmConfigBuilder {
         self
     }
 
+    pub fn user_network(mut self, network: UserNetwork) -> Self {
+        self.config.user_network = Some(network);
+        self
+    }
+
     pub fn kernel_cmdline(mut self, kernel_cmdline: Vec<String>) -> Self {
         self.config.kernel_cmdline = kernel_cmdline;
         self
@@ -247,10 +254,19 @@ pub enum VsockPortMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkMode {
+    User,
     VzNat,
     None,
-    Bridged,
-    Cni,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserNetwork {
+    pub transport: UserNetworkTransport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserNetworkTransport {
+    Unixgram { path: PathBuf, mac: [u8; 6] },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

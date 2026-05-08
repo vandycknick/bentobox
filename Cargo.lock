@@ -336,6 +336,7 @@ name = "bento-krun"
 version = "0.1.0"
 dependencies = [
  "bento-krun-sys",
+ "bento-utils",
  "clap",
  "eyre",
  "nix 0.31.1",
@@ -357,6 +358,7 @@ version = "0.1.0"
 dependencies = [
  "bento-core",
  "bento-protocol",
+ "bento-utils",
  "chrono",
  "eyre",
  "fatfs",
@@ -414,6 +416,10 @@ dependencies = [
  "tonic",
  "tonic-build",
 ]
+
+[[package]]
+name = "bento-utils"
+version = "0.1.0"
 
 [[package]]
 name = "bento-vmm"

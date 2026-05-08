@@ -99,22 +99,16 @@ pub(crate) fn validate(config: &VmConfig) -> Result<(), VmmError> {
 
     match machine.network {
         NetworkMode::None => {}
+        NetworkMode::User => {
+            return invalid_config(
+                config,
+                "user networking is not implemented for the firecracker backend yet",
+            );
+        }
         NetworkMode::VzNat => {
             return invalid_config(
                 config,
                 "vznat networking is only supported by the VZ backend",
-            );
-        }
-        NetworkMode::Bridged => {
-            return invalid_config(
-                config,
-                "bridged networking is not implemented for the firecracker backend yet",
-            );
-        }
-        NetworkMode::Cni => {
-            return invalid_config(
-                config,
-                "cni networking is not implemented for the firecracker backend yet",
             );
         }
     }

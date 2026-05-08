@@ -8,13 +8,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bento_core::agent::{
     AgentConfig, AgentDnsConfig, AgentForwardConfig, AgentSshConfig, AgentUdsForwardConfig,
 };
-use bento_core::{resolve_mount_location, InstanceFile, NetworkMode as SpecNetworkMode, VmSpec};
+use bento_core::{
+    resolve_mount_location, Backend as SpecBackend, InstanceFile, MachineId, NetworkDriver, VmSpec,
+};
+use bento_utils::format_mac;
 use eyre::Context;
 use fatfs::{format_volume, FileSystem, FormatVolumeOptions, FsOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::global_config::{ensure_guest_agent_binary, GlobalConfig};
 use crate::host_user::{self, HostUser};
+use crate::network::mac_from_machine_id;
 use crate::ssh_keys;
 
 const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-agent";
@@ -73,11 +77,11 @@ fn read_vm_spec_from_dir(instance_dir: &Path) -> eyre::Result<VmSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_guest_runtime_config;
+    use super::{render_network_config_for_instance, resolve_guest_runtime_config};
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, GuestSpec, LifecycleSpec, Network, NetworkMode,
-        Platform, PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode,
-        VsockEndpointSpec,
+        Architecture, Backend, Boot, GuestOs, GuestSpec, LifecycleSpec, MachineId, Network,
+        NetworkDriver, Platform, PluginSpec, Resources, Settings, Storage, VmSpec,
+        VsockEndpointMode, VsockEndpointSpec,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -106,7 +110,7 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             network: Network {
-                mode: NetworkMode::User,
+                driver: NetworkDriver::Gvisor,
             },
             settings: Settings {
                 nested_virtualization: false,
@@ -114,6 +118,37 @@ mod tests {
             },
             guest: guest_configured.then_some(GuestSpec::default()),
         }
+    }
+
+    #[test]
+    fn network_config_for_libkrun_user_matches_generated_mac() {
+        let id = MachineId::new();
+        let spec = sample_spec(Vec::new(), true);
+        let config = render_network_config_for_instance(&PathBuf::from(id.to_string()), &spec)
+            .expect("network config should render")
+            .expect("user networking should configure network");
+
+        assert!(config.contains("version: 2"));
+        assert!(config.contains("bento0:"));
+        assert!(config.contains("match:"));
+        assert!(config.contains("set-name: eth0"));
+        assert!(config.contains("dhcp4: true"));
+    }
+
+    #[test]
+    fn network_config_for_vznat_keeps_vz_interface_name() {
+        let id = MachineId::new();
+        let mut spec = sample_spec(Vec::new(), true);
+        spec.network = Network {
+            driver: NetworkDriver::VzNat,
+        };
+        let config = render_network_config_for_instance(&PathBuf::from(id.to_string()), &spec)
+            .expect("network config should render")
+            .expect("vznat should configure network");
+
+        assert!(config.contains("version: 2"));
+        assert!(config.contains("enp0s1:"));
+        assert!(!config.contains("set-name"));
     }
 
     fn forward_endpoint(port: u32, config: Option<serde_json::Value>) -> VsockEndpointSpec {
@@ -145,7 +180,9 @@ mod tests {
     #[test]
     fn guest_runtime_disables_dns_but_keeps_ssh_without_guest_networking() {
         let mut spec = sample_spec(Vec::new(), true);
-        spec.network.mode = NetworkMode::None;
+        spec.network = Network {
+            driver: NetworkDriver::None,
+        };
 
         let runtime = resolve_guest_runtime_config(&spec).expect("runtime config should resolve");
 
@@ -227,7 +264,11 @@ fn resolve_guest_runtime_config(spec: &VmSpec) -> eyre::Result<AgentConfig> {
             enabled: spec.guest_agent().is_some(),
         },
         dns: AgentDnsConfig {
-            enabled: spec.guest_agent().is_some() && spec.network.mode != SpecNetworkMode::None,
+            enabled: spec.guest_agent().is_some()
+                && matches!(
+                    spec.network.driver,
+                    NetworkDriver::Gvisor | NetworkDriver::VzNat
+                ),
             ..AgentDnsConfig::default()
         },
         forward: resolve_forward_runtime_config(spec)?,
@@ -317,7 +358,7 @@ fn build_cidata_disk(
 
     let user_data = render_user_data(spec, host_user, ssh_public_key)?;
     let meta_data = render_meta_data(&spec.name)?;
-    let network_config = render_network_config_for_instance(spec)?;
+    let network_config = render_network_config_for_instance(instance_dir, spec)?;
     let agent_config = render_agent_config(guest_runtime)?;
     let config_env = render_config_env(spec)?;
     let iso_path = instance_dir.join(InstanceFile::CidataDisk.as_str());
@@ -507,8 +548,17 @@ struct NetworkConfigV2 {
 
 #[derive(Serialize)]
 struct EthernetConfigV2 {
+    #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
+    matches: Option<EthernetMatchConfigV2>,
+    #[serde(rename = "set-name", skip_serializing_if = "Option::is_none")]
+    set_name: Option<String>,
     dhcp4: bool,
     dhcp6: bool,
+}
+
+#[derive(Serialize)]
+struct EthernetMatchConfigV2 {
+    macaddress: String,
 }
 
 fn render_user_data(
@@ -583,31 +633,89 @@ fn detect_userdata_content_type(user_data: &str) -> &'static str {
     }
 }
 
-fn render_network_config() -> eyre::Result<String> {
+fn render_network_config(interface: GuestNetworkInterface) -> eyre::Result<String> {
     let mut ethernets = BTreeMap::new();
+    let (id, matches, set_name) = match interface {
+        GuestNetworkInterface::Name(name) => (name.to_string(), None, None),
+        GuestNetworkInterface::Mac { mac, set_name } => (
+            "bento0".to_string(),
+            Some(EthernetMatchConfigV2 {
+                macaddress: format_mac(mac),
+            }),
+            Some(set_name.to_string()),
+        ),
+    };
     ethernets.insert(
-        "enp0s1".to_string(),
+        id,
         EthernetConfigV2 {
+            matches,
+            set_name,
             dhcp4: true,
             dhcp6: false,
         },
     );
 
     let cfg = NetworkConfigV2 {
-        version: 1,
+        version: 2,
         ethernets,
     };
     serde_yaml_ng::to_string(&cfg).context("serialize cloud-init network-config")
 }
 
-fn render_network_config_for_instance(spec: &VmSpec) -> eyre::Result<Option<String>> {
-    match spec.network.mode {
-        SpecNetworkMode::User => render_network_config().map(Some),
-        SpecNetworkMode::None => Ok(None),
-        SpecNetworkMode::Bridged => {
-            Err(eyre::eyre!("network mode 'bridged' is not implemented yet"))
+enum GuestNetworkInterface {
+    Name(&'static str),
+    Mac {
+        mac: [u8; 6],
+        set_name: &'static str,
+    },
+}
+
+fn render_network_config_for_instance(
+    instance_dir: &Path,
+    spec: &VmSpec,
+) -> eyre::Result<Option<String>> {
+    match spec.network.driver {
+        NetworkDriver::Gvisor if backend_uses_libkrun_user_network(spec.platform.backend) => {
+            let machine_id = machine_id_from_instance_dir(instance_dir)?;
+            render_network_config(GuestNetworkInterface::Mac {
+                mac: mac_from_machine_id(machine_id),
+                set_name: "eth0",
+            })
+            .map(Some)
         }
+        NetworkDriver::Gvisor | NetworkDriver::VzNat => {
+            render_network_config(GuestNetworkInterface::Name("enp0s1")).map(Some)
+        }
+        NetworkDriver::None => Ok(None),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn backend_uses_libkrun_user_network(backend: SpecBackend) -> bool {
+    matches!(backend, SpecBackend::Auto | SpecBackend::Krun)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn backend_uses_libkrun_user_network(_backend: SpecBackend) -> bool {
+    false
+}
+
+fn machine_id_from_instance_dir(instance_dir: &Path) -> eyre::Result<MachineId> {
+    let name = instance_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "instance directory has no UTF-8 file name: {}",
+                instance_dir.display()
+            )
+        })?;
+    name.parse::<MachineId>().map_err(|err| {
+        eyre::eyre!(
+            "parse machine id from instance directory {}: {err}",
+            instance_dir.display()
+        )
+    })
 }
 
 fn render_meta_data(name: &str) -> eyre::Result<String> {
