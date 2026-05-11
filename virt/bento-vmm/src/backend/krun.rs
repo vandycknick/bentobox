@@ -113,10 +113,14 @@ fn validate_user_network(config: &VmConfig) -> Result<(), VmmError> {
         .as_ref()
         .map(|network| &network.transport)
     {
-        Some(UserNetworkTransport::Unixgram { path, .. }) if !path.as_os_str().is_empty() => Ok(()),
+        Some(UserNetworkTransport::Unixgram { peer_path, .. })
+            if !peer_path.as_os_str().is_empty() && !config.vm_id.is_empty() =>
+        {
+            Ok(())
+        }
         Some(UserNetworkTransport::Unixgram { .. }) => invalid_config(
             config,
-            "user networking requires a non-empty unixgram socket path",
+            "user networking requires a non-empty VM id and unixgram peer socket path",
         ),
         None => invalid_config(config, "user networking requires a userspace attachment"),
     }
@@ -400,6 +404,7 @@ fn build_krun_vm(krun_bin: &Path, config: &VmConfig) -> Result<VirtualMachineBui
         })?;
 
     let mut builder = VirtualMachineBuilder::new(krun_bin)
+        .id(config.vm_id.clone())
         .cpus(cpus)
         .memory_mib(memory_mib)
         .kernel(kernel)
@@ -425,9 +430,9 @@ fn build_krun_vm(krun_bin: &Path, config: &VmConfig) -> Result<VirtualMachineBui
     }
     if let Some(network) = config.user_network.as_ref() {
         match &network.transport {
-            UserNetworkTransport::Unixgram { path, mac } => {
+            UserNetworkTransport::Unixgram { peer_path, mac } => {
                 builder = builder.net_unixgram(KrunNetUnixgram {
-                    path: path.clone(),
+                    peer_path: peer_path.clone(),
                     mac: *mac,
                 });
             }

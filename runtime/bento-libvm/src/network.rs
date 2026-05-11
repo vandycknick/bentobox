@@ -18,6 +18,7 @@ use crate::{Layout, LibVmError};
 
 const GVPROXY_BINARY_ENV: &str = "GVPROXY_BIN";
 const GVPROXY_BINARY_NAME: &str = "gvproxy";
+const GVPROXY_DISABLE_SSH_PORT: &str = "-1";
 const GVISOR_DRIVER: &str = "gvisor";
 const RUNNING_STATE: &str = "running";
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,7 +35,7 @@ struct NetworkRuntimeFile {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum NetworkTransportFile {
-    Unixgram { path: String, mac: [u8; 6] },
+    Unixgram { peer_path: String, mac: String },
 }
 
 pub(crate) async fn prepare_network_runtime(
@@ -56,13 +57,22 @@ pub(crate) async fn prepare_network_runtime(
     }
 }
 
-#[cfg(target_os = "linux")]
 fn backend_uses_gvisor_runtime(backend: Backend) -> bool {
+    platform_backend_uses_gvisor_runtime(backend)
+}
+
+#[cfg(target_os = "linux")]
+fn platform_backend_uses_gvisor_runtime(backend: Backend) -> bool {
     matches!(backend, Backend::Auto | Backend::Krun)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn backend_uses_gvisor_runtime(_backend: Backend) -> bool {
+#[cfg(target_os = "macos")]
+fn platform_backend_uses_gvisor_runtime(backend: Backend) -> bool {
+    matches!(backend, Backend::Auto | Backend::Vz)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_backend_uses_gvisor_runtime(_backend: Backend) -> bool {
     false
 }
 
@@ -93,7 +103,7 @@ pub(crate) fn reconcile_network_runtime(
     remove_runtime_dir(Path::new(&instance.runtime_dir))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn prepare_gvisor_network_runtime(
     layout: &Layout,
     state: &StateStore,
@@ -120,21 +130,18 @@ async fn prepare_gvisor_network_runtime(
 
     let log = File::options().create(true).append(true).open(&log_path)?;
     let mut command = Command::new(resolve_gvproxy_binary());
+    configure_gvproxy_command(
+        &mut command,
+        &socket_path,
+        &gvisor.subnet,
+        &log_path,
+        &pid_path,
+        pcap_path.as_deref(),
+    );
     command
-        .arg("--listen-vfkit")
-        .arg(format!("unixgram://{}", socket_path.display()))
-        .arg("--subnet")
-        .arg(&gvisor.subnet)
-        .arg("--log-file")
-        .arg(&log_path)
-        .arg("--pid-file")
-        .arg(&pid_path)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
-    if let Some(path) = pcap_path.as_ref() {
-        command.arg("--pcap").arg(path);
-    }
 
     unsafe {
         command.pre_exec(|| {
@@ -155,11 +162,10 @@ async fn prepare_gvisor_network_runtime(
     if let Err(err) = wait_for_socket(&socket_path).await {
         let _ = child.kill();
         let _ = child.wait();
-        let _ = remove_runtime_dir(&runtime_dir);
         let _ = remove_instance_network_link(layout, metadata.id);
         return Err(LibVmError::NetworkRuntime {
             reference: metadata.name.clone(),
-            message: err,
+            message: format!("{err} (preserved runtime dir: {})", runtime_dir.display()),
         });
     }
 
@@ -192,7 +198,31 @@ async fn prepare_gvisor_network_runtime(
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+fn configure_gvproxy_command(
+    command: &mut Command,
+    socket_path: &Path,
+    subnet: &str,
+    log_path: &Path,
+    pid_path: &Path,
+    pcap_path: Option<&Path>,
+) {
+    command
+        .arg("--listen-vfkit")
+        .arg(format!("unixgram://{}", socket_path.display()))
+        .arg("--ssh-port")
+        .arg(GVPROXY_DISABLE_SSH_PORT)
+        .arg("--subnet")
+        .arg(subnet)
+        .arg("--log-file")
+        .arg(log_path)
+        .arg("--pid-file")
+        .arg(pid_path);
+    if let Some(path) = pcap_path {
+        command.arg("--pcap").arg(path);
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 async fn prepare_gvisor_network_runtime(
     _layout: &Layout,
     _state: &StateStore,
@@ -231,8 +261,8 @@ fn write_runtime_file(
         driver: GVISOR_DRIVER.to_string(),
         subnet: subnet.to_string(),
         transport: NetworkTransportFile::Unixgram {
-            path: socket_path.display().to_string(),
-            mac,
+            peer_path: socket_path.display().to_string(),
+            mac: format_mac(mac),
         },
     };
     let bytes = serde_json::to_vec_pretty(&runtime).map_err(|err| LibVmError::NetworkRuntime {
@@ -341,4 +371,72 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{backend_uses_gvisor_runtime, configure_gvproxy_command, write_runtime_file};
+    use bento_core::Backend;
+    use std::path::Path;
+    use std::process::Command;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_gvisor_runtime_backends_stay_auto_and_krun() {
+        assert!(backend_uses_gvisor_runtime(Backend::Auto));
+        assert!(backend_uses_gvisor_runtime(Backend::Krun));
+        assert!(!backend_uses_gvisor_runtime(Backend::Vz));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_gvisor_runtime_backends_are_auto_and_vz() {
+        assert!(backend_uses_gvisor_runtime(Backend::Auto));
+        assert!(backend_uses_gvisor_runtime(Backend::Vz));
+        assert!(!backend_uses_gvisor_runtime(Backend::Krun));
+    }
+
+    #[test]
+    fn runtime_file_uses_peer_path_and_readable_mac() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let peer_path = dir.path().join("gvproxy.sock");
+
+        write_runtime_file(
+            dir.path(),
+            "10.0.2.0/24",
+            &peer_path,
+            [0x02, 0x19, 0xe0, 0x00, 0xe2, 0xe6],
+        )
+        .expect("write runtime file");
+
+        let raw = std::fs::read_to_string(dir.path().join("runtime.json")).expect("read runtime");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse runtime");
+
+        assert_eq!(
+            value["transport"]["peer_path"],
+            peer_path.display().to_string()
+        );
+        assert_eq!(value["transport"]["mac"], "02:19:e0:00:e2:e6");
+        assert!(value["transport"].get("path").is_none());
+    }
+
+    #[test]
+    fn gvproxy_command_disables_default_ssh_forward() {
+        let mut command = Command::new("gvproxy");
+        configure_gvproxy_command(
+            &mut command,
+            Path::new("/tmp/bento-net/gvproxy.sock"),
+            "192.168.105.0/24",
+            Path::new("/tmp/bento-net/gvproxy.log"),
+            Path::new("/tmp/bento-net/gvproxy.pid"),
+            None,
+        );
+
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(args.windows(2).any(|window| window == ["--ssh-port", "-1"]));
+    }
 }

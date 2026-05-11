@@ -1,15 +1,31 @@
+use std::fs;
+use std::os::fd::IntoRawFd;
+use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 
-use bento_krun::{validate_config, KrunConfig};
+use bento_krun::{validate_config, KrunConfig, DEFAULT_ID};
 use bento_krun_sys::{ctx, DiskFormat, Feature, KernelFormat, SyncMode};
 use clap::Parser;
+use nix::sys::socket::{setsockopt, sockopt};
 
 #[path = "../internal/parse.rs"]
 mod parse;
 
+const LOCAL_SOCKET_ID_LEN: usize = 12;
+const DEFAULT_SOCKET_BUF_SIZE: usize = 7 * 1024 * 1024;
+const SOCKET_RCVBUF: usize = DEFAULT_SOCKET_BUF_SIZE;
+
+#[cfg(target_os = "macos")]
+const SOCKET_SNDBUF: usize = 65_562 - 12;
+
+#[cfg(not(target_os = "macos"))]
+const SOCKET_SNDBUF: usize = DEFAULT_SOCKET_BUF_SIZE;
+
 #[derive(Debug, Parser)]
 #[command(name = "krun", about = "BentoBox libkrun helper")]
 struct Cli {
+    #[arg(long, default_value = DEFAULT_ID)]
+    id: String,
     #[arg(long, default_value_t = 1)]
     cpus: u8,
     #[arg(long, default_value_t = 512)]
@@ -37,6 +53,7 @@ struct Cli {
 impl Cli {
     fn into_config(self) -> KrunConfig {
         KrunConfig {
+            id: self.id,
             cpus: self.cpus,
             memory_mib: self.memory_mib,
             kernel: self.kernel,
@@ -118,7 +135,8 @@ fn configure_ctx(ctx_id: u32, config: &KrunConfig) -> eyre::Result<()> {
 
     for net in &config.net_unixgrams {
         require_feature(Feature::Net, "userspace networking (--net-unixgram)")?;
-        ctx::add_net_unixgram(ctx_id, &path_string(&net.path), net.mac)?;
+        let socket = open_local_unix_datagram_socket(&net.peer_path, &config.id, "krun")?;
+        ctx::add_net_unixgram_fd(ctx_id, socket.into_raw_fd(), net.mac)?;
     }
 
     if config.stdio_console {
@@ -164,4 +182,68 @@ fn feature_name(feature: Feature) -> &'static str {
 
 fn path_string(path: &Path) -> String {
     path.display().to_string()
+}
+
+fn open_local_unix_datagram_socket(
+    peer_path: &Path,
+    vm_id: &str,
+    backend: &str,
+) -> eyre::Result<UnixDatagram> {
+    let local_path = local_unix_datagram_path(peer_path, vm_id, backend);
+    remove_file_if_exists(&local_path)?;
+    let socket = UnixDatagram::bind(&local_path)?;
+    socket.connect(peer_path)?;
+    configure_socket_buffers(&socket);
+    Ok(socket)
+}
+
+fn configure_socket_buffers(socket: &UnixDatagram) {
+    if let Err(err) = setsockopt(socket, sockopt::SndBuf, &SOCKET_SNDBUF) {
+        tracing::warn!(error = %err, "failed to set krun unixgram SO_SNDBUF");
+    }
+    if let Err(err) = setsockopt(socket, sockopt::RcvBuf, &SOCKET_RCVBUF) {
+        tracing::warn!(error = %err, "failed to set krun unixgram SO_RCVBUF");
+    }
+}
+
+fn local_unix_datagram_path(peer_path: &Path, vm_id: &str, backend: &str) -> PathBuf {
+    peer_path.with_file_name(format!("{}-{backend}.sock", local_socket_id(vm_id)))
+}
+
+fn local_socket_id(vm_id: &str) -> &str {
+    vm_id.get(..LOCAL_SOCKET_ID_LEN).unwrap_or(vm_id)
+}
+
+fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_unix_datagram_path;
+    use std::path::Path;
+
+    #[test]
+    fn local_unix_datagram_path_uses_short_vm_id_and_backend() {
+        assert_eq!(
+            local_unix_datagram_path(
+                Path::new("/tmp/bento-net/gvproxy.sock"),
+                "1234567890abcdef",
+                "krun"
+            ),
+            Path::new("/tmp/bento-net/1234567890ab-krun.sock")
+        );
+    }
+
+    #[test]
+    fn local_unix_datagram_path_keeps_short_vm_id() {
+        assert_eq!(
+            local_unix_datagram_path(Path::new("/tmp/bento-net/gvproxy.sock"), "vm123", "krun"),
+            Path::new("/tmp/bento-net/vm123-krun.sock")
+        );
+    }
 }

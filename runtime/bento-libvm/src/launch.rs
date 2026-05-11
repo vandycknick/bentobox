@@ -120,6 +120,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn network_config_for_libkrun_user_matches_generated_mac() {
         let id = MachineId::new();
@@ -129,14 +130,35 @@ mod tests {
             .expect("user networking should configure network");
 
         assert!(config.contains("version: 2"));
-        assert!(config.contains("bento0:"));
+        assert!(config.contains("bento:"));
         assert!(config.contains("match:"));
-        assert!(config.contains("set-name: eth0"));
+        assert!(config.contains("macaddress:"));
+        assert!(!config.contains("set-name"));
+        assert!(!config.contains("eth0"));
+        assert!(!config.contains("enp0s1"));
         assert!(config.contains("dhcp4: true"));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
-    fn network_config_for_vznat_keeps_vz_interface_name() {
+    fn network_config_for_vz_userspace_matches_generated_mac() {
+        let id = MachineId::new();
+        let spec = sample_spec(Vec::new(), true);
+        let config = render_network_config_for_instance(&PathBuf::from(id.to_string()), &spec)
+            .expect("network config should render")
+            .expect("userspace networking should configure network");
+
+        assert!(config.contains("version: 2"));
+        assert!(config.contains("bento:"));
+        assert!(config.contains("match:"));
+        assert!(config.contains("macaddress:"));
+        assert!(!config.contains("driver:"));
+        assert!(!config.contains("set-name"));
+        assert!(!config.contains("eth0"));
+    }
+
+    #[test]
+    fn network_config_for_vznat_matches_virtio_net_driver() {
         let id = MachineId::new();
         let mut spec = sample_spec(Vec::new(), true);
         spec.network = Network {
@@ -147,8 +169,12 @@ mod tests {
             .expect("vznat should configure network");
 
         assert!(config.contains("version: 2"));
-        assert!(config.contains("enp0s1:"));
+        assert!(config.contains("bento:"));
+        assert!(config.contains("match:"));
+        assert!(config.contains("driver: virtio_net"));
+        assert!(!config.contains("macaddress:"));
         assert!(!config.contains("set-name"));
+        assert!(!config.contains("eth0"));
     }
 
     fn forward_endpoint(port: u32, config: Option<serde_json::Value>) -> VsockEndpointSpec {
@@ -550,15 +576,16 @@ struct NetworkConfigV2 {
 struct EthernetConfigV2 {
     #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
     matches: Option<EthernetMatchConfigV2>,
-    #[serde(rename = "set-name", skip_serializing_if = "Option::is_none")]
-    set_name: Option<String>,
     dhcp4: bool,
     dhcp6: bool,
 }
 
 #[derive(Serialize)]
 struct EthernetMatchConfigV2 {
-    macaddress: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    driver: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    macaddress: Option<String>,
 }
 
 fn render_user_data(
@@ -635,21 +662,26 @@ fn detect_userdata_content_type(user_data: &str) -> &'static str {
 
 fn render_network_config(interface: GuestNetworkInterface) -> eyre::Result<String> {
     let mut ethernets = BTreeMap::new();
-    let (id, matches, set_name) = match interface {
-        GuestNetworkInterface::Name(name) => (name.to_string(), None, None),
-        GuestNetworkInterface::Mac { mac, set_name } => (
-            "bento0".to_string(),
+    let (id, matches) = match interface {
+        GuestNetworkInterface::Driver { driver } => (
+            "bento".to_string(),
             Some(EthernetMatchConfigV2 {
-                macaddress: format_mac(mac),
+                driver: Some(driver),
+                macaddress: None,
             }),
-            Some(set_name.to_string()),
+        ),
+        GuestNetworkInterface::Mac { mac } => (
+            "bento".to_string(),
+            Some(EthernetMatchConfigV2 {
+                driver: None,
+                macaddress: Some(format_mac(mac)),
+            }),
         ),
     };
     ethernets.insert(
         id,
         EthernetConfigV2 {
             matches,
-            set_name,
             dhcp4: true,
             dhcp6: false,
         },
@@ -663,11 +695,8 @@ fn render_network_config(interface: GuestNetworkInterface) -> eyre::Result<Strin
 }
 
 enum GuestNetworkInterface {
-    Name(&'static str),
-    Mac {
-        mac: [u8; 6],
-        set_name: &'static str,
-    },
+    Driver { driver: &'static str },
+    Mac { mac: [u8; 6] },
 }
 
 fn render_network_config_for_instance(
@@ -675,28 +704,38 @@ fn render_network_config_for_instance(
     spec: &VmSpec,
 ) -> eyre::Result<Option<String>> {
     match spec.network.driver {
-        NetworkDriver::Gvisor if backend_uses_libkrun_user_network(spec.platform.backend) => {
+        NetworkDriver::Gvisor if backend_uses_configured_mac(spec.platform.backend) => {
             let machine_id = machine_id_from_instance_dir(instance_dir)?;
             render_network_config(GuestNetworkInterface::Mac {
                 mac: mac_from_machine_id(machine_id),
-                set_name: "eth0",
             })
             .map(Some)
         }
         NetworkDriver::Gvisor | NetworkDriver::VzNat => {
-            render_network_config(GuestNetworkInterface::Name("enp0s1")).map(Some)
+            // Fallback for backends where Bento cannot preconfigure the MAC.
+            // These modes currently expose one virtio-net NIC; multiple NICs
+            // would need a narrower selector to avoid duplicate DHCP clients.
+            render_network_config(GuestNetworkInterface::Driver {
+                driver: "virtio_net",
+            })
+            .map(Some)
         }
         NetworkDriver::None => Ok(None),
     }
 }
 
 #[cfg(target_os = "linux")]
-fn backend_uses_libkrun_user_network(backend: SpecBackend) -> bool {
+fn backend_uses_configured_mac(backend: SpecBackend) -> bool {
     matches!(backend, SpecBackend::Auto | SpecBackend::Krun)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn backend_uses_libkrun_user_network(_backend: SpecBackend) -> bool {
+#[cfg(target_os = "macos")]
+fn backend_uses_configured_mac(backend: SpecBackend) -> bool {
+    matches!(backend, SpecBackend::Auto | SpecBackend::Vz)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn backend_uses_configured_mac(_backend: SpecBackend) -> bool {
     false
 }
 

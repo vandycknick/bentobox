@@ -65,7 +65,7 @@ impl StartupReporter {
     }
 }
 
-pub async fn init(runtime: &RuntimeContext) -> eyre::Result<DaemonContext> {
+pub async fn init(runtime: &RuntimeContext, machine_id: &str) -> eyre::Result<DaemonContext> {
     let spec = load_spec(runtime)?;
 
     tracing::info!(instance = %spec.name, "vmmon starting");
@@ -73,6 +73,7 @@ pub async fn init(runtime: &RuntimeContext) -> eyre::Result<DaemonContext> {
 
     let machine_config = vm_spec_machine_config(VmSpecInputs {
         name: &spec.name,
+        id: machine_id,
         data_dir: runtime.dir(),
         spec: &spec,
     })?;

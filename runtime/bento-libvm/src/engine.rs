@@ -282,7 +282,7 @@ impl LibVm {
         let record = self.machine_record(metadata.clone())?;
         prepare_network_runtime(&self.layout, &self.state, &metadata, &record.spec).await?;
 
-        let startup_pipe = spawn_vmmon(Path::new(&metadata.instance_dir))?;
+        let startup_pipe = spawn_vmmon(metadata.id, Path::new(&metadata.instance_dir))?;
         wait_for_monitor_start(startup_pipe, &self.layout.monitor_trace_path(metadata.id)).await?;
         self.machine_record(metadata)
     }
@@ -535,12 +535,6 @@ fn resolve_create_network_driver(
     }
 }
 
-#[cfg(target_os = "macos")]
-fn default_network_driver() -> NetworkDriver {
-    NetworkDriver::VzNat
-}
-
-#[cfg(not(target_os = "macos"))]
 fn default_network_driver() -> NetworkDriver {
     NetworkDriver::Gvisor
 }
@@ -576,11 +570,15 @@ fn canonicalize_existing_path(path: &Path, kind: &str) -> Result<PathBuf, LibVmE
     })
 }
 
-fn spawn_vmmon(instance_dir: &Path) -> Result<OwnedFd, LibVmError> {
+fn spawn_vmmon(machine_id: MachineId, instance_dir: &Path) -> Result<OwnedFd, LibVmError> {
     let (read_fd, write_fd) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
 
     let mut command = Command::new(resolve_vmmon_executable()?);
-    command.arg("--data-dir").arg(instance_dir);
+    command
+        .arg("--id")
+        .arg(machine_id.to_string())
+        .arg("--data-dir")
+        .arg(instance_dir);
     command
         .arg("--startup-fd")
         .arg(write_fd.as_raw_fd().to_string());
@@ -797,7 +795,7 @@ fn create_staging_dir(layout: &Layout) -> Result<PathBuf, LibVmError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LibVm, MachineStatus};
+    use super::{default_network_driver, LibVm, MachineStatus};
     use crate::{Layout, LibVmError, MachineRef};
     use bento_core::{
         Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkDriver, Platform,
@@ -835,6 +833,11 @@ mod tests {
             },
             guest: Some(GuestSpec::default()),
         }
+    }
+
+    #[test]
+    fn default_create_network_driver_is_gvisor() {
+        assert_eq!(default_network_driver(), NetworkDriver::Gvisor);
     }
 
     #[test]

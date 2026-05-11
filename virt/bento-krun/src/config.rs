@@ -2,8 +2,11 @@ use std::path::PathBuf;
 
 use crate::error::{KrunBackendError, Result};
 
+pub const DEFAULT_ID: &str = "anonymous-instance";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KrunConfig {
+    pub id: String,
     pub cpus: u8,
     pub memory_mib: u32,
     pub kernel: Option<PathBuf>,
@@ -40,13 +43,14 @@ pub struct VsockPort {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetUnixgram {
-    pub path: PathBuf,
+    pub peer_path: PathBuf,
     pub mac: [u8; 6],
 }
 
 impl Default for KrunConfig {
     fn default() -> Self {
         Self {
+            id: DEFAULT_ID.to_string(),
             cpus: 1,
             memory_mib: 512,
             kernel: None,
@@ -78,10 +82,15 @@ pub fn validate_config(config: &KrunConfig) -> Result<()> {
             "krun requires a kernel".to_string(),
         ));
     }
+    if !config.net_unixgrams.is_empty() && config.id.is_empty() {
+        return Err(KrunBackendError::InvalidConfig(
+            "net unixgram requires a non-empty VM id".to_string(),
+        ));
+    }
     for net in &config.net_unixgrams {
-        if net.path.as_os_str().is_empty() {
+        if net.peer_path.as_os_str().is_empty() {
             return Err(KrunBackendError::InvalidConfig(
-                "net unixgram path cannot be empty".to_string(),
+                "net unixgram peer path cannot be empty".to_string(),
             ));
         }
         if net.mac[0] & 0x01 != 0 {

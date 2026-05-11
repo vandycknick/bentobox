@@ -7,7 +7,9 @@ mod serial;
 mod vm;
 
 pub use crate::builder::VirtualMachineBuilder;
-pub use crate::config::{validate_config, Disk, KrunConfig, Mount, NetUnixgram, VsockPort};
+pub use crate::config::{
+    validate_config, Disk, KrunConfig, Mount, NetUnixgram, VsockPort, DEFAULT_ID,
+};
 pub use crate::error::{KrunBackendError, Result};
 pub use crate::serial::SerialConnection;
 pub use crate::vm::VirtualMachine;

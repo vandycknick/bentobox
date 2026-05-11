@@ -522,7 +522,9 @@ impl AsyncWrite for VirtioSocketConnection {
 /// # Example
 ///
 /// ```rust,no_run
-/// # async fn example(device: &bento_vz::VirtioSocketDevice) -> Result<(), bento_vz::VzError> {
+/// # use std::os::fd::AsRawFd;
+/// # use bento_vz::device::SocketDevice;
+/// # async fn example(device: &bento_vz::device::VirtioSocketDevice) -> Result<(), bento_vz::VzError> {
 /// let mut listener = device.listen(1024)?;
 ///
 /// loop {

@@ -22,6 +22,9 @@ use crate::startup::StartupReporter;
 #[derive(Parser, Debug, Clone)]
 #[command(name = "vmmon", disable_help_subcommand = true)]
 struct Args {
+    #[arg(long, help = "identifier of the virtual machine")]
+    id: String,
+
     #[arg(long = "data-dir")]
     data_dir: PathBuf,
 
@@ -80,7 +83,7 @@ async fn run(args: Args, startup_reporter: StartupReporter) -> eyre::Result<()> 
     let runtime = RuntimeContext::new(args.data_dir.clone());
     let _guard = PidGuard::create(&runtime.file(InstanceFile::VmmonPid)).await?;
 
-    let result = match startup::init(&runtime).await {
+    let result = match startup::init(&runtime, &args.id).await {
         Ok(ctx) => match services::start_services(&runtime, &ctx, &mut startup_reporter).await {
             Ok(handles) => shutdown::run(runtime, ctx, handles).await,
             Err(err) => Err(err),
@@ -115,7 +118,10 @@ fn daemonize(args: &Args) -> eyre::Result<()> {
     }
 
     let mut cmd = Command::new(std::env::current_exe()?);
-    cmd.arg("--data-dir").arg(&args.data_dir);
+    cmd.arg("--id")
+        .arg(&args.id)
+        .arg("--data-dir")
+        .arg(&args.data_dir);
     if let Some(fd) = args.startup_fd {
         cmd.arg("--startup-fd").arg(fd.to_string());
         let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };

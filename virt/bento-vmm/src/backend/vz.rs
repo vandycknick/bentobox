@@ -16,7 +16,9 @@ use bento_vz::{
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use crate::stream::{MachineSerialStream, VsockListener, VsockStream};
-use crate::types::{MachineIdentifier, NetworkMode, VmConfig, VmExit, VmmError};
+use crate::types::{
+    MachineIdentifier, NetworkMode, UserNetworkTransport, VmConfig, VmExit, VmmError,
+};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -335,6 +337,23 @@ fn build_vm(spec: &VmConfig) -> Result<(VirtualMachine, SerialPortConfiguration)
     if spec.network == NetworkMode::VzNat {
         builder = builder.add_network_device(NetworkDeviceConfiguration::nat());
     }
+    if spec.network == NetworkMode::User {
+        let network = spec
+            .user_network
+            .as_ref()
+            .ok_or_else(|| VmmError::InvalidConfig {
+                name: spec.name.clone(),
+                reason: "user networking requires a userspace attachment".to_string(),
+            })?;
+        match &network.transport {
+            UserNetworkTransport::Unixgram { peer_path, mac } => {
+                builder = builder.add_network_device(
+                    NetworkDeviceConfiguration::unix_datagram(peer_path, &spec.vm_id, *mac)
+                        .map_err(vz_error)?,
+                );
+            }
+        }
+    }
 
     if let Some(root_disk) = spec.root_disk.as_ref() {
         builder = builder.add_storage_device(
@@ -445,13 +464,7 @@ fn validate_machine_config(spec: &VmConfig) -> Result<(), VmmError> {
 
     match spec.network {
         NetworkMode::VzNat | NetworkMode::None => {}
-        NetworkMode::User => {
-            return Err(VmmError::InvalidConfig {
-                name: spec.name.clone(),
-                reason: "network mode 'user' must be resolved before reaching the VZ backend"
-                    .to_string(),
-            });
-        }
+        NetworkMode::User => validate_user_network(spec)?,
     }
 
     for mount in &spec.mounts {
@@ -474,6 +487,25 @@ fn validate_machine_config(spec: &VmConfig) -> Result<(), VmmError> {
     }
 
     Ok(())
+}
+
+fn validate_user_network(spec: &VmConfig) -> Result<(), VmmError> {
+    match spec.user_network.as_ref().map(|network| &network.transport) {
+        Some(UserNetworkTransport::Unixgram { peer_path, .. })
+            if !peer_path.as_os_str().is_empty() && !spec.vm_id.is_empty() =>
+        {
+            Ok(())
+        }
+        Some(UserNetworkTransport::Unixgram { .. }) => Err(VmmError::InvalidConfig {
+            name: spec.name.clone(),
+            reason: "user networking requires a non-empty VM id and unixgram peer socket path"
+                .to_string(),
+        }),
+        None => Err(VmmError::InvalidConfig {
+            name: spec.name.clone(),
+            reason: "user networking requires a userspace attachment".to_string(),
+        }),
+    }
 }
 
 fn validate_nested_virtualization(spec: &VmConfig) -> Result<(), VmmError> {

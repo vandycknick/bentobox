@@ -78,6 +78,7 @@ impl MachineIdentifier {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmConfig {
     pub(crate) name: String,
+    pub vm_id: String,
     pub cpus: Option<usize>,
     pub memory_mib: Option<u64>,
     pub base_directory: PathBuf,
@@ -99,6 +100,7 @@ impl VmConfig {
     pub fn new() -> Self {
         Self {
             name: String::new(),
+            vm_id: String::new(),
             cpus: None,
             memory_mib: None,
             base_directory: PathBuf::new(),
@@ -133,6 +135,10 @@ impl VmConfig {
     pub fn base_directory(&self) -> &PathBuf {
         &self.base_directory
     }
+
+    pub fn vm_id(&self) -> &str {
+        &self.vm_id
+    }
 }
 
 impl Default for VmConfig {
@@ -159,6 +165,11 @@ impl VmConfigBuilder {
 
     pub fn base_directory(mut self, path: impl Into<PathBuf>) -> Self {
         self.config.base_directory = path.into();
+        self
+    }
+
+    pub fn vm_id(mut self, vm_id: impl Into<String>) -> Self {
+        self.config.vm_id = vm_id.into();
         self
     }
 
@@ -266,7 +277,7 @@ pub struct UserNetwork {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserNetworkTransport {
-    Unixgram { path: PathBuf, mac: [u8; 6] },
+    Unixgram { peer_path: PathBuf, mac: [u8; 6] },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

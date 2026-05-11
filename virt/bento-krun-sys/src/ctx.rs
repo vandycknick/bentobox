@@ -1,4 +1,5 @@
 use std::ffi::{c_char, c_void, CString};
+use std::os::fd::RawFd;
 
 use crate::error::{KrunError, Result};
 use crate::sys;
@@ -175,6 +176,19 @@ pub fn add_net_unixgram(ctx: u32, path: &str, mut mac: [u8; 6]) -> Result<()> {
             mac.as_mut_ptr(),
             sys::COMPAT_NET_FEATURES,
             sys::NET_FLAG_VFKIT | sys::NET_FLAG_DHCP_CLIENT,
+        )
+    })
+}
+
+pub fn add_net_unixgram_fd(ctx: u32, fd: RawFd, mut mac: [u8; 6]) -> Result<()> {
+    check("add_net_unixgram", unsafe {
+        sys::krun_add_net_unixgram(
+            ctx,
+            std::ptr::null(),
+            fd,
+            mac.as_mut_ptr(),
+            sys::COMPAT_NET_FEATURES,
+            sys::NET_FLAG_DHCP_CLIENT,
         )
     })
 }

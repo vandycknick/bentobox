@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
@@ -37,6 +37,11 @@ impl VirtualMachineBuilder {
 
     pub fn cpus(mut self, cpus: u8) -> Self {
         self.config.cpus = cpus;
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<String>) -> Self {
+        self.config.id = id.into();
         self
     }
 
@@ -98,8 +103,9 @@ impl VirtualMachineBuilder {
     pub fn start(self) -> Result<VirtualMachine> {
         validate_config(&self.config)?;
 
+        let args = command_args(&self.config);
         let mut command = Command::new(&self.krun_binary);
-        for arg in command_args(&self.config) {
+        for arg in &args {
             command.arg(arg);
         }
         let serial = if self.config.stdio_console {
@@ -116,6 +122,8 @@ impl VirtualMachineBuilder {
                 .stderr(Stdio::null());
             None
         };
+
+        tracing::debug!(command = %format_command(self.krun_binary.as_os_str(), &args), "launching krun backend");
 
         let child = command.spawn()?;
         Ok(VirtualMachine::new(
@@ -135,6 +143,7 @@ impl Default for VirtualMachineBuilder {
 
 pub(crate) fn command_args(config: &KrunConfig) -> Vec<OsString> {
     let mut args = Vec::new();
+    push_arg(&mut args, "--id", &config.id);
     push_arg(&mut args, "--cpus", config.cpus.to_string());
     push_arg(&mut args, "--memory-mib", config.memory_mib.to_string());
 
@@ -166,6 +175,31 @@ pub(crate) fn command_args(config: &KrunConfig) -> Vec<OsString> {
         args.push("--disable-implicit-vsock".into());
     }
     args
+}
+
+fn format_command(binary: &OsStr, args: &[OsString]) -> String {
+    std::iter::once(binary)
+        .chain(args.iter().map(OsString::as_os_str))
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(value: &OsStr) -> String {
+    let value = value.to_string_lossy();
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    if value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'_' | b'-' | b'.' | b'/' | b':' | b',' | b'=' | b'@' | b'+'
+            )
+    }) {
+        return value.into_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn push_arg(value: &mut Vec<OsString>, name: impl Into<OsString>, arg: impl Into<OsString>) {
@@ -201,7 +235,7 @@ fn format_vsock_port(port: &crate::VsockPort) -> String {
 }
 
 fn format_net_unixgram(net: &crate::NetUnixgram) -> String {
-    format!("{},{}", net.path.display(), format_mac(net.mac))
+    format!("{},{}", net.peer_path.display(), format_mac(net.mac))
 }
 
 fn format_ro(read_only: bool) -> &'static str {
@@ -233,11 +267,12 @@ fn open_krun_serial_pty() -> io::Result<KrunSerialPty> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
     use std::path::PathBuf;
 
     use crate::{Disk, VirtualMachineBuilder};
 
-    use super::command_args;
+    use super::{command_args, format_command};
 
     #[test]
     fn builder_rejects_zero_cpus() {
@@ -284,9 +319,10 @@ mod tests {
         let config = VirtualMachineBuilder::new("krun")
             .cpus(2)
             .memory_mib(1024)
+            .id("vm123")
             .kernel("/kernel")
             .net_unixgram(crate::NetUnixgram {
-                path: PathBuf::from("/tmp/gvproxy.sock"),
+                peer_path: PathBuf::from("/tmp/gvproxy.sock"),
                 mac: [0x02, 0x94, 0xef, 0xe4, 0x0c, 0xee],
             })
             .build()
@@ -295,8 +331,25 @@ mod tests {
         let args = command_args(&config);
 
         assert!(args.iter().any(|arg| arg == "--net-unixgram"));
+        assert!(args.iter().any(|arg| arg == "--id"));
+        assert!(args.iter().any(|arg| arg == "vm123"));
         assert!(args
             .iter()
             .any(|arg| arg == "/tmp/gvproxy.sock,02:94:ef:e4:0c:ee"));
+    }
+
+    #[test]
+    fn format_command_shell_quotes_copy_pasteable_arguments() {
+        let args = vec![
+            "--kernel".into(),
+            "/tmp/kernel image".into(),
+            "--cmdline".into(),
+            "console='hvc0'".into(),
+        ];
+
+        assert_eq!(
+            format_command(OsStr::new("/tmp/krun helper"), &args),
+            "'/tmp/krun helper' --kernel '/tmp/kernel image' --cmdline 'console='\\''hvc0'\\'''"
+        );
     }
 }
