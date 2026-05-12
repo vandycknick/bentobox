@@ -230,8 +230,51 @@ pub enum Backend {
     Auto,
     Vz,
     Firecracker,
-    CloudHypervisor,
     Krun,
+}
+
+impl Backend {
+    pub fn needs_machine_identifier(self) -> bool {
+        matches!(self, Self::Vz)
+    }
+
+    pub fn uses_user_network_runtime(self) -> bool {
+        platform_backend_uses_user_network_runtime(self)
+    }
+
+    pub fn uses_configured_guest_mac(self) -> bool {
+        platform_backend_uses_configured_guest_mac(self)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_backend_uses_user_network_runtime(backend: Backend) -> bool {
+    matches!(backend, Backend::Auto | Backend::Krun)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_backend_uses_user_network_runtime(backend: Backend) -> bool {
+    matches!(backend, Backend::Auto | Backend::Vz)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_backend_uses_user_network_runtime(_backend: Backend) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn platform_backend_uses_configured_guest_mac(backend: Backend) -> bool {
+    matches!(backend, Backend::Auto | Backend::Krun)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_backend_uses_configured_guest_mac(backend: Backend) -> bool {
+    matches!(backend, Backend::Auto | Backend::Vz)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_backend_uses_configured_guest_mac(_backend: Backend) -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,6 +459,40 @@ settings:
         let err = serde_yaml_ng::from_str::<VmSpec>(yaml)
             .expect_err("legacy guest_enabled setting should be rejected");
         assert!(err.to_string().contains("guest_enabled"));
+    }
+
+    #[test]
+    fn vm_spec_rejects_cloud_hypervisor_backend() {
+        let yaml = r#"
+version: 1
+name: dev
+platform:
+  guest_os: linux
+  architecture: aarch64
+  backend: cloud_hypervisor
+resources:
+  cpus: 4
+  memory_mib: 4096
+boot:
+  kernel: /kernel
+  initramfs: /initramfs
+  kernel_cmdline: []
+  bootstrap: null
+storage:
+  disks: []
+mounts: []
+network:
+  driver: gvisor
+settings:
+  nested_virtualization: false
+  rosetta: true
+guest:
+  control_port: 1027
+"#;
+
+        let err = serde_yaml_ng::from_str::<VmSpec>(yaml)
+            .expect_err("cloud-hypervisor backend should be rejected");
+        assert!(err.to_string().contains("cloud_hypervisor"));
     }
 
     #[test]

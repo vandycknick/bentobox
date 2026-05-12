@@ -44,7 +44,7 @@ pub(crate) fn vm_spec_machine_config(
     inputs: VmSpecInputs<'_>,
 ) -> Result<InstanceVmConfig, MachineSpecError> {
     let boot_assets = vm_spec_boot_assets(&inputs)?;
-    let machine_identifier = if backend_needs_machine_identifier(inputs.spec.platform.backend) {
+    let machine_identifier = if inputs.spec.platform.backend.needs_machine_identifier() {
         Some(load_machine_identifier_from_dir(inputs.data_dir)?)
     } else {
         None
@@ -53,10 +53,7 @@ pub(crate) fn vm_spec_machine_config(
     let mut builder = VmConfig::builder(inputs.name)
         .vm_id(inputs.id)
         .base_directory(inputs.data_dir.to_path_buf())
-        .network(map_vm_spec_network_mode(
-            inputs.spec.platform.backend,
-            inputs.spec.network.driver,
-        ))
+        .network(map_vm_spec_network_mode(inputs.spec.network.driver))
         .kernel_cmdline(inputs.spec.boot.kernel_cmdline.clone())
         .nested_virtualization(inputs.spec.settings.nested_virtualization)
         .rosetta(inputs.spec.settings.rosetta);
@@ -226,21 +223,16 @@ fn resolve_spec_path(data_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn backend_needs_machine_identifier(backend: SpecBackend) -> bool {
-    matches!(backend, SpecBackend::Vz)
-}
-
-pub(crate) fn machine_backend_from_vm_spec(spec: &VmSpec) -> Result<Backend, VmmError> {
+pub(crate) fn machine_backend_from_vm_spec(spec: &VmSpec) -> Backend {
     match spec.platform.backend {
-        SpecBackend::Auto => Ok(Backend::Auto),
-        SpecBackend::Vz => Ok(Backend::Vz),
-        SpecBackend::Firecracker => Ok(Backend::Firecracker),
-        SpecBackend::CloudHypervisor => Ok(Backend::CloudHypervisor),
-        SpecBackend::Krun => Ok(Backend::Krun),
+        SpecBackend::Auto => Backend::Auto,
+        SpecBackend::Vz => Backend::Vz,
+        SpecBackend::Firecracker => Backend::Firecracker,
+        SpecBackend::Krun => Backend::Krun,
     }
 }
 
-fn map_vm_spec_network_mode(_backend: SpecBackend, driver: NetworkDriver) -> NetworkMode {
+fn map_vm_spec_network_mode(driver: NetworkDriver) -> NetworkMode {
     match driver {
         NetworkDriver::None => NetworkMode::None,
         NetworkDriver::Gvisor => NetworkMode::User,
@@ -265,7 +257,7 @@ fn user_network_from_runtime(
     spec: &VmSpec,
 ) -> Result<Option<UserNetwork>, MachineSpecError> {
     if !matches!(spec.network.driver, NetworkDriver::Gvisor)
-        || !backend_uses_user_runtime(spec.platform.backend)
+        || !spec.platform.backend.uses_user_network_runtime()
     {
         return Ok(None);
     }
@@ -306,36 +298,14 @@ fn user_network_from_runtime(
     }
 }
 
-fn backend_uses_user_runtime(backend: SpecBackend) -> bool {
-    platform_backend_uses_user_runtime(backend)
-}
-
-#[cfg(target_os = "linux")]
-fn platform_backend_uses_user_runtime(backend: SpecBackend) -> bool {
-    matches!(backend, SpecBackend::Auto | SpecBackend::Krun)
-}
-
-#[cfg(target_os = "macos")]
-fn platform_backend_uses_user_runtime(backend: SpecBackend) -> bool {
-    matches!(backend, SpecBackend::Auto | SpecBackend::Vz)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn platform_backend_uses_user_runtime(_backend: SpecBackend) -> bool {
-    false
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        machine_backend_from_vm_spec, map_vm_spec_network_mode, vm_spec_machine_config,
-        VmSpecInputs,
-    };
+    use super::{map_vm_spec_network_mode, vm_spec_machine_config, VmSpecInputs};
     use bento_core::{
         agent::RESERVED_SHELL_PORT, Architecture, Backend as SpecBackend, Boot, GuestOs, GuestSpec,
         Network, NetworkDriver, Platform, Resources, Settings, Storage, VmSpec,
     };
-    use bento_vmm::{Backend, UserNetworkTransport, VsockPortMode};
+    use bento_vmm::{UserNetworkTransport, VsockPortMode};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -351,11 +321,11 @@ mod tests {
     #[test]
     fn gvisor_network_maps_to_userspace_mode() {
         assert_eq!(
-            map_vm_spec_network_mode(SpecBackend::Auto, NetworkDriver::Gvisor),
+            map_vm_spec_network_mode(NetworkDriver::Gvisor),
             bento_vmm::NetworkMode::User
         );
         assert_eq!(
-            map_vm_spec_network_mode(SpecBackend::Vz, NetworkDriver::Gvisor),
+            map_vm_spec_network_mode(NetworkDriver::Gvisor),
             bento_vmm::NetworkMode::User
         );
     }
@@ -363,45 +333,9 @@ mod tests {
     #[test]
     fn vznat_network_maps_to_vz_nat_mode() {
         assert_eq!(
-            map_vm_spec_network_mode(SpecBackend::Vz, NetworkDriver::VzNat),
+            map_vm_spec_network_mode(NetworkDriver::VzNat),
             bento_vmm::NetworkMode::VzNat
         );
-    }
-
-    #[test]
-    fn machine_backend_maps_cloud_hypervisor_engine() {
-        let spec = VmSpec {
-            version: 1,
-            name: "devbox".to_string(),
-            platform: Platform {
-                guest_os: GuestOs::Linux,
-                architecture: Architecture::Aarch64,
-                backend: SpecBackend::CloudHypervisor,
-            },
-            resources: Resources {
-                cpus: 2,
-                memory_mib: 1024,
-            },
-            boot: Boot {
-                kernel: None,
-                initramfs: None,
-                kernel_cmdline: Vec::new(),
-                bootstrap: None,
-            },
-            storage: Storage { disks: Vec::new() },
-            mounts: Vec::new(),
-            vsock_endpoints: Vec::new(),
-            network: Network {
-                driver: NetworkDriver::None,
-            },
-            settings: Settings {
-                nested_virtualization: false,
-                rosetta: false,
-            },
-            guest: None,
-        };
-        let backend = machine_backend_from_vm_spec(&spec).expect("backend should resolve");
-        assert_eq!(backend, Backend::CloudHypervisor);
     }
 
     #[test]

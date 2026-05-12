@@ -312,7 +312,7 @@ pub enum Backend {
     Auto,
     Vz,
     Firecracker,
-    CloudHypervisor,
+    Krun,
 }
 
 pub enum NetworkMode {

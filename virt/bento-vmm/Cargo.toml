@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bento-ch = { path = "../bento-ch" }
 bento-fc = { path = "../bento-fc" }
 bento-protocol = { path = "../../wire/bento-protocol" }
 crossbeam = "0.8.4"

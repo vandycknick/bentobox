@@ -1,123 +1,146 @@
 #[cfg(target_os = "linux")]
-mod cloud_hypervisor;
-#[cfg(target_os = "linux")]
 mod firecracker;
 #[cfg(target_os = "linux")]
 mod krun;
 #[cfg(target_os = "macos")]
 mod vz;
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use crate::stream::{MachineSerialStream, VsockListener, VsockStream};
 use crate::types::{Backend, VmConfig, VmExit, VmmError};
 
-#[derive(Debug)]
-pub(crate) enum VmBackend {
-    #[cfg(target_os = "linux")]
-    Krun(krun::KrunMachineBackend),
-    #[cfg(target_os = "linux")]
-    CloudHypervisor(cloud_hypervisor::CloudHypervisorMachineBackend),
-    #[cfg(target_os = "linux")]
-    Firecracker(firecracker::FirecrackerMachineBackend),
-    #[cfg(target_os = "macos")]
-    Vz(vz::VzMachineBackend),
+type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub(crate) type VmBackend = dyn MachineBackend;
+
+pub(crate) trait MachineBackend: std::fmt::Debug + Send + Sync {
+    fn kind(&self) -> Backend;
+
+    fn start(&self) -> BackendFuture<'_, Result<(), VmmError>>;
+
+    fn stop(&self) -> BackendFuture<'_, Result<(), VmmError>>;
+
+    fn connect_vsock(&self, port: u32) -> BackendFuture<'_, Result<VsockStream, VmmError>>;
+
+    fn listen_vsock(&self, _port: u32) -> BackendFuture<'_, Result<VsockListener, VmmError>> {
+        Box::pin(async move {
+            Err(VmmError::Unimplemented {
+                kind: self.kind(),
+                operation: "listen_vsock",
+            })
+        })
+    }
+
+    fn open_serial(&self) -> BackendFuture<'_, Result<MachineSerialStream, VmmError>>;
+
+    fn wait(&self) -> BackendFuture<'_, Result<VmExit, VmmError>>;
+
+    fn try_wait(&self) -> BackendFuture<'_, Result<Option<VmExit>, VmmError>>;
 }
 
-impl VmBackend {
-    pub(crate) async fn start(&self) -> Result<(), VmmError> {
-        match self {
-            #[cfg(target_os = "linux")]
-            Self::Krun(backend) => backend.start().await,
-            #[cfg(target_os = "linux")]
-            Self::CloudHypervisor(backend) => backend.start().await,
-            #[cfg(target_os = "linux")]
-            Self::Firecracker(backend) => backend.start().await,
-            #[cfg(target_os = "macos")]
-            Self::Vz(backend) => backend.start().await,
-        }
+#[cfg(target_os = "linux")]
+impl MachineBackend for krun::KrunMachineBackend {
+    fn kind(&self) -> Backend {
+        Backend::Krun
     }
 
-    pub(crate) async fn stop(&self) -> Result<(), VmmError> {
-        match self {
-            #[cfg(target_os = "linux")]
-            Self::Krun(backend) => backend.stop().await,
-            #[cfg(target_os = "linux")]
-            Self::CloudHypervisor(backend) => backend.stop().await,
-            #[cfg(target_os = "linux")]
-            Self::Firecracker(backend) => backend.stop().await,
-            #[cfg(target_os = "macos")]
-            Self::Vz(backend) => backend.stop().await,
-        }
+    fn start(&self) -> BackendFuture<'_, Result<(), VmmError>> {
+        Box::pin(krun::KrunMachineBackend::start(self))
     }
 
-    pub(crate) async fn connect_vsock(&self, port: u32) -> Result<VsockStream, VmmError> {
-        match self {
-            #[cfg(target_os = "linux")]
-            Self::Krun(backend) => backend.connect_vsock(port).await,
-            #[cfg(target_os = "linux")]
-            Self::CloudHypervisor(backend) => backend.connect_vsock(port).await,
-            #[cfg(target_os = "linux")]
-            Self::Firecracker(backend) => backend.connect_vsock(port).await,
-            #[cfg(target_os = "macos")]
-            Self::Vz(backend) => backend.connect_vsock(port).await,
-        }
+    fn stop(&self) -> BackendFuture<'_, Result<(), VmmError>> {
+        Box::pin(krun::KrunMachineBackend::stop(self))
     }
 
-    pub(crate) async fn listen_vsock(&self, port: u32) -> Result<VsockListener, VmmError> {
-        match self {
-            #[cfg(target_os = "linux")]
-            Self::Krun(backend) => backend.listen_vsock(port).await,
-            #[cfg(target_os = "linux")]
-            Self::CloudHypervisor(_) => Err(VmmError::Unimplemented {
-                kind: Backend::CloudHypervisor,
-                operation: "listen_vsock",
-            }),
-            #[cfg(target_os = "linux")]
-            Self::Firecracker(_) => Err(VmmError::Unimplemented {
-                kind: Backend::Firecracker,
-                operation: "listen_vsock",
-            }),
-            #[cfg(target_os = "macos")]
-            Self::Vz(backend) => backend.listen_vsock(port).await,
-        }
+    fn connect_vsock(&self, port: u32) -> BackendFuture<'_, Result<VsockStream, VmmError>> {
+        Box::pin(krun::KrunMachineBackend::connect_vsock(self, port))
     }
 
-    pub(crate) async fn open_serial(&self) -> Result<MachineSerialStream, VmmError> {
-        match self {
-            #[cfg(target_os = "linux")]
-            Self::Krun(backend) => backend.open_serial().await,
-            #[cfg(target_os = "linux")]
-            Self::CloudHypervisor(backend) => backend.open_serial().await,
-            #[cfg(target_os = "linux")]
-            Self::Firecracker(backend) => backend.open_serial().await,
-            #[cfg(target_os = "macos")]
-            Self::Vz(backend) => backend.open_serial().await,
-        }
+    fn listen_vsock(&self, port: u32) -> BackendFuture<'_, Result<VsockListener, VmmError>> {
+        Box::pin(krun::KrunMachineBackend::listen_vsock(self, port))
     }
 
-    pub(crate) async fn wait(&self) -> Result<VmExit, VmmError> {
-        match self {
-            #[cfg(target_os = "linux")]
-            Self::Krun(backend) => backend.wait().await,
-            #[cfg(target_os = "linux")]
-            Self::CloudHypervisor(backend) => backend.wait().await,
-            #[cfg(target_os = "linux")]
-            Self::Firecracker(backend) => backend.wait().await,
-            #[cfg(target_os = "macos")]
-            Self::Vz(backend) => backend.wait().await,
-        }
+    fn open_serial(&self) -> BackendFuture<'_, Result<MachineSerialStream, VmmError>> {
+        Box::pin(krun::KrunMachineBackend::open_serial(self))
     }
 
-    pub(crate) async fn try_wait(&self) -> Result<Option<VmExit>, VmmError> {
-        match self {
-            #[cfg(target_os = "linux")]
-            Self::Krun(backend) => backend.try_wait().await,
-            #[cfg(target_os = "linux")]
-            Self::CloudHypervisor(backend) => backend.try_wait().await,
-            #[cfg(target_os = "linux")]
-            Self::Firecracker(backend) => backend.try_wait().await,
-            #[cfg(target_os = "macos")]
-            Self::Vz(backend) => backend.try_wait().await,
-        }
+    fn wait(&self) -> BackendFuture<'_, Result<VmExit, VmmError>> {
+        Box::pin(krun::KrunMachineBackend::wait(self))
+    }
+
+    fn try_wait(&self) -> BackendFuture<'_, Result<Option<VmExit>, VmmError>> {
+        Box::pin(krun::KrunMachineBackend::try_wait(self))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl MachineBackend for firecracker::FirecrackerMachineBackend {
+    fn kind(&self) -> Backend {
+        Backend::Firecracker
+    }
+
+    fn start(&self) -> BackendFuture<'_, Result<(), VmmError>> {
+        Box::pin(firecracker::FirecrackerMachineBackend::start(self))
+    }
+
+    fn stop(&self) -> BackendFuture<'_, Result<(), VmmError>> {
+        Box::pin(firecracker::FirecrackerMachineBackend::stop(self))
+    }
+
+    fn connect_vsock(&self, port: u32) -> BackendFuture<'_, Result<VsockStream, VmmError>> {
+        Box::pin(firecracker::FirecrackerMachineBackend::connect_vsock(
+            self, port,
+        ))
+    }
+
+    fn open_serial(&self) -> BackendFuture<'_, Result<MachineSerialStream, VmmError>> {
+        Box::pin(firecracker::FirecrackerMachineBackend::open_serial(self))
+    }
+
+    fn wait(&self) -> BackendFuture<'_, Result<VmExit, VmmError>> {
+        Box::pin(firecracker::FirecrackerMachineBackend::wait(self))
+    }
+
+    fn try_wait(&self) -> BackendFuture<'_, Result<Option<VmExit>, VmmError>> {
+        Box::pin(firecracker::FirecrackerMachineBackend::try_wait(self))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl MachineBackend for vz::VzMachineBackend {
+    fn kind(&self) -> Backend {
+        Backend::Vz
+    }
+
+    fn start(&self) -> BackendFuture<'_, Result<(), VmmError>> {
+        Box::pin(vz::VzMachineBackend::start(self))
+    }
+
+    fn stop(&self) -> BackendFuture<'_, Result<(), VmmError>> {
+        Box::pin(vz::VzMachineBackend::stop(self))
+    }
+
+    fn connect_vsock(&self, port: u32) -> BackendFuture<'_, Result<VsockStream, VmmError>> {
+        Box::pin(vz::VzMachineBackend::connect_vsock(self, port))
+    }
+
+    fn listen_vsock(&self, port: u32) -> BackendFuture<'_, Result<VsockListener, VmmError>> {
+        Box::pin(vz::VzMachineBackend::listen_vsock(self, port))
+    }
+
+    fn open_serial(&self) -> BackendFuture<'_, Result<MachineSerialStream, VmmError>> {
+        Box::pin(vz::VzMachineBackend::open_serial(self))
+    }
+
+    fn wait(&self) -> BackendFuture<'_, Result<VmExit, VmmError>> {
+        Box::pin(vz::VzMachineBackend::wait(self))
+    }
+
+    fn try_wait(&self) -> BackendFuture<'_, Result<Option<VmExit>, VmmError>> {
+        Box::pin(vz::VzMachineBackend::try_wait(self))
     }
 }
 
@@ -128,8 +151,6 @@ pub(crate) fn validate(backend: Backend, config: &VmConfig) -> Result<(), VmmErr
         #[cfg(target_os = "linux")]
         Backend::Krun => krun::validate(config),
         #[cfg(target_os = "linux")]
-        Backend::CloudHypervisor => cloud_hypervisor::validate(config),
-        #[cfg(target_os = "linux")]
         Backend::Firecracker => firecracker::validate(config),
         kind => Err(VmmError::UnsupportedBackend {
             kind,
@@ -138,20 +159,19 @@ pub(crate) fn validate(backend: Backend, config: &VmConfig) -> Result<(), VmmErr
     }
 }
 
-pub(crate) fn create_backend(backend: Backend, config: VmConfig) -> Result<VmBackend, VmmError> {
+pub(crate) fn create_backend(
+    backend: Backend,
+    config: VmConfig,
+) -> Result<Arc<VmBackend>, VmmError> {
     match backend {
         #[cfg(target_os = "macos")]
-        Backend::Vz => Ok(VmBackend::Vz(vz::VzMachineBackend::new(config)?)),
+        Backend::Vz => Ok(Arc::new(vz::VzMachineBackend::new(config)?)),
         #[cfg(target_os = "linux")]
-        Backend::Krun => Ok(VmBackend::Krun(krun::KrunMachineBackend::new(config)?)),
+        Backend::Krun => Ok(Arc::new(krun::KrunMachineBackend::new(config)?)),
         #[cfg(target_os = "linux")]
-        Backend::CloudHypervisor => Ok(VmBackend::CloudHypervisor(
-            cloud_hypervisor::CloudHypervisorMachineBackend::new(config)?,
-        )),
-        #[cfg(target_os = "linux")]
-        Backend::Firecracker => Ok(VmBackend::Firecracker(
-            firecracker::FirecrackerMachineBackend::new(config)?,
-        )),
+        Backend::Firecracker => Ok(Arc::new(firecracker::FirecrackerMachineBackend::new(
+            config,
+        )?)),
         kind => Err(VmmError::UnsupportedBackend {
             kind,
             reason: "backend is not compiled for this host platform".to_string(),

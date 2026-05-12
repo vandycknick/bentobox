@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bento_core::{Backend, MachineId, NetworkDriver, VmSpec};
+use bento_core::{MachineId, NetworkDriver, VmSpec};
 use bento_utils::format_mac;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -47,7 +47,7 @@ pub(crate) async fn prepare_network_runtime(
     reconcile_network_runtime(layout, state, metadata, false)?;
 
     match spec.network.driver {
-        NetworkDriver::Gvisor if backend_uses_gvisor_runtime(spec.platform.backend) => {
+        NetworkDriver::Gvisor if spec.platform.backend.uses_user_network_runtime() => {
             prepare_gvisor_network_runtime(layout, state, metadata).await
         }
         NetworkDriver::None | NetworkDriver::VzNat => {
@@ -55,25 +55,6 @@ pub(crate) async fn prepare_network_runtime(
         }
         NetworkDriver::Gvisor => Ok(()),
     }
-}
-
-fn backend_uses_gvisor_runtime(backend: Backend) -> bool {
-    platform_backend_uses_gvisor_runtime(backend)
-}
-
-#[cfg(target_os = "linux")]
-fn platform_backend_uses_gvisor_runtime(backend: Backend) -> bool {
-    matches!(backend, Backend::Auto | Backend::Krun)
-}
-
-#[cfg(target_os = "macos")]
-fn platform_backend_uses_gvisor_runtime(backend: Backend) -> bool {
-    matches!(backend, Backend::Auto | Backend::Vz)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn platform_backend_uses_gvisor_runtime(_backend: Backend) -> bool {
-    false
 }
 
 pub(crate) fn reconcile_network_runtime(
@@ -375,7 +356,7 @@ fn now_unix() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{backend_uses_gvisor_runtime, configure_gvproxy_command, write_runtime_file};
+    use super::{configure_gvproxy_command, write_runtime_file};
     use bento_core::Backend;
     use std::path::Path;
     use std::process::Command;
@@ -383,17 +364,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_gvisor_runtime_backends_stay_auto_and_krun() {
-        assert!(backend_uses_gvisor_runtime(Backend::Auto));
-        assert!(backend_uses_gvisor_runtime(Backend::Krun));
-        assert!(!backend_uses_gvisor_runtime(Backend::Vz));
+        assert!(Backend::Auto.uses_user_network_runtime());
+        assert!(Backend::Krun.uses_user_network_runtime());
+        assert!(!Backend::Vz.uses_user_network_runtime());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_gvisor_runtime_backends_are_auto_and_vz() {
-        assert!(backend_uses_gvisor_runtime(Backend::Auto));
-        assert!(backend_uses_gvisor_runtime(Backend::Vz));
-        assert!(!backend_uses_gvisor_runtime(Backend::Krun));
+        assert!(Backend::Auto.uses_user_network_runtime());
+        assert!(Backend::Vz.uses_user_network_runtime());
+        assert!(!Backend::Krun.uses_user_network_runtime());
     }
 
     #[test]

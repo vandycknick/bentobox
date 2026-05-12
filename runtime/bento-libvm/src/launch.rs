@@ -8,9 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bento_core::agent::{
     AgentConfig, AgentDnsConfig, AgentForwardConfig, AgentSshConfig, AgentUdsForwardConfig,
 };
-use bento_core::{
-    resolve_mount_location, Backend as SpecBackend, InstanceFile, MachineId, NetworkDriver, VmSpec,
-};
+use bento_core::{resolve_mount_location, InstanceFile, MachineId, NetworkDriver, VmSpec};
 use bento_utils::format_mac;
 use eyre::Context;
 use fatfs::{format_volume, FileSystem, FormatVolumeOptions, FsOptions};
@@ -704,7 +702,7 @@ fn render_network_config_for_instance(
     spec: &VmSpec,
 ) -> eyre::Result<Option<String>> {
     match spec.network.driver {
-        NetworkDriver::Gvisor if backend_uses_configured_mac(spec.platform.backend) => {
+        NetworkDriver::Gvisor if spec.platform.backend.uses_configured_guest_mac() => {
             let machine_id = machine_id_from_instance_dir(instance_dir)?;
             render_network_config(GuestNetworkInterface::Mac {
                 mac: mac_from_machine_id(machine_id),
@@ -722,21 +720,6 @@ fn render_network_config_for_instance(
         }
         NetworkDriver::None => Ok(None),
     }
-}
-
-#[cfg(target_os = "linux")]
-fn backend_uses_configured_mac(backend: SpecBackend) -> bool {
-    matches!(backend, SpecBackend::Auto | SpecBackend::Krun)
-}
-
-#[cfg(target_os = "macos")]
-fn backend_uses_configured_mac(backend: SpecBackend) -> bool {
-    matches!(backend, SpecBackend::Auto | SpecBackend::Vz)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn backend_uses_configured_mac(_backend: SpecBackend) -> bool {
-    false
 }
 
 fn machine_id_from_instance_dir(instance_dir: &Path) -> eyre::Result<MachineId> {

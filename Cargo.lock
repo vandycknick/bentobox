@@ -286,24 +286,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bento-ch"
-version = "0.1.0"
-dependencies = [
- "nix 0.31.1",
- "openapiv3",
- "prettyplease",
- "progenitor",
- "progenitor-client",
- "reqwest",
- "serde",
- "serde_json",
- "serde_yaml",
- "syn",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "bento-core"
 version = "0.1.0"
 dependencies = [
@@ -426,7 +408,6 @@ version = "0.1.0"
 name = "bento-vmm"
 version = "0.1.0"
 dependencies = [
- "bento-ch",
  "bento-fc",
  "bento-krun",
  "bento-protocol",

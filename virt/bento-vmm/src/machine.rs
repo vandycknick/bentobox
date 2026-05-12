@@ -35,7 +35,7 @@ impl Vmm {
         backend::validate(backend, &config)?;
 
         let name = config.name().to_string();
-        let backend = Arc::new(backend::create_backend(backend, config)?);
+        let backend = backend::create_backend(backend, config)?;
         let serial_console = Arc::new(SerialConsole::new(backend.clone()));
 
         Ok(VirtualMachine {

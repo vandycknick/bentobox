@@ -8,7 +8,6 @@ pub enum Backend {
     Auto,
     Vz,
     Firecracker,
-    CloudHypervisor,
     Krun,
 }
 
@@ -318,7 +317,6 @@ pub(crate) fn resolve_backend(backend: Backend) -> Result<Backend, VmmError> {
         Backend::Auto => auto_backend(),
         Backend::Vz => Ok(Backend::Vz),
         Backend::Firecracker => Ok(Backend::Firecracker),
-        Backend::CloudHypervisor => Ok(Backend::CloudHypervisor),
         Backend::Krun => Ok(Backend::Krun),
     }
 }
@@ -344,12 +342,6 @@ fn auto_backend() -> Result<Backend, VmmError> {
 #[cfg(test)]
 mod tests {
     use crate::types::{resolve_backend, Backend};
-
-    #[test]
-    fn resolve_backend_preserves_explicit_cloud_hypervisor() {
-        let backend = resolve_backend(Backend::CloudHypervisor).expect("backend should resolve");
-        assert_eq!(backend, Backend::CloudHypervisor);
-    }
 
     #[test]
     fn resolve_backend_preserves_explicit_krun() {

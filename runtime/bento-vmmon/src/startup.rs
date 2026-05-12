@@ -77,7 +77,7 @@ pub async fn init(runtime: &RuntimeContext, machine_id: &str) -> eyre::Result<Da
         data_dir: runtime.dir(),
         spec: &spec,
     })?;
-    let vmm = Vmm::new(machine_backend_from_vm_spec(&spec)?)?;
+    let vmm = Vmm::new(machine_backend_from_vm_spec(&spec))?;
     let machine = vmm.create(machine_config.config).await?;
     if let Some(machine_identifier) = machine_config.machine_identifier.as_ref() {
         if machine_identifier.was_generated() {
