@@ -1,12 +1,9 @@
 use std::sync::Arc;
 
-use crate::backend::{self, VmBackend};
+use crate::platform::{create_backend, VmBackend};
 use crate::serial::SerialConsole;
-use crate::types::{VmConfig, VmExit, VmmError};
+use crate::types::{VirtError, VmConfig, VmExit};
 use crate::{VsockListener, VsockStream};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Vmm;
 
 #[derive(Clone)]
 pub struct VirtualMachine {
@@ -23,16 +20,10 @@ impl std::fmt::Debug for VirtualMachine {
     }
 }
 
-impl Vmm {
-    pub fn new() -> Result<Self, VmmError> {
-        Ok(Self)
-    }
-
-    pub async fn create(&self, config: VmConfig) -> Result<VirtualMachine, VmmError> {
-        backend::validate(&config)?;
-
+impl VirtualMachine {
+    pub fn new(config: VmConfig) -> Result<Self, VirtError> {
         let name = config.name().to_string();
-        let backend = backend::create_backend(config)?;
+        let backend = create_backend(config)?;
         let serial_console = Arc::new(SerialConsole::new(backend.clone()));
 
         Ok(VirtualMachine {
@@ -41,27 +32,25 @@ impl Vmm {
             serial_console,
         })
     }
-}
 
-impl VirtualMachine {
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    pub async fn start(&self) -> Result<(), VmmError> {
+    pub async fn start(&self) -> Result<(), VirtError> {
         self.backend.start().await
     }
 
-    pub async fn stop(&self) -> Result<(), VmmError> {
+    pub async fn stop(&self) -> Result<(), VirtError> {
         self.backend.stop().await
     }
 
-    pub async fn restart(&self) -> Result<(), VmmError> {
+    pub async fn restart(&self) -> Result<(), VirtError> {
         self.stop().await?;
         self.start().await
     }
 
-    pub async fn connect_vsock(&self, port: u32) -> Result<VsockStream, VmmError> {
+    pub async fn connect_vsock(&self, port: u32) -> Result<VsockStream, VirtError> {
         self.backend.connect_vsock(port).await
     }
 
@@ -69,15 +58,15 @@ impl VirtualMachine {
     ///
     /// Dropping the returned listener stops accepting new connections for the
     /// port.
-    pub async fn listen_vsock(&self, port: u32) -> Result<VsockListener, VmmError> {
+    pub async fn listen_vsock(&self, port: u32) -> Result<VsockListener, VirtError> {
         self.backend.listen_vsock(port).await
     }
 
-    pub async fn wait(&self) -> Result<VmExit, VmmError> {
+    pub async fn wait(&self) -> Result<VmExit, VirtError> {
         self.backend.wait().await
     }
 
-    pub async fn try_wait(&self) -> Result<Option<VmExit>, VmmError> {
+    pub async fn try_wait(&self) -> Result<Option<VmExit>, VirtError> {
         self.backend.try_wait().await
     }
 
@@ -88,7 +77,7 @@ impl VirtualMachine {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use crate::machine::{VirtualMachine, Vmm};
+    use crate::machine::VirtualMachine;
     use crate::types::{NetworkMode, VmConfig};
     use std::fs;
     use std::path::PathBuf;
@@ -111,12 +100,8 @@ mod tests {
             .build()
     }
 
-    async fn create(config: VmConfig) -> VirtualMachine {
-        Vmm::new()
-            .expect("create vmm")
-            .create(config)
-            .await
-            .expect("create machine")
+    fn create(config: VmConfig) -> VirtualMachine {
+        VirtualMachine::new(config).expect("create machine")
     }
 
     fn unique_id(prefix: &str) -> String {
@@ -139,8 +124,8 @@ mod tests {
     #[tokio::test]
     async fn create_returns_distinct_instances_for_same_config() {
         let id = unique_id("distinct-instances");
-        let first = create(config(&id, 2)).await;
-        let second = create(config(&id, 2)).await;
+        let first = create(config(&id, 2));
+        let second = create(config(&id, 2));
 
         assert!(!Arc::ptr_eq(&first.backend, &second.backend));
 
@@ -151,7 +136,7 @@ mod tests {
     #[tokio::test]
     async fn stop_is_explicit_and_idempotent() {
         let id = unique_id("stop-explicit");
-        let machine = create(config(&id, 2)).await;
+        let machine = create(config(&id, 2));
 
         assert!(machine.stop().await.is_ok());
         assert!(machine.stop().await.is_ok());

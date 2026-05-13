@@ -1,20 +1,38 @@
 use std::fmt;
-#[cfg(unix)]
-use std::fs::File;
-use std::io::{self, Read, Write};
-#[cfg(unix)]
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::io;
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::pin::Pin;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll};
 
-#[cfg(target_os = "macos")]
-use bento_vz::device::{
-    SerialPortStream as VzSerialStream, VirtioSocketConnection as VzVsockConnection,
-    VirtioSocketListener as VzVsockListener,
-};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-#[cfg(unix)]
-use tokio::net::{UnixListener as TokioUnixListener, UnixStream as TokioUnixStream};
+use tokio::net::{UnixListener, UnixStream};
+
+mod unix;
+#[cfg(target_os = "macos")]
+mod vz;
+
+#[cfg(not(unix))]
+compile_error!("bento-virt stream support requires a Unix host");
+
+enum VsockStreamInner {
+    Unix(UnixStream),
+    #[cfg(target_os = "macos")]
+    Vz(vz::VzVsockConnection),
+}
+
+enum VsockListenerInner {
+    #[cfg_attr(not(test), allow(dead_code))]
+    Unix(UnixListener),
+    #[cfg(target_os = "macos")]
+    Vz(vz::VzVsockListener),
+}
+
+enum MachineSerialStreamInner {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Unix(unix::MachineSerialStreamInner),
+    #[cfg(target_os = "macos")]
+    Vz(vz::VzSerialStream),
+}
 
 pub struct VsockStream {
     inner: VsockStreamInner,
@@ -26,32 +44,6 @@ pub struct VsockListener {
 
 pub(crate) struct MachineSerialStream {
     inner: MachineSerialStreamInner,
-}
-
-enum VsockStreamInner {
-    #[cfg(unix)]
-    Unix(TokioUnixStream),
-    #[cfg(target_os = "macos")]
-    Vz(VzVsockConnection),
-}
-
-enum MachineSerialStreamInner {
-    #[allow(dead_code)]
-    #[cfg(unix)]
-    SplitFile(SplitFileStream),
-    #[allow(dead_code)]
-    #[cfg(unix)]
-    Unix(TokioUnixStream),
-    #[cfg(target_os = "macos")]
-    Vz(VzSerialStream),
-}
-
-enum VsockListenerInner {
-    #[allow(dead_code)]
-    #[cfg(unix)]
-    Unix(TokioUnixListener),
-    #[cfg(target_os = "macos")]
-    Vz(VzVsockListener),
 }
 
 impl fmt::Debug for VsockStream {
@@ -74,35 +66,21 @@ impl fmt::Debug for VsockListener {
 }
 
 impl VsockStream {
+    pub fn from_unix_stream(stream: UnixStream) -> Self {
+        Self {
+            inner: VsockStreamInner::Unix(stream),
+        }
+    }
+
     #[cfg(target_os = "macos")]
-    pub(crate) fn from_vz(stream: VzVsockConnection) -> Self {
+    pub(crate) fn from_vz(stream: vz::VzVsockConnection) -> Self {
         Self {
             inner: VsockStreamInner::Vz(stream),
         }
     }
 
-    #[cfg(unix)]
-    #[allow(dead_code)]
-    pub(crate) fn from_unix_stream(stream: TokioUnixStream) -> Self {
-        Self {
-            inner: VsockStreamInner::Unix(stream),
-        }
-    }
-
-    #[cfg(unix)]
-    pub fn from_file(file: File) -> io::Result<Self> {
-        let fd: OwnedFd = file.into();
-        let stream = std::os::unix::net::UnixStream::from(fd);
-        stream.set_nonblocking(true)?;
-        let stream = TokioUnixStream::from_std(stream)?;
-        Ok(Self {
-            inner: VsockStreamInner::Unix(stream),
-        })
-    }
-
     pub fn source_port(&self) -> Option<u32> {
         match &self.inner {
-            #[cfg(unix)]
             VsockStreamInner::Unix(_) => None,
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => Some(stream.source_port()),
@@ -111,37 +89,30 @@ impl VsockStream {
 
     pub fn destination_port(&self) -> u32 {
         match &self.inner {
-            #[cfg(unix)]
             VsockStreamInner::Unix(_) => 0,
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => stream.destination_port(),
         }
     }
 
-    #[cfg(unix)]
     pub fn dup_fd(&self) -> io::Result<OwnedFd> {
-        let fd = match &self.inner {
-            #[cfg(unix)]
-            VsockStreamInner::Unix(stream) => duplicate_nonblocking_fd(stream)?,
+        match &self.inner {
+            VsockStreamInner::Unix(stream) => duplicate_nonblocking_fd(stream),
             #[cfg(target_os = "macos")]
-            VsockStreamInner::Vz(stream) => duplicate_nonblocking_fd(stream)?,
-        };
-
-        Ok(fd)
+            VsockStreamInner::Vz(stream) => duplicate_nonblocking_fd(stream),
+        }
     }
 }
 
 impl VsockListener {
-    #[cfg(unix)]
-    #[allow(dead_code)]
-    pub(crate) fn from_unix_listener(listener: TokioUnixListener) -> Self {
+    pub fn from_unix_listener(listener: UnixListener) -> Self {
         Self {
             inner: VsockListenerInner::Unix(listener),
         }
     }
 
     #[cfg(target_os = "macos")]
-    pub(crate) fn from_vz(listener: VzVsockListener) -> Self {
+    pub(crate) fn from_vz(listener: vz::VzVsockListener) -> Self {
         Self {
             inner: VsockListenerInner::Vz(listener),
         }
@@ -152,12 +123,10 @@ impl VsockListener {
     /// Returns the next available connection for this listener.
     pub async fn accept(&mut self) -> io::Result<VsockStream> {
         match &mut self.inner {
-            #[cfg(unix)]
-            VsockListenerInner::Unix(listener) => {
-                listener.accept().await.map(|(stream, _)| VsockStream {
-                    inner: VsockStreamInner::Unix(stream),
-                })
-            }
+            VsockListenerInner::Unix(listener) => listener
+                .accept()
+                .await
+                .map(|(stream, _)| VsockStream::from_unix_stream(stream)),
             #[cfg(target_os = "macos")]
             VsockListenerInner::Vz(listener) => listener
                 .accept()
@@ -172,12 +141,8 @@ impl VsockListener {
     /// Returns `Ok(None)` if no connection is currently available.
     pub fn try_accept(&mut self) -> io::Result<Option<VsockStream>> {
         match &mut self.inner {
-            #[cfg(unix)]
-            VsockListenerInner::Unix(listener) => try_accept_unix(listener).map(|stream| {
-                stream.map(|stream| VsockStream {
-                    inner: VsockStreamInner::Unix(stream),
-                })
-            }),
+            VsockListenerInner::Unix(listener) => unix::try_accept_unix(listener)
+                .map(|stream| stream.map(VsockStream::from_unix_stream)),
             #[cfg(target_os = "macos")]
             VsockListenerInner::Vz(listener) => listener
                 .try_accept()
@@ -187,128 +152,18 @@ impl VsockListener {
     }
 }
 
-#[cfg(unix)]
-fn try_accept_unix(listener: &TokioUnixListener) -> io::Result<Option<TokioUnixStream>> {
-    use nix::errno::Errno;
-    use nix::sys::socket::accept;
-
-    match accept(listener.as_raw_fd()) {
-        Ok(fd) => {
-            let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
-            stream.set_nonblocking(true)?;
-            TokioUnixStream::from_std(stream).map(Some)
-        }
-        Err(Errno::EAGAIN) => Ok(None),
-        Err(err) => Err(io::Error::other(err)),
-    }
-}
-
-#[cfg(unix)]
-#[derive(Debug)]
-struct SplitFileStream {
-    read: tokio::io::unix::AsyncFd<File>,
-    write: tokio::io::unix::AsyncFd<File>,
-}
-
-#[cfg(unix)]
-impl SplitFileStream {
-    #[allow(dead_code)]
-    fn new(read: File, write: File) -> io::Result<Self> {
-        set_nonblocking(&read)?;
-        set_nonblocking(&write)?;
-        Ok(Self {
-            read: tokio::io::unix::AsyncFd::new(read)?,
-            write: tokio::io::unix::AsyncFd::new(write)?,
-        })
-    }
-}
-
-#[cfg(unix)]
-impl AsyncRead for SplitFileStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let bytes =
-            unsafe { &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>] as *mut [u8]) };
-
-        loop {
-            let mut guard = ready!(self.read.poll_read_ready(cx))?;
-            match guard.try_io(|inner| inner.get_ref().read(bytes)) {
-                Ok(Ok(n)) => {
-                    unsafe {
-                        buf.assume_init(n);
-                    }
-                    buf.advance(n);
-                    return Poll::Ready(Ok(()));
-                }
-                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Ok(Err(err)) => return Poll::Ready(Err(err)),
-                Err(_) => continue,
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-impl AsyncWrite for SplitFileStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        loop {
-            let mut guard = ready!(self.write.poll_write_ready(cx))?;
-            match guard.try_io(|inner| inner.get_ref().write(buf)) {
-                Ok(Ok(n)) => return Poll::Ready(Ok(n)),
-                Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Ok(Err(err)) => return Poll::Ready(Err(err)),
-                Err(_) => continue,
-            }
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.write.get_ref().flush()?;
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.write.get_ref().flush()?;
-        shutdown_write(self.write.get_ref())?;
-        Poll::Ready(Ok(()))
-    }
-}
-
-#[cfg(unix)]
-fn shutdown_write<F: AsRawFd>(file: &F) -> io::Result<()> {
-    match nix::sys::socket::shutdown(file.as_raw_fd(), nix::sys::socket::Shutdown::Write) {
-        Ok(()) => Ok(()),
-        Err(nix::errno::Errno::ENOTSOCK | nix::errno::Errno::ENOTCONN) => Ok(()),
-        Err(err) => Err(io::Error::other(format!("shutdown(SHUT_WR) failed: {err}"))),
-    }
-}
-
 impl MachineSerialStream {
-    #[allow(dead_code)]
-    #[cfg(unix)]
-    pub(crate) fn from_files(read: File, write: File) -> io::Result<Self> {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn from_files(read: std::fs::File, write: std::fs::File) -> io::Result<Self> {
         Ok(Self {
-            inner: MachineSerialStreamInner::SplitFile(SplitFileStream::new(read, write)?),
+            inner: MachineSerialStreamInner::Unix(unix::MachineSerialStreamInner::from_files(
+                read, write,
+            )?),
         })
-    }
-
-    #[allow(dead_code)]
-    #[cfg(unix)]
-    pub(crate) fn from_unix_stream(stream: TokioUnixStream) -> Self {
-        Self {
-            inner: MachineSerialStreamInner::Unix(stream),
-        }
     }
 
     #[cfg(target_os = "macos")]
-    pub(crate) fn from_vz(stream: VzSerialStream) -> Self {
+    pub(crate) fn from_vz(stream: vz::VzSerialStream) -> Self {
         Self {
             inner: MachineSerialStreamInner::Vz(stream),
         }
@@ -322,7 +177,6 @@ impl AsyncRead for VsockStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         match &mut self.inner {
-            #[cfg(unix)]
             VsockStreamInner::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => Pin::new(stream).poll_read(cx, buf),
@@ -337,7 +191,6 @@ impl AsyncWrite for VsockStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         match &mut self.inner {
-            #[cfg(unix)]
             VsockStreamInner::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => Pin::new(stream).poll_write(cx, buf),
@@ -346,7 +199,6 @@ impl AsyncWrite for VsockStream {
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
-            #[cfg(unix)]
             VsockStreamInner::Unix(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => Pin::new(stream).poll_flush(cx),
@@ -355,7 +207,6 @@ impl AsyncWrite for VsockStream {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
-            #[cfg(unix)]
             VsockStreamInner::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(target_os = "macos")]
             VsockStreamInner::Vz(stream) => Pin::new(stream).poll_shutdown(cx),
@@ -370,9 +221,6 @@ impl AsyncRead for MachineSerialStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         match &mut self.inner {
-            #[cfg(unix)]
-            MachineSerialStreamInner::SplitFile(stream) => Pin::new(stream).poll_read(cx, buf),
-            #[cfg(unix)]
             MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
             #[cfg(target_os = "macos")]
             MachineSerialStreamInner::Vz(stream) => Pin::new(stream).poll_read(cx, buf),
@@ -387,9 +235,6 @@ impl AsyncWrite for MachineSerialStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         match &mut self.inner {
-            #[cfg(unix)]
-            MachineSerialStreamInner::SplitFile(stream) => Pin::new(stream).poll_write(cx, buf),
-            #[cfg(unix)]
             MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
             #[cfg(target_os = "macos")]
             MachineSerialStreamInner::Vz(stream) => Pin::new(stream).poll_write(cx, buf),
@@ -398,9 +243,6 @@ impl AsyncWrite for MachineSerialStream {
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
-            #[cfg(unix)]
-            MachineSerialStreamInner::SplitFile(stream) => Pin::new(stream).poll_flush(cx),
-            #[cfg(unix)]
             MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(target_os = "macos")]
             MachineSerialStreamInner::Vz(stream) => Pin::new(stream).poll_flush(cx),
@@ -409,9 +251,6 @@ impl AsyncWrite for MachineSerialStream {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match &mut self.inner {
-            #[cfg(unix)]
-            MachineSerialStreamInner::SplitFile(stream) => Pin::new(stream).poll_shutdown(cx),
-            #[cfg(unix)]
             MachineSerialStreamInner::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(target_os = "macos")]
             MachineSerialStreamInner::Vz(stream) => Pin::new(stream).poll_shutdown(cx),
@@ -419,7 +258,6 @@ impl AsyncWrite for MachineSerialStream {
     }
 }
 
-#[cfg(unix)]
 fn duplicate_nonblocking_fd<F>(fd_owner: &F) -> io::Result<OwnedFd>
 where
     F: AsRawFd,
@@ -431,7 +269,6 @@ where
     Ok(file.into())
 }
 
-#[cfg(unix)]
 fn set_nonblocking(file: &std::fs::File) -> io::Result<()> {
     use nix::fcntl::{fcntl, FcntlArg, OFlag};
 
@@ -442,11 +279,11 @@ fn set_nonblocking(file: &std::fs::File) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use std::io;
     use std::io::{Read, Write};
-    use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+    use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream as StdUnixStream;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -471,8 +308,8 @@ mod tests {
             .set_nonblocking(true)
             .expect("right stream should be nonblocking");
 
-        let file = unsafe { std::fs::File::from_raw_fd(right.into_raw_fd()) };
-        let stream = VsockStream::from_file(file).expect("vsock stream should wrap unix stream");
+        let stream = UnixStream::from_std(right).expect("tokio unix stream should wrap std stream");
+        let stream = VsockStream::from_unix_stream(stream);
         let duplicated = stream.dup_fd().expect("dup fd should succeed");
 
         let raw_flags = unsafe { libc::fcntl(duplicated.as_raw_fd(), libc::F_GETFL) };

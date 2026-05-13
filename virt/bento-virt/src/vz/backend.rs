@@ -17,7 +17,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use crate::stream::{MachineSerialStream, VsockListener, VsockStream};
 use crate::types::{
-    MachineIdentifier, NetworkMode, UserNetworkTransport, VmConfig, VmExit, VmmError,
+    MachineIdentifier, NetworkMode, UserNetworkTransport, VirtError, VmConfig, VmExit,
 };
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60 * 5);
@@ -39,7 +39,7 @@ struct VzMachineState {
 }
 
 impl VzMachineBackend {
-    pub(crate) fn new(config: VmConfig) -> Result<Self, VmmError> {
+    pub(crate) fn new(config: VmConfig) -> Result<Self, VirtError> {
         validate(&config)?;
         Ok(Self {
             config,
@@ -52,11 +52,11 @@ impl VzMachineBackend {
         })
     }
 
-    pub(crate) async fn start(&self) -> Result<(), VmmError> {
+    pub(crate) async fn start(&self) -> Result<(), VirtError> {
         validate_support()?;
         let mut state = self.inner.lock().await;
         if state.vm.is_some() {
-            return Err(VmmError::AlreadyRunning {
+            return Err(VirtError::AlreadyRunning {
                 name: self.config.name.clone(),
             });
         }
@@ -83,7 +83,7 @@ impl VzMachineBackend {
         Ok(())
     }
 
-    pub(crate) async fn stop(&self) -> Result<(), VmmError> {
+    pub(crate) async fn stop(&self) -> Result<(), VirtError> {
         let mut state = self.inner.lock().await;
         if let Some(vm) = state.vm.as_ref() {
             if vm.state() != VirtualMachineState::Stopped {
@@ -160,11 +160,11 @@ impl VzMachineBackend {
         Ok(())
     }
 
-    pub(crate) async fn connect_vsock(&self, port: u32) -> Result<VsockStream, VmmError> {
+    pub(crate) async fn connect_vsock(&self, port: u32) -> Result<VsockStream, VirtError> {
         let vm = {
             let state = self.inner.lock().await;
             state.vm.clone().ok_or_else(|| {
-                VmmError::Backend(format!(
+                VirtError::Backend(format!(
                     "cannot open vsock stream because machine {:?} is not running",
                     self.config.name.as_str()
                 ))
@@ -172,18 +172,18 @@ impl VzMachineBackend {
         };
 
         let device = vm.open_devices().into_iter().next().ok_or_else(|| {
-            VmmError::Backend("no virtio socket device configured in VM".to_string())
+            VirtError::Backend("no virtio socket device configured in VM".to_string())
         })?;
 
         let stream = device.connect(port).await.map_err(vz_error)?;
         Ok(VsockStream::from_vz(stream))
     }
 
-    pub(crate) async fn listen_vsock(&self, port: u32) -> Result<VsockListener, VmmError> {
+    pub(crate) async fn listen_vsock(&self, port: u32) -> Result<VsockListener, VirtError> {
         let vm = {
             let state = self.inner.lock().await;
             state.vm.clone().ok_or_else(|| {
-                VmmError::Backend(format!(
+                VirtError::Backend(format!(
                     "cannot listen on vsock port because machine {:?} is not running",
                     self.config.name.as_str()
                 ))
@@ -191,18 +191,18 @@ impl VzMachineBackend {
         };
 
         let device = vm.open_devices().into_iter().next().ok_or_else(|| {
-            VmmError::Backend("no virtio socket device configured in VM".to_string())
+            VirtError::Backend("no virtio socket device configured in VM".to_string())
         })?;
 
         let listener = device.listen(port).map_err(vz_error)?;
         Ok(VsockListener::from_vz(listener))
     }
 
-    pub(crate) async fn open_serial(&self) -> Result<MachineSerialStream, VmmError> {
+    pub(crate) async fn open_serial(&self) -> Result<MachineSerialStream, VirtError> {
         let serial_port = {
             let state = self.inner.lock().await;
             state.serial_port.clone().ok_or_else(|| {
-                VmmError::Backend(format!(
+                VirtError::Backend(format!(
                     "cannot open serial stream because machine {:?} is not running",
                     self.config.name.as_str()
                 ))
@@ -213,7 +213,7 @@ impl VzMachineBackend {
         Ok(MachineSerialStream::from_vz(stream))
     }
 
-    pub(crate) async fn wait(&self) -> Result<VmExit, VmmError> {
+    pub(crate) async fn wait(&self) -> Result<VmExit, VirtError> {
         loop {
             if let Some(exit) = self.cached_exit()? {
                 return Ok(exit);
@@ -225,7 +225,7 @@ impl VzMachineBackend {
             };
 
             let Some(vm) = maybe_vm else {
-                return Err(VmmError::Backend(
+                return Err(VirtError::Backend(
                     "cannot wait for a virtual machine that has not been started".to_string(),
                 ));
             };
@@ -239,7 +239,7 @@ impl VzMachineBackend {
         }
     }
 
-    pub(crate) async fn try_wait(&self) -> Result<Option<VmExit>, VmmError> {
+    pub(crate) async fn try_wait(&self) -> Result<Option<VmExit>, VirtError> {
         if let Some(exit) = self.cached_exit()? {
             return Ok(Some(exit));
         }
@@ -257,15 +257,15 @@ impl VzMachineBackend {
         self.cached_exit()
     }
 
-    fn cached_exit(&self) -> Result<Option<VmExit>, VmmError> {
+    fn cached_exit(&self) -> Result<Option<VmExit>, VirtError> {
         self.exit
             .lock()
             .map(|exit| exit.clone())
-            .map_err(|_| VmmError::RegistryPoisoned)
+            .map_err(|_| VirtError::RegistryPoisoned)
     }
 
-    fn cache_exit(&self, exit: VmExit) -> Result<(), VmmError> {
-        let mut slot = self.exit.lock().map_err(|_| VmmError::RegistryPoisoned)?;
+    fn cache_exit(&self, exit: VmExit) -> Result<(), VirtError> {
+        let mut slot = self.exit.lock().map_err(|_| VirtError::RegistryPoisoned)?;
         if slot.is_none() {
             *slot = Some(exit);
             self.exit_notify.notify_waiters();
@@ -273,7 +273,7 @@ impl VzMachineBackend {
         Ok(())
     }
 
-    fn try_cache_exit_from_vm(&self, vm: &VirtualMachine) -> Result<(), VmmError> {
+    fn try_cache_exit_from_vm(&self, vm: &VirtualMachine) -> Result<(), VirtError> {
         match vm.state() {
             VirtualMachineState::Stopped => self.cache_exit(VmExit::Stopped),
             VirtualMachineState::Error => self.cache_exit(VmExit::StoppedWithError(
@@ -310,17 +310,17 @@ impl VirtualMachineDelegate for ExitDelegate {
     }
 }
 
-pub(crate) fn validate(spec: &VmConfig) -> Result<(), VmmError> {
+fn validate(spec: &VmConfig) -> Result<(), VirtError> {
     validate_support()?;
     validate_machine_config(spec)
 }
 
-fn validate_support() -> Result<(), VmmError> {
+fn validate_support() -> Result<(), VirtError> {
     let _ = VirtualMachine::builder().map_err(vz_error)?;
     Ok(())
 }
 
-fn build_vm(spec: &VmConfig) -> Result<(VirtualMachine, SerialPortConfiguration), VmmError> {
+fn build_vm(spec: &VmConfig) -> Result<(VirtualMachine, SerialPortConfiguration), VirtError> {
     let serial_port = SerialPortConfiguration::virtio_console();
 
     let mut builder = VirtualMachine::builder()
@@ -341,7 +341,7 @@ fn build_vm(spec: &VmConfig) -> Result<(VirtualMachine, SerialPortConfiguration)
         let network = spec
             .user_network
             .as_ref()
-            .ok_or_else(|| VmmError::InvalidConfig {
+            .ok_or_else(|| VirtError::InvalidConfig {
                 name: spec.name.clone(),
                 reason: "user networking requires a userspace attachment".to_string(),
             })?;
@@ -386,7 +386,7 @@ fn build_vm(spec: &VmConfig) -> Result<(VirtualMachine, SerialPortConfiguration)
     Ok((vm, serial_port))
 }
 
-fn build_platform(spec: &VmConfig) -> Result<GenericPlatform, VmmError> {
+fn build_platform(spec: &VmConfig) -> Result<GenericPlatform, VirtError> {
     let mut platform = GenericPlatform::new();
     let machine_identifier = resolve_machine_identifier(spec)?;
     platform.set_machine_identifier(machine_identifier);
@@ -394,7 +394,7 @@ fn build_platform(spec: &VmConfig) -> Result<GenericPlatform, VmmError> {
     Ok(platform)
 }
 
-fn build_boot_loader(spec: &VmConfig) -> Result<LinuxBootLoader, VmmError> {
+fn build_boot_loader(spec: &VmConfig) -> Result<LinuxBootLoader, VirtError> {
     let kernel_path = required_path(&spec.name, spec.kernel_path.as_ref(), "kernel_path")?;
     let initramfs_path = required_path(&spec.name, spec.initramfs_path.as_ref(), "initramfs_path")?;
 
@@ -416,7 +416,7 @@ fn build_boot_loader(spec: &VmConfig) -> Result<LinuxBootLoader, VmmError> {
     Ok(boot_loader)
 }
 
-fn resolve_machine_identifier(config: &VmConfig) -> Result<GenericMachineIdentifier, VmmError> {
+fn resolve_machine_identifier(config: &VmConfig) -> Result<GenericMachineIdentifier, VirtError> {
     let Some(machine_identifier) = config.machine_identifier.as_ref() else {
         return Ok(GenericMachineIdentifier::new());
     };
@@ -430,23 +430,23 @@ fn resolve_machine_identifier(config: &VmConfig) -> Result<GenericMachineIdentif
     GenericMachineIdentifier::from_bytes(&machine_identifier.bytes()).map_err(vz_error)
 }
 
-fn validate_machine_config(spec: &VmConfig) -> Result<(), VmmError> {
+fn validate_machine_config(spec: &VmConfig) -> Result<(), VirtError> {
     if spec.base_directory.as_os_str().is_empty() {
-        return Err(VmmError::InvalidConfig {
+        return Err(VirtError::InvalidConfig {
             name: spec.name.clone(),
             reason: "base_directory must be set".to_string(),
         });
     }
 
     if spec.cpus == Some(0) {
-        return Err(VmmError::InvalidConfig {
+        return Err(VirtError::InvalidConfig {
             name: spec.name.clone(),
             reason: "cpu count must be greater than zero".to_string(),
         });
     }
 
     if spec.memory_mib == Some(0) {
-        return Err(VmmError::InvalidConfig {
+        return Err(VirtError::InvalidConfig {
             name: spec.name.clone(),
             reason: "memory_mib must be greater than zero".to_string(),
         });
@@ -468,7 +468,7 @@ fn validate_machine_config(spec: &VmConfig) -> Result<(), VmmError> {
     }
 
     for mount in &spec.mounts {
-        let metadata = fs::metadata(&mount.host_path).map_err(|err| VmmError::InvalidConfig {
+        let metadata = fs::metadata(&mount.host_path).map_err(|err| VirtError::InvalidConfig {
             name: spec.name.clone(),
             reason: format!(
                 "failed to access shared directory {}: {err}",
@@ -476,7 +476,7 @@ fn validate_machine_config(spec: &VmConfig) -> Result<(), VmmError> {
             ),
         })?;
         if !metadata.is_dir() {
-            return Err(VmmError::InvalidConfig {
+            return Err(VirtError::InvalidConfig {
                 name: spec.name.clone(),
                 reason: format!(
                     "shared directory path is not a directory: {}",
@@ -489,32 +489,32 @@ fn validate_machine_config(spec: &VmConfig) -> Result<(), VmmError> {
     Ok(())
 }
 
-fn validate_user_network(spec: &VmConfig) -> Result<(), VmmError> {
+fn validate_user_network(spec: &VmConfig) -> Result<(), VirtError> {
     match spec.user_network.as_ref().map(|network| &network.transport) {
         Some(UserNetworkTransport::Unixgram { peer_path, .. })
             if !peer_path.as_os_str().is_empty() && !spec.vm_id.is_empty() =>
         {
             Ok(())
         }
-        Some(UserNetworkTransport::Unixgram { .. }) => Err(VmmError::InvalidConfig {
+        Some(UserNetworkTransport::Unixgram { .. }) => Err(VirtError::InvalidConfig {
             name: spec.name.clone(),
             reason: "user networking requires a non-empty VM id and unixgram peer socket path"
                 .to_string(),
         }),
-        None => Err(VmmError::InvalidConfig {
+        None => Err(VirtError::InvalidConfig {
             name: spec.name.clone(),
             reason: "user networking requires a userspace attachment".to_string(),
         }),
     }
 }
 
-fn validate_nested_virtualization(spec: &VmConfig) -> Result<(), VmmError> {
+fn validate_nested_virtualization(spec: &VmConfig) -> Result<(), VirtError> {
     if !spec.nested_virtualization {
         return Ok(());
     }
 
     if !GenericPlatform::is_nested_virtualization_supported() {
-        return Err(VmmError::InvalidConfig {
+        return Err(VirtError::InvalidConfig {
             name: spec.name.clone(),
             reason: "nested virtualization is not supported on this host".to_string(),
         });
@@ -523,19 +523,19 @@ fn validate_nested_virtualization(spec: &VmConfig) -> Result<(), VmmError> {
     Ok(())
 }
 
-fn validate_rosetta(spec: &VmConfig) -> Result<(), VmmError> {
+fn validate_rosetta(spec: &VmConfig) -> Result<(), VirtError> {
     if !spec.rosetta {
         return Ok(());
     }
 
     match bento_vz::rosetta_availability() {
         RosettaAvailability::Installed => Ok(()),
-        RosettaAvailability::NotInstalled => Err(VmmError::InvalidConfig {
+        RosettaAvailability::NotInstalled => Err(VirtError::InvalidConfig {
             name: spec.name.clone(),
             reason: "Rosetta for Linux VMs is not installed on this host. Install it with: softwareupdate --install-rosetta"
                 .to_string(),
         }),
-        RosettaAvailability::NotSupported => Err(VmmError::InvalidConfig {
+        RosettaAvailability::NotSupported => Err(VirtError::InvalidConfig {
             name: spec.name.clone(),
             reason: "Rosetta is not supported on this host".to_string(),
         }),
@@ -545,14 +545,14 @@ fn validate_rosetta(spec: &VmConfig) -> Result<(), VmmError> {
 fn validate_machine_identifier(
     name: &str,
     machine_identifier: &MachineIdentifier,
-) -> Result<(), VmmError> {
+) -> Result<(), VirtError> {
     if machine_identifier.is_empty() {
         return Ok(());
     }
 
     GenericMachineIdentifier::from_bytes(&machine_identifier.bytes())
         .map(|_| ())
-        .map_err(|err| VmmError::InvalidConfig {
+        .map_err(|err| VirtError::InvalidConfig {
             name: name.to_string(),
             reason: err.to_string(),
         })
@@ -562,9 +562,9 @@ fn required_path<'a>(
     name: &str,
     path: Option<&'a PathBuf>,
     field: &'static str,
-) -> Result<&'a Path, VmmError> {
+) -> Result<&'a Path, VirtError> {
     path.map(|path| path.as_path())
-        .ok_or_else(|| VmmError::InvalidConfig {
+        .ok_or_else(|| VirtError::InvalidConfig {
             name: name.to_string(),
             reason: format!("{field} must be set"),
         })
@@ -575,7 +575,7 @@ async fn wait_for_state(
     vm: &VirtualMachine,
     target: VirtualMachineState,
     timeout: Duration,
-) -> Result<(), VmmError> {
+) -> Result<(), VirtError> {
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {
@@ -587,14 +587,14 @@ async fn wait_for_state(
         }
 
         if state == VirtualMachineState::Error {
-            return Err(VmmError::Backend(format!(
+            return Err(VirtError::Backend(format!(
                 "machine entered error state while waiting for {target}"
             )));
         }
 
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            return Err(VmmError::Backend(format!(
+            return Err(VirtError::Backend(format!(
                 "timed out after {:?} waiting for machine to enter {target} (current state: {state})",
                 timeout
             )));
@@ -604,12 +604,12 @@ async fn wait_for_state(
         match tokio::time::timeout(remaining, events.changed()).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
-                return Err(VmmError::Backend(
+                return Err(VirtError::Backend(
                     "machine state watcher closed before target state was reached".to_string(),
                 ));
             }
             Err(_) => {
-                return Err(VmmError::Backend(format!(
+                return Err(VirtError::Backend(format!(
                     "timed out after {:?} waiting for machine to enter {target} (current state: {})",
                     timeout,
                     vm.state()
@@ -619,6 +619,6 @@ async fn wait_for_state(
     }
 }
 
-fn vz_error(err: bento_vz::VzError) -> VmmError {
-    VmmError::Backend(err.to_string())
+fn vz_error(err: bento_vz::VzError) -> VirtError {
+    VirtError::Backend(err.to_string())
 }

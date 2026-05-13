@@ -6,7 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
 
-use crate::backend::VmBackend;
+use crate::platform::VmBackend;
 use crate::stream::MachineSerialStream;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,9 +29,9 @@ impl SerialHub {
         }
     }
 
-    fn attach(&mut self, access: SerialAccess) -> Result<u64, crate::types::VmmError> {
+    fn attach(&mut self, access: SerialAccess) -> Result<u64, crate::types::VirtError> {
         if access == SerialAccess::Interactive && self.interactive_owner.is_some() {
-            return Err(crate::types::VmmError::Backend(
+            return Err(crate::types::VirtError::Backend(
                 "interactive serial client is already attached".to_string(),
             ));
         }
@@ -94,13 +94,13 @@ impl SerialConsole {
         }
     }
 
-    pub async fn stream_to_file(&self, path: &Path) -> Result<(), crate::types::VmmError> {
+    pub async fn stream_to_file(&self, path: &Path) -> Result<(), crate::types::VirtError> {
         let file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
             .await
-            .map_err(crate::types::VmmError::from)?;
+            .map_err(crate::types::VirtError::from)?;
 
         self.file_sinks.lock().await.push(file);
         tracing::info!(path = %path.display(), "serial log sink attached");
@@ -111,7 +111,7 @@ impl SerialConsole {
     pub async fn open_stream(
         self: &Arc<Self>,
         access: SerialAccess,
-    ) -> Result<SerialStream, crate::types::VmmError> {
+    ) -> Result<SerialStream, crate::types::VirtError> {
         self.ensure_attached().await?;
 
         let client_id = {
@@ -128,7 +128,7 @@ impl SerialConsole {
         })
     }
 
-    async fn ensure_attached(&self) -> Result<(), crate::types::VmmError> {
+    async fn ensure_attached(&self) -> Result<(), crate::types::VirtError> {
         if self.attachment.lock().await.is_some() {
             return Ok(());
         }
@@ -156,7 +156,7 @@ impl SerialConsole {
         Ok(())
     }
 
-    async fn open_serial_device(&self) -> Result<MachineSerialStream, crate::types::VmmError> {
+    async fn open_serial_device(&self) -> Result<MachineSerialStream, crate::types::VirtError> {
         self.backend.open_serial().await
     }
 

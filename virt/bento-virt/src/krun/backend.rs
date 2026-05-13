@@ -15,7 +15,7 @@ use tokio::time::{sleep, timeout};
 
 use crate::stream::{MachineSerialStream, VsockListener, VsockStream};
 use crate::types::{
-    DiskImage, NetworkMode, SharedDirectory, UserNetworkTransport, VmConfig, VmExit, VmmError,
+    DiskImage, NetworkMode, SharedDirectory, UserNetworkTransport, VirtError, VmConfig, VmExit,
     VsockPortMode,
 };
 
@@ -47,7 +47,7 @@ impl std::fmt::Debug for KrunMachineBackend {
     }
 }
 
-pub(crate) fn validate(config: &VmConfig) -> Result<(), VmmError> {
+fn validate(config: &VmConfig) -> Result<(), VirtError> {
     if config.cpus.is_none() {
         return invalid_config(config, "krun requires a CPU count");
     }
@@ -107,7 +107,7 @@ pub(crate) fn validate(config: &VmConfig) -> Result<(), VmmError> {
     Ok(())
 }
 
-fn validate_user_network(config: &VmConfig) -> Result<(), VmmError> {
+fn validate_user_network(config: &VmConfig) -> Result<(), VirtError> {
     match config
         .user_network
         .as_ref()
@@ -126,9 +126,7 @@ fn validate_user_network(config: &VmConfig) -> Result<(), VmmError> {
     }
 }
 
-fn prepare(config: &VmConfig) -> Result<(), VmmError> {
-    validate(config)?;
-    validate_support()?;
+fn prepare(config: &VmConfig) -> Result<(), VirtError> {
     if config.base_directory.as_os_str().is_empty() {
         return invalid_config(config, "base_directory must be set");
     }
@@ -157,13 +155,12 @@ fn prepare(config: &VmConfig) -> Result<(), VmmError> {
     for mount in &config.mounts {
         ensure_path_exists(config, &mount.host_path, &format!("mount {}", mount.tag))?;
     }
-    validate_vsock_ports(config)?;
     std::fs::create_dir_all(runtime_dir_for(config))?;
     Ok(())
 }
 
 impl KrunMachineBackend {
-    pub(crate) fn new(config: VmConfig) -> Result<Self, VmmError> {
+    pub(crate) fn new(config: VmConfig) -> Result<Self, VirtError> {
         validate(&config)?;
         let krun_bin = locate_krun_binary()?;
         let runtime_dir = runtime_dir_for(&config);
@@ -176,10 +173,10 @@ impl KrunMachineBackend {
         })
     }
 
-    pub(crate) async fn start(&self) -> Result<(), VmmError> {
+    pub(crate) async fn start(&self) -> Result<(), VirtError> {
         let mut runtime = self.runtime.lock().await;
         if runtime.is_some() {
-            return Err(VmmError::AlreadyRunning {
+            return Err(VirtError::AlreadyRunning {
                 name: self.config.name.clone(),
             });
         }
@@ -199,7 +196,7 @@ impl KrunMachineBackend {
         Ok(())
     }
 
-    pub(crate) async fn stop(&self) -> Result<(), VmmError> {
+    pub(crate) async fn stop(&self) -> Result<(), VirtError> {
         let running = {
             let mut runtime = self.runtime.lock().await;
             runtime.take()
@@ -223,11 +220,11 @@ impl KrunMachineBackend {
         Ok(())
     }
 
-    pub(crate) async fn connect_vsock(&self, port: u32) -> Result<VsockStream, VmmError> {
+    pub(crate) async fn connect_vsock(&self, port: u32) -> Result<VsockStream, VirtError> {
         {
             let runtime = self.runtime.lock().await;
             if runtime.is_none() {
-                return Err(VmmError::Backend(format!(
+                return Err(VirtError::Backend(format!(
                     "cannot open vsock stream because machine {:?} is not running",
                     self.config.name.as_str()
                 )));
@@ -235,12 +232,12 @@ impl KrunMachineBackend {
         }
 
         let Some(mode) = declared_vsock_mode(&self.config, port) else {
-            return Err(VmmError::Backend(format!(
+            return Err(VirtError::Backend(format!(
                 "krun vsock port {port} was not declared before boot"
             )));
         };
         if mode != VsockPortMode::Connect {
-            return Err(VmmError::Backend(format!(
+            return Err(VirtError::Backend(format!(
                 "krun vsock port {port} is declared for listen, not connect"
             )));
         }
@@ -249,14 +246,14 @@ impl KrunMachineBackend {
         Ok(VsockStream::from_unix_stream(stream))
     }
 
-    pub(crate) async fn listen_vsock(&self, port: u32) -> Result<VsockListener, VmmError> {
+    pub(crate) async fn listen_vsock(&self, port: u32) -> Result<VsockListener, VirtError> {
         let Some(mode) = declared_vsock_mode(&self.config, port) else {
-            return Err(VmmError::Backend(format!(
+            return Err(VirtError::Backend(format!(
                 "krun vsock port {port} was not declared before boot"
             )));
         };
         if mode != VsockPortMode::Listen {
-            return Err(VmmError::Backend(format!(
+            return Err(VirtError::Backend(format!(
                 "krun vsock port {port} is declared for connect, not listen"
             )));
         }
@@ -264,13 +261,13 @@ impl KrunMachineBackend {
         let listener = {
             let mut runtime = self.runtime.lock().await;
             let Some(running) = runtime.as_mut() else {
-                return Err(VmmError::Backend(format!(
+                return Err(VirtError::Backend(format!(
                     "cannot listen on vsock port because machine {:?} is not running",
                     self.config.name.as_str()
                 )));
             };
             running.listeners.remove(&port).ok_or_else(|| {
-                VmmError::Backend(format!(
+                VirtError::Backend(format!(
                     "krun vsock listener for port {port} was already claimed"
                 ))
             })?
@@ -279,11 +276,11 @@ impl KrunMachineBackend {
         Ok(VsockListener::from_unix_listener(listener))
     }
 
-    pub(crate) async fn open_serial(&self) -> Result<MachineSerialStream, VmmError> {
+    pub(crate) async fn open_serial(&self) -> Result<MachineSerialStream, VirtError> {
         let serial = {
             let runtime = self.runtime.lock().await;
             let running = runtime.as_ref().ok_or_else(|| {
-                VmmError::Backend(format!(
+                VirtError::Backend(format!(
                     "cannot open serial stream because machine {:?} is not running",
                     self.config.name.as_str()
                 ))
@@ -296,14 +293,14 @@ impl KrunMachineBackend {
         Ok(MachineSerialStream::from_files(read, write)?)
     }
 
-    pub(crate) async fn wait(&self) -> Result<VmExit, VmmError> {
+    pub(crate) async fn wait(&self) -> Result<VmExit, VirtError> {
         if let Some(exit) = self.cached_exit()? {
             return Ok(exit);
         }
         let vm = {
             let runtime = self.runtime.lock().await;
             let Some(running) = runtime.as_ref() else {
-                return Err(VmmError::Backend(
+                return Err(VirtError::Backend(
                     "cannot wait for a virtual machine that has not been started".to_string(),
                 ));
             };
@@ -317,7 +314,7 @@ impl KrunMachineBackend {
         Ok(exit)
     }
 
-    pub(crate) async fn try_wait(&self) -> Result<Option<VmExit>, VmmError> {
+    pub(crate) async fn try_wait(&self) -> Result<Option<VmExit>, VirtError> {
         if let Some(exit) = self.cached_exit()? {
             return Ok(Some(exit));
         }
@@ -343,23 +340,23 @@ impl KrunMachineBackend {
         Ok(Some(exit))
     }
 
-    fn cached_exit(&self) -> Result<Option<VmExit>, VmmError> {
+    fn cached_exit(&self) -> Result<Option<VmExit>, VirtError> {
         self.exit
             .lock()
             .map(|exit| exit.clone())
-            .map_err(|_| VmmError::RegistryPoisoned)
+            .map_err(|_| VirtError::RegistryPoisoned)
     }
 
-    fn cache_exit(&self, exit: VmExit) -> Result<(), VmmError> {
-        let mut slot = self.exit.lock().map_err(|_| VmmError::RegistryPoisoned)?;
+    fn cache_exit(&self, exit: VmExit) -> Result<(), VirtError> {
+        let mut slot = self.exit.lock().map_err(|_| VirtError::RegistryPoisoned)?;
         if slot.is_none() {
             *slot = Some(exit);
         }
         Ok(())
     }
 
-    fn clear_exit_cache(&self) -> Result<(), VmmError> {
-        let mut slot = self.exit.lock().map_err(|_| VmmError::RegistryPoisoned)?;
+    fn clear_exit_cache(&self) -> Result<(), VirtError> {
+        let mut slot = self.exit.lock().map_err(|_| VirtError::RegistryPoisoned)?;
         *slot = None;
         Ok(())
     }
@@ -371,34 +368,34 @@ fn build_boot_args(config: &VmConfig) -> Vec<String> {
     args
 }
 
-fn build_krun_vm(krun_bin: &Path, config: &VmConfig) -> Result<VirtualMachineBuilder, VmmError> {
-    let cpus = config.cpus.ok_or_else(|| VmmError::InvalidConfig {
+fn build_krun_vm(krun_bin: &Path, config: &VmConfig) -> Result<VirtualMachineBuilder, VirtError> {
+    let cpus = config.cpus.ok_or_else(|| VirtError::InvalidConfig {
         name: config.name.clone(),
         reason: "krun requires a CPU count".to_string(),
     })?;
-    let memory_mib = config.memory_mib.ok_or_else(|| VmmError::InvalidConfig {
+    let memory_mib = config.memory_mib.ok_or_else(|| VirtError::InvalidConfig {
         name: config.name.clone(),
         reason: "krun requires a memory size".to_string(),
     })?;
-    let cpus = u8::try_from(cpus).map_err(|_| VmmError::InvalidConfig {
+    let cpus = u8::try_from(cpus).map_err(|_| VirtError::InvalidConfig {
         name: config.name.clone(),
         reason: "krun supports at most 255 vCPUs".to_string(),
     })?;
-    let memory_mib = u32::try_from(memory_mib).map_err(|_| VmmError::InvalidConfig {
+    let memory_mib = u32::try_from(memory_mib).map_err(|_| VirtError::InvalidConfig {
         name: config.name.clone(),
         reason: "krun memory_mib exceeds u32::MAX".to_string(),
     })?;
     let kernel = config
         .kernel_path
         .as_ref()
-        .ok_or_else(|| VmmError::InvalidConfig {
+        .ok_or_else(|| VirtError::InvalidConfig {
             name: config.name.clone(),
             reason: "krun requires a kernel image path".to_string(),
         })?;
     let initramfs = config
         .initramfs_path
         .as_ref()
-        .ok_or_else(|| VmmError::InvalidConfig {
+        .ok_or_else(|| VirtError::InvalidConfig {
             name: config.name.clone(),
             reason: "krun requires an initramfs path".to_string(),
         })?;
@@ -458,13 +455,13 @@ fn krun_mount(mount: &SharedDirectory) -> KrunMount {
     }
 }
 
-async fn wait_for_vm_exit(vm: Arc<AsyncMutex<VirtualMachine>>) -> Result<ExitStatus, VmmError> {
+async fn wait_for_vm_exit(vm: Arc<AsyncMutex<VirtualMachine>>) -> Result<ExitStatus, VirtError> {
     loop {
         if let Some(status) = vm
             .lock()
             .await
             .try_wait()
-            .map_err(|err| VmmError::Backend(err.to_string()))?
+            .map_err(|err| VirtError::Backend(err.to_string()))?
         {
             return Ok(status);
         }
@@ -472,18 +469,18 @@ async fn wait_for_vm_exit(vm: Arc<AsyncMutex<VirtualMachine>>) -> Result<ExitSta
     }
 }
 
-fn krun_error(config: &VmConfig, err: KrunBackendError) -> VmmError {
+fn krun_error(config: &VmConfig, err: KrunBackendError) -> VirtError {
     match err {
-        KrunBackendError::InvalidConfig(reason) => VmmError::InvalidConfig {
+        KrunBackendError::InvalidConfig(reason) => VirtError::InvalidConfig {
             name: config.name.clone(),
             reason,
         },
-        KrunBackendError::Io(err) => VmmError::Io(err),
-        err => VmmError::Backend(err.to_string()),
+        KrunBackendError::Io(err) => VirtError::Io(err),
+        err => VirtError::Backend(err.to_string()),
     }
 }
 
-fn prepare_vsock_ports(config: &VmConfig) -> Result<HashMap<u32, UnixListener>, VmmError> {
+fn prepare_vsock_ports(config: &VmConfig) -> Result<HashMap<u32, UnixListener>, VirtError> {
     validate_vsock_ports(config)?;
     let vsock_dir = vsock_dir_for(config);
     std::fs::create_dir_all(&vsock_dir)?;
@@ -501,12 +498,12 @@ fn prepare_vsock_ports(config: &VmConfig) -> Result<HashMap<u32, UnixListener>, 
     Ok(listeners)
 }
 
-fn validate_vsock_ports(config: &VmConfig) -> Result<(), VmmError> {
+fn validate_vsock_ports(config: &VmConfig) -> Result<(), VirtError> {
     let _ = unique_vsock_ports(config)?;
     Ok(())
 }
 
-fn unique_vsock_ports(config: &VmConfig) -> Result<Vec<(u32, VsockPortMode)>, VmmError> {
+fn unique_vsock_ports(config: &VmConfig) -> Result<Vec<(u32, VsockPortMode)>, VirtError> {
     let mut ports = HashMap::new();
     for port in &config.vsock_ports {
         if port.port == 0 {
@@ -551,18 +548,13 @@ fn vsock_dir_for(config: &VmConfig) -> PathBuf {
     runtime_dir_for(config).join(VSOCK_DIR_NAME)
 }
 
-fn validate_support() -> Result<(), VmmError> {
-    locate_krun_binary()?;
-    Ok(())
-}
-
-fn locate_krun_binary() -> Result<PathBuf, VmmError> {
+fn locate_krun_binary() -> Result<PathBuf, VirtError> {
     if let Some(path) = env::var_os(KRUN_BINARY_ENV) {
         let path = PathBuf::from(path);
         if path.is_file() {
             return Ok(path);
         }
-        return Err(VmmError::UnsupportedBackend {
+        return Err(VirtError::UnsupportedBackend {
             kind: "krun",
             reason: format!(
                 "{KRUN_BINARY_ENV} is set but does not point to a file: {}",
@@ -580,7 +572,7 @@ fn locate_krun_binary() -> Result<PathBuf, VmmError> {
         }
     }
 
-    let path = env::var_os("PATH").ok_or_else(|| VmmError::UnsupportedBackend {
+    let path = env::var_os("PATH").ok_or_else(|| VirtError::UnsupportedBackend {
         kind: "krun",
         reason: "PATH is not set, so the krun binary cannot be located".to_string(),
     })?;
@@ -590,7 +582,7 @@ fn locate_krun_binary() -> Result<PathBuf, VmmError> {
             return Ok(candidate);
         }
     }
-    Err(VmmError::UnsupportedBackend {
+    Err(VirtError::UnsupportedBackend {
         kind: "krun",
         reason: "krun binary was not found in PATH".to_string(),
     })
@@ -600,7 +592,7 @@ fn runtime_dir_for(config: &VmConfig) -> PathBuf {
     config.base_directory.clone()
 }
 
-fn ensure_path_exists(config: &VmConfig, path: &Path, label: &str) -> Result<(), VmmError> {
+fn ensure_path_exists(config: &VmConfig, path: &Path, label: &str) -> Result<(), VirtError> {
     if path.exists() {
         return Ok(());
     }
@@ -627,8 +619,8 @@ fn vm_exit_from_status(status: ExitStatus) -> VmExit {
     VmExit::StoppedWithError("krun exited with an unknown status".to_string())
 }
 
-fn invalid_config<T>(config: &VmConfig, reason: &str) -> Result<T, VmmError> {
-    Err(VmmError::InvalidConfig {
+fn invalid_config<T>(config: &VmConfig, reason: &str) -> Result<T, VirtError> {
+    Err(VirtError::InvalidConfig {
         name: config.name.clone(),
         reason: reason.to_string(),
     })

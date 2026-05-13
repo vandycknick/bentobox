@@ -58,8 +58,8 @@ impl MachineIdentifier {
     }
 
     #[cfg(target_os = "macos")]
-    pub(crate) fn set_generated_bytes(&self, bytes: Vec<u8>) -> Result<(), VmmError> {
-        let mut state = self.inner.lock().map_err(|_| VmmError::RegistryPoisoned)?;
+    pub(crate) fn set_generated_bytes(&self, bytes: Vec<u8>) -> Result<(), VirtError> {
+        let mut state = self.inner.lock().map_err(|_| VirtError::RegistryPoisoned)?;
         state.bytes = bytes;
         state.generated = true;
         Ok(())
@@ -278,7 +278,7 @@ pub enum VmExit {
 }
 
 #[derive(Debug, Error)]
-pub enum VmmError {
+pub enum VirtError {
     #[error("machine {name} is already running")]
     AlreadyRunning { name: String },
 

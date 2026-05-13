@@ -1,12 +1,88 @@
 # BentoBox Terminology
 
-This document defines the virtualization terms used in BentoBox. The terms intentionally line up with the KVM, Firecracker, crosvm, Cloud Hypervisor, Virtualization.framework, and libvirt ecosystems where that makes the code easier to reason about.
+Virtualization terms are overloaded across projects. KVM, hypervisor, VMM, VM, microVM, backend, and driver are often used loosely, especially in the cloud-native and microVM ecosystem. BentoBox uses the definitions below so code, docs, and architecture discussions stay pointed at the same layers.
+
+The terms intentionally line up with the KVM, Firecracker, crosvm, Cloud Hypervisor, Virtualization.framework, and libvirt ecosystems where that makes the code easier to reason about.
+
+## Stack From Bottom To Top
+
+A simplified Linux/KVM mental model looks like this:
+
+```mermaid
+flowchart TD
+    Hardware[Hardware CPU virtualization extensions]
+    KVM[KVM kernel interface: /dev/kvm]
+    VMM[VMM / userspace virtualization runtime]
+    VM[Virtual Machine]
+    MicroVM[MicroVM: a VM style]
+
+    Hardware --> KVM --> VMM --> VM
+    VM -. subtype .-> MicroVM
+```
+
+In plain text:
+
+```text
+Hardware CPU virtualization extensions
+    -> KVM or host virtualization kernel/framework layer
+    -> VMM / userspace virtualization runtime
+    -> Virtual Machine (VM)
+
+MicroVM = a specific style/category of VM
+```
+
+macOS does not have KVM, but the same conceptual split still helps. Apple hides more of the stack inside frameworks.
+
+```mermaid
+flowchart TD
+    AppleHardware[Apple virtualization hardware support]
+    HypervisorFramework[Hypervisor.framework]
+    VirtualizationFramework[Virtualization.framework]
+    BentoRuntime[BentoBox host runtime]
+    Guest[Guest VM]
+
+    AppleHardware --> HypervisorFramework --> VirtualizationFramework --> BentoRuntime --> Guest
+```
+
+## KVM
+
+KVM stands for Kernel-based Virtual Machine. It is a Linux kernel subsystem that exposes hardware virtualization features from the CPU, such as Intel VT-x or AMD-V, to userspace.
+
+On Linux, KVM mainly exists as kernel modules and a userspace API:
+
+- `kvm`
+- `kvm_intel`
+- `kvm_amd`
+- `/dev/kvm`
+
+KVM is not a complete virtual machine product. It provides low-level primitives such as:
+
+- creating guest memory regions
+- creating virtual CPUs
+- entering guest execution
+- injecting interrupts
+- trapping VM exits back to userspace
+
+The userspace VMM is responsible for almost everything else, including the machine model, virtual devices, boot setup, and lifecycle policy.
+
+Think of KVM as closer to `epoll`, `io_uring`, or a GPU driver API than to VMware. It is infrastructure for virtualization, not the complete virtualization product.
 
 ## Virtual Machine / VM
 
-A virtual machine is the guest environment managed by BentoBox.
+A virtual machine is a fully virtualized computer environment running a guest operating system.
 
-In user-facing documentation, use "VM" when referring to an instance created, started, stopped, or deleted by BentoBox.
+A VM typically contains:
+
+- virtual CPUs
+- virtual RAM
+- virtual disks
+- virtual NICs
+- firmware, bootloader, or direct kernel boot configuration
+- virtual devices
+
+The guest OS believes it is running on real hardware, even though a VMM and host virtualization layer are mediating execution.
+
+In user-facing BentoBox documentation, use "VM" when referring to an instance created, started, stopped, or deleted by BentoBox.
 
 Examples:
 
@@ -14,39 +90,128 @@ Examples:
 - `bentoctl start dev`
 - `bentoctl stop dev`
 
-## microVM
+## Hypervisor
 
-A microVM is a lightweight VM optimized for fast startup, low overhead, and a small virtual device model.
+A hypervisor is the system responsible for creating, running, and isolating virtual machines.
 
-BentoBox primarily targets microVM-style workloads. Not every supported host virtualization stack needs to use the exact term "microVM", but BentoBox should prefer implementations and configurations that fit this model.
+Historically, this term comes from enterprise virtualization and is often split into two categories.
+
+Type 1 hypervisors run directly on hardware:
+
+- VMware ESXi
+- Xen
+- Hyper-V
+- bare-metal KVM stacks
+
+Type 2 hypervisors run on top of a host OS:
+
+- VirtualBox
+- VMware Fusion
+- Parallels
+
+In modern Linux/KVM systems, the line gets blurry. People may call KVM itself, QEMU, Firecracker, Cloud Hypervisor, or the combined stack "the hypervisor". Technically, KVM provides kernel virtualization support and userspace provides the actual machine model. Together they form the practical hypervisor stack.
+
+BentoBox itself is not a hypervisor. It orchestrates and adapts host virtualization implementations.
 
 ## VMM
 
-A virtual machine monitor is the low-level virtualization implementation that runs a guest VM and provides its virtual device model.
+VMM stands for Virtual Machine Monitor. Historically, VMM and hypervisor were nearly synonymous. In modern systems programming, especially around KVM, VMM usually means the userspace component that manages and emulates the VM.
 
-Examples:
+A VMM commonly owns:
+
+- VM lifecycle
+- vCPU management
+- guest memory mappings
+- device emulation
+- virtio devices
+- MMIO handling
+- VM exits
+- boot configuration
+
+Examples of VMMs include:
+
+- QEMU
+- Firecracker
+- Cloud Hypervisor
+- crosvm
+- bhyve userspace components
+
+In modern Linux virtualization, this distinction is common:
+
+```text
+KVM = kernel virtualization interface
+VMM = userspace VM controller/runtime
+VM = guest machine
+```
+
+Firecracker calls itself a VMM. Cloud Hypervisor calls itself a VMM. crosvm uses the term heavily. BentoBox follows that ecosystem language when describing the lower-level userspace virtualization runtime layer.
+
+## microVM
+
+A microVM is a VM optimized for minimal overhead, fast startup, and reduced virtual hardware surface area.
+
+It is still a real VM. It is not a container and not a different primitive.
+
+MicroVMs usually:
+
+- boot very quickly
+- use small memory footprints
+- expose minimal devices
+- avoid legacy PC hardware emulation
+- prefer virtio-only devices
+- target ephemeral or isolated workloads
+
+Examples and adjacent projects include:
 
 - Firecracker
-- crosvm
 - Cloud Hypervisor
-- QEMU
-- VZ-backed virtualization on macOS, where applicable
+- crosvm
+- Kata Containers
 
-BentoBox's abstraction crate is not a VMM. In BentoBox, VMM refers to a concrete implementation underneath `bento-virt`.
+Traditional VMs often emulate a broad PC platform, including PCI buses, VGA, USB, BIOS, ACPI, or IDE controllers. MicroVMs intentionally avoid most of that surface area. They usually prefer direct kernel boot, virtio devices, and a minimal MMIO model.
 
-## Hypervisor
+BentoBox primarily targets microVM-style workloads. Not every supported host virtualization stack needs to use the exact term "microVM", but BentoBox should prefer implementations and configurations that fit this model.
 
-A hypervisor is the host virtualization layer or full virtualization stack that makes guest execution possible.
+## Example Virtualization Stacks
 
-Depending on context this may refer to KVM, Apple's virtualization stack, Hypervisor.framework, or the broader host virtualization system.
+Traditional QEMU/KVM-style stack:
 
-BentoBox itself is not a hypervisor.
+```mermaid
+flowchart TD
+    Guest[Guest Linux VM]
+    Qemu[QEMU: VMM / userspace hypervisor component]
+    Kvm[KVM: /dev/kvm]
+    Kernel[Linux kernel]
+    Hardware[Hardware virtualization extensions]
 
-## KVM
+    Hardware --> Kernel --> Kvm --> Qemu --> Guest
+```
 
-KVM is the Linux kernel virtualization interface exposed through `/dev/kvm`.
+Firecracker-style microVM stack:
 
-KVM provides kernel support for creating and running virtual machines through ioctls on KVM-related file descriptors. It does not provide BentoBox's lifecycle, configuration, networking, storage, or monitoring model.
+```mermaid
+flowchart TD
+    Guest[Guest microVM]
+    Firecracker[Firecracker: microVM VMM]
+    Kvm[KVM]
+    Kernel[Linux kernel]
+    Hardware[Hardware virtualization extensions]
+
+    Hardware --> Kernel --> Kvm --> Firecracker --> Guest
+```
+
+macOS Virtualization.framework stack:
+
+```mermaid
+flowchart TD
+    Guest[Guest VM]
+    Bento[BentoBox host runtime]
+    VZ[Virtualization.framework]
+    HVF[Hypervisor.framework]
+    Hardware[Apple virtualization hardware support]
+
+    Hardware --> HVF --> VZ --> Bento --> Guest
+```
 
 ## Virtualization Backend
 
@@ -59,6 +224,8 @@ Current BentoBox runtime backend selection is internal and host-driven:
 
 Users do not select a backend in `VmSpec`. `VmSpec` describes the VM, while BentoBox chooses the host implementation at compile time.
 
+In BentoBox, "backend" is a practical project term. It names the concrete implementation path selected by host platform; it is not meant to replace the more precise ecosystem terms VMM, hypervisor, VM, or KVM.
+
 ## Backend Driver
 
 A backend driver is the Rust adapter code that implements support for a virtualization backend inside BentoBox.
@@ -68,25 +235,46 @@ Examples:
 - `bento-vz`
 - `bento-krun`
 
-Use "driver" for BentoBox adapter code. Use "VMM" for the underlying virtualization implementation.
+Use "driver" for BentoBox adapter code. Use "VMM" for the lower-level userspace virtualization implementation/runtime when that layer exists as a distinct concept.
 
-## `bento-virt`
+## BentoBox Components
+
+The BentoBox runtime layers sit above the host virtualization stack:
+
+```mermaid
+flowchart TD
+    CLI[bentoctl]
+    LibVm[bento-libvm]
+    Vmmon[bento-vmmon]
+    Virt[bento-virt]
+    BackendDriver[bento-vz / bento-krun]
+    HostPlatform[Host virtualization platform]
+    Guest[Guest VM]
+    Agent[Guest agent]
+
+    CLI --> LibVm --> Vmmon --> Virt --> BackendDriver --> HostPlatform --> Guest
+    Agent -. runs inside .-> Guest
+```
+
+### `bento-virt`
 
 `bento-virt` is BentoBox's host virtualization facade.
 
 It exposes the common Rust API that `bento-vmmon` uses to create, start, stop, and communicate with a VM. The concrete implementation is selected at compile time by host platform.
 
-`bento-virt` is not a VMM or a hypervisor.
+The exported `VirtualMachine` type is BentoBox's per-instance VM handle. It is not the guest OS and it is not the underlying VMM implementation. It is the API handle used by BentoBox code to control one VM.
 
-## `bento-vmmon`
+`bento-virt` is not a hypervisor. It is also not the product-level VM manager.
+
+### `bento-vmmon`
 
 `bento-vmmon` is the VM monitor process.
 
 It supervises one running VM, exposes monitor and control APIs, tracks lifecycle state, handles guest readiness, and participates in cleanup and reconciliation.
 
-`bento-vmmon` uses `bento-virt` to start and control the host-selected virtualization implementation.
+`bento-vmmon` uses `bento-virt` to start and control the host-selected virtualization implementation. It is BentoBox's process-level supervisor around one VM, not the guest VM itself.
 
-## `bento-libvm`
+### `bento-libvm`
 
 `bento-libvm` is the higher-level VM orchestration library.
 
@@ -94,13 +282,13 @@ It owns product-level lifecycle semantics, persisted state, image handling, laun
 
 Its role is similar in spirit to how libpod sits above lower-level container runtime pieces.
 
-## Guest Agent
+### Guest Agent
 
 The guest agent is software running inside the guest VM.
 
 It is separate from the VMM, `bento-virt`, and `bento-vmmon`. It provides guest-side services such as readiness, shell support, or bootstrap integration.
 
-## Host
+### Host
 
 The host is the operating system running BentoBox.
 
@@ -109,6 +297,24 @@ Examples:
 - macOS host using Apple Virtualization.framework
 - Linux host using KVM-backed virtualization
 
-## Guest
+### Guest
 
 The guest is the operating system running inside the VM.
+
+## Most Important Distinction
+
+The most common conceptual mistake is collapsing KVM, VMM, and VM into one thing.
+
+They are different layers:
+
+- KVM is the Linux kernel virtualization interface.
+- The VMM is the userspace program controlling and emulating the VM.
+- The VM is the guest machine itself.
+
+Or, aggressively compressed:
+
+```text
+KVM is not the VM.
+KVM is not the VMM.
+The VMM controls the VM through KVM or another host virtualization layer.
+```

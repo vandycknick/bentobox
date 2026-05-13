@@ -44,9 +44,8 @@ fn is_expected_disconnect(err: &io::Error) -> bool {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
-    use std::os::fd::{FromRawFd, IntoRawFd};
     use std::os::unix::net::UnixStream as StdUnixStream;
     use std::time::Duration;
 
@@ -61,13 +60,16 @@ mod tests {
             UnixStream::pair().expect("unix stream pair should be created");
         let (vsock_stream, guest_stream) =
             StdUnixStream::pair().expect("guest stream pair should be created");
+        vsock_stream
+            .set_nonblocking(true)
+            .expect("vsock stream should be nonblocking");
         guest_stream
             .set_nonblocking(true)
             .expect("guest stream should be nonblocking");
 
-        let vsock_file = unsafe { std::fs::File::from_raw_fd(vsock_stream.into_raw_fd()) };
         let vsock_stream =
-            VsockStream::from_file(vsock_file).expect("vsock stream should wrap std unix stream");
+            UnixStream::from_std(vsock_stream).expect("tokio stream should wrap std unix stream");
+        let vsock_stream = VsockStream::from_unix_stream(vsock_stream);
         let tunnel = tokio::spawn(async move { proxy_streams(client_stream, vsock_stream).await });
 
         drop(peer_stream);

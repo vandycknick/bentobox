@@ -9,6 +9,8 @@ BentoBox is a microVM manager that boots a full Linux environment in seconds. It
 
 Backend selection is internal to BentoBox and depends on the host platform. `VmSpec` describes the VM; users do not choose the backend.
 
+See [`docs/terminology.md`](docs/terminology.md) for the vocabulary BentoBox uses around VMs, VMMs, hypervisors, KVM, microVMs, and backend drivers.
+
 ## Inspiration
 
 BentoBox draws inspiration from these projects, which helped shape its architecture and developer experience:

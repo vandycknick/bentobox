@@ -4,12 +4,11 @@
 
 The crate exposes:
 
-- a `Vmm` entry point for creating host VMs
-- a `VirtualMachine` handle for lifecycle management
+- a `VirtualMachine` handle for creating and managing host VMs
 - serial and vsock access types consumed by `bento-vmmon`
 - typed VM configuration structs shared by the monitor and backend drivers
 
-`bento-virt` does not expose user-selectable backend routing. BentoBox chooses the host implementation at compile time.
+`bento-virt` does not expose user-selectable backend routing. BentoBox chooses the host implementation at compile time. The exported `VirtualMachine` type is BentoBox's per-instance VM handle; it is not the guest OS and not the underlying VMM implementation.
 
 ## Scope
 
@@ -51,7 +50,7 @@ Do not put manager policy, image resolution, global machine inventory, or monito
 ## Example
 
 ```rust,no_run
-use bento_virt::{DiskImage, NetworkMode, VmConfig, Vmm};
+use bento_virt::{DiskImage, NetworkMode, VirtualMachine, VmConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -69,11 +68,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .build();
 
-    let vm = Vmm::new()?.create(config).await?;
+    let vm = VirtualMachine::new(config)?;
     vm.start().await?;
     vm.stop().await?;
     Ok(())
 }
 ```
 
-See `docs/terminology.md` for the vocabulary used around VMs, VMMs, backend drivers, and the BentoBox runtime layers.
+See [`docs/terminology.md`](../../docs/terminology.md) for the vocabulary used around VMs, VMMs, hypervisors, KVM, microVMs, backend drivers, and the BentoBox runtime layers.

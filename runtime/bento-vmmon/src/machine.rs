@@ -7,7 +7,7 @@ use bento_core::{
 use bento_utils::parse_mac;
 use bento_virt::{
     DiskImage, MachineIdentifier, NetworkMode, SharedDirectory, UserNetwork, UserNetworkTransport,
-    VmConfig, VmmError, VsockPort, VsockPortMode,
+    VirtError, VmConfig, VsockPort, VsockPortMode,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -15,7 +15,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum MachineSpecError {
     #[error(transparent)]
-    Machine(#[from] VmmError),
+    Machine(#[from] VirtError),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
