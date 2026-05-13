@@ -5,7 +5,6 @@ compile_error!("bento-vz only supports macOS hosts");
 
 mod error;
 mod vm;
-mod vz_ext;
 
 pub mod configuration;
 pub mod device;

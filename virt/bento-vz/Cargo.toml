@@ -5,12 +5,13 @@ edition = "2021"
 
 [dependencies]
 bento-utils = { path = "../../common/bento-utils" }
-block2 = "0.6.0"
+block2 = "0.6.2"
 crossbeam = "0.8.4"
-nix = { version = "0.31.1", features = ["fs", "socket"] }
+dispatch2 = "0.3.1"
+nix = { version = "0.31.3", features = ["fs", "socket"] }
 thiserror = "2.0.18"
-tokio = { version = "1.48.0", features = ["io-util", "net", "sync", "time"] }
-tracing = "0.1.41"
-objc2 = { version = "0.6.0", features = ["catch-all", "exception"] }
-objc2-foundation = { version = "0.3.0", features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSFileHandle", "NSObject", "NSProcessInfo", "NSString", "NSURL"] }
-objc2-virtualization = { version = "0.3.0", features = ["default", "VZFileHandleNetworkDeviceAttachment", "VZMACAddress"] }
+tokio = { version = "1.52.3", features = ["io-util", "net", "sync", "time"] }
+tracing = "0.1.44"
+objc2 = { version = "0.6.4", features = ["catch-all", "exception"] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSFileHandle", "NSObject", "NSProcessInfo", "NSString", "NSURL"] }
+objc2-virtualization = { version = "0.3.2", features = ["default", "VZFileHandleNetworkDeviceAttachment", "VZMACAddress"] }

@@ -4,6 +4,7 @@ use std::{
 };
 
 use block2::Block;
+use dispatch2::DispatchQueue;
 
 use crate::dispatch::ffi::{dispatch_function_t, dispatch_sync_f};
 
@@ -56,6 +57,12 @@ impl Queue {
 
     pub fn exec_block_sync(&self, block: &Block<dyn Fn() -> ()>) {
         unsafe { dispatch_sync(self.ptr, block) }
+    }
+
+    pub fn as_dispatch_queue(&self) -> &DispatchQueue {
+        // Our queue wrapper owns a valid libdispatch queue pointer, and
+        // `dispatch2::DispatchQueue` is the typed view newer objc2 APIs expect.
+        unsafe { &*(self.ptr.cast_const().cast()) }
     }
 
     #[allow(dead_code)]

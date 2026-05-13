@@ -27,7 +27,6 @@ use crate::device::{
 };
 use crate::dispatch::{Queue, QueueAttribute};
 use crate::error::VzError;
-use crate::vz_ext::VZVirtualMachineExt;
 use crate::{GenericPlatform, LinuxBootLoader};
 
 type ObjectiveCDelegate = Retained<ProtocolObject<dyn VZVirtualMachineDelegate>>;
@@ -387,7 +386,7 @@ impl VirtualMachineBuilder {
             let machine = VZVirtualMachine::initWithConfiguration_queue(
                 VZVirtualMachine::alloc(),
                 &machine_config,
-                queue.ptr,
+                queue.as_dispatch_queue(),
             );
             Ok(VirtualMachine::from_parts(queue, machine, machine_config))
         }

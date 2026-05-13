@@ -7,18 +7,18 @@ edition = "2021"
 bento-core = { path = "../../common/bento-core" }
 bento-protocol = { path = "../../wire/bento-protocol" }
 eyre = "0.6.12"
-futures = "0.3.31"
-hickory-proto = "0.24.4"
-nix = { version = "0.31.1", features = ["feature", "hostname", "net"] }
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.145"
+futures = "0.3.32"
+hickory-proto = "0.26.1"
+nix = { version = "0.31.3", features = ["feature", "hostname", "net"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 serde_yaml_ng = "0.10.0"
-tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "io-util", "net", "time", "sync"] }
-tokio-util = "0.7.16"
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "io-util", "net", "time", "sync"] }
+tokio-util = "0.7.18"
 tokio-vsock = "0.7.2"
-tonic = { version = "0.12.3", features = ["transport"] }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter"] }
-futures-util = "0.3.31"
-netlink-packet-route = "0.19.0"
-rtnetlink = "0.14.1"
+tonic = { version = "0.14.6", features = ["transport"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
+futures-util = "0.3.32"
+netlink-packet-route = "0.30.0"
+rtnetlink = "0.21.0"

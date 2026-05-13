@@ -7,24 +7,24 @@ default-run = "bentoctl"
 [dependencies]
 bento-core = { path = "../../common/bento-core" }
 bento-libvm = { path = "../../runtime/bento-libvm" }
-anyhow = "1.0.89"
+anyhow = "1.0.102"
 bento-protocol = { path = "../../wire/bento-protocol" }
-clap = { version = "4.5.31", features = ["derive"] }
-serde = { version = "1.0.217", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml_ng = "0.10.0"
-libc = "0.2.169"
-time = { version = "0.3.36", features = ["formatting"] }
-chrono = "0.4.43"
+libc = "0.2.186"
+time = { version = "0.3.47", features = ["formatting"] }
+chrono = "0.4.44"
 eyre = "0.6.12"
 hyper-util = { version = "0.1.20", features = ["tokio"] }
-nix = { version = "0.31.1", features = ["fs"] }
+nix = { version = "0.31.3", features = ["fs"] }
 tabwriter = "1.4.1"
-tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "io-std"] }
-tonic = { version = "0.12.3", features = ["transport"] }
-tower = "0.5.2"
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["fmt", "env-filter"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "io-std"] }
+tonic = { version = "0.14.6", features = ["transport"] }
+tower = "0.5.3"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
-tempfile = "3.24.0"
+tempfile = "3.27.0"

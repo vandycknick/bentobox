@@ -6,7 +6,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protoc = protoc_bin_vendored::protoc_bin_path()?;
     std::env::set_var("PROTOC", protoc);
 
-    tonic_build::configure().compile_protos(
+    tonic_prost_build::configure().compile_protos(
         &[
             "proto/common.proto",
             "proto/agent.proto",
