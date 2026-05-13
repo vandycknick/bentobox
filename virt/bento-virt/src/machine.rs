@@ -2,13 +2,11 @@ use std::sync::Arc;
 
 use crate::backend::{self, VmBackend};
 use crate::serial::SerialConsole;
-use crate::types::{resolve_backend, Backend, VmConfig, VmExit, VmmError};
+use crate::types::{VmConfig, VmExit, VmmError};
 use crate::{VsockListener, VsockStream};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Vmm {
-    backend: Backend,
-}
+pub struct Vmm;
 
 #[derive(Clone)]
 pub struct VirtualMachine {
@@ -26,16 +24,15 @@ impl std::fmt::Debug for VirtualMachine {
 }
 
 impl Vmm {
-    pub fn new(backend: Backend) -> Result<Self, VmmError> {
-        Ok(Self { backend })
+    pub fn new() -> Result<Self, VmmError> {
+        Ok(Self)
     }
 
     pub async fn create(&self, config: VmConfig) -> Result<VirtualMachine, VmmError> {
-        let backend = resolve_backend(self.backend)?;
-        backend::validate(backend, &config)?;
+        backend::validate(&config)?;
 
         let name = config.name().to_string();
-        let backend = backend::create_backend(backend, config)?;
+        let backend = backend::create_backend(config)?;
         let serial_console = Arc::new(SerialConsole::new(backend.clone()));
 
         Ok(VirtualMachine {
@@ -92,7 +89,7 @@ impl VirtualMachine {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use crate::machine::{VirtualMachine, Vmm};
-    use crate::types::{Backend, NetworkMode, VmConfig};
+    use crate::types::{NetworkMode, VmConfig};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -115,7 +112,7 @@ mod tests {
     }
 
     async fn create(config: VmConfig) -> VirtualMachine {
-        Vmm::new(Backend::Auto)
+        Vmm::new()
             .expect("create vmm")
             .create(config)
             .await
@@ -131,7 +128,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("bento-vmm-test-{name}"))
+        std::env::temp_dir().join(format!("bento-virt-test-{name}"))
     }
 
     async fn cleanup(name: &str, machine: &VirtualMachine) {

@@ -1,32 +1,42 @@
-#![cfg_attr(
-    not(target_os = "linux"),
-    allow(dead_code, unused_imports, unused_variables)
-)]
-
-#[cfg(not(target_os = "linux"))]
-compile_error!("bento-agent only supports Linux guests");
-
+#[cfg(target_os = "linux")]
 mod config;
+#[cfg(target_os = "linux")]
 mod dns;
+#[cfg(target_os = "linux")]
 mod forward;
+#[cfg(target_os = "linux")]
 mod host;
+#[cfg(target_os = "linux")]
 mod port;
+#[cfg(target_os = "linux")]
 mod rpc;
+#[cfg(target_os = "linux")]
 mod server;
 
+#[cfg(target_os = "linux")]
 use std::io;
 
+#[cfg(target_os = "linux")]
 use bento_core::agent::RESERVED_SHELL_PORT;
+#[cfg(target_os = "linux")]
 use tokio::io::copy_bidirectional;
+#[cfg(target_os = "linux")]
 use tokio::net::TcpStream;
 
+#[cfg(target_os = "linux")]
 use crate::config::load_agent_config;
+#[cfg(target_os = "linux")]
 use crate::dns::DnsServer;
+#[cfg(target_os = "linux")]
 use crate::forward::ForwardService;
+#[cfg(target_os = "linux")]
 use crate::port::from_kernel_cmdline;
+#[cfg(target_os = "linux")]
 use crate::rpc::{serve_agent_connection, AgentContext};
+#[cfg(target_os = "linux")]
 use crate::server::VsockServer;
 
+#[cfg(target_os = "linux")]
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> eyre::Result<()> {
     let is_pid1 = std::process::id() == 1;
@@ -132,4 +142,10 @@ async fn main() -> eyre::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn main() {
+    eprintln!("bento-agent only runs inside Linux guests");
+    std::process::exit(1);
 }

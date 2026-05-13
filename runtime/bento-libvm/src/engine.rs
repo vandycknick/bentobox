@@ -10,8 +10,8 @@ use crate::images::store::ImageStore;
 use crate::launch::prepare_instance_runtime;
 use bento_core::InstanceFile;
 use bento_core::{
-    Architecture, Backend, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec, MachineId, Mount,
-    Network, NetworkDriver, Platform, Resources, Settings, Storage, VmSpec,
+    Architecture, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec, MachineId, Mount, Network,
+    NetworkDriver, Platform, Resources, Settings, Storage, VmSpec,
 };
 use bento_protocol::agent_port_arg;
 use bento_protocol::v1::InspectResponse;
@@ -143,7 +143,6 @@ impl LibVm {
             platform: Platform {
                 guest_os: guest_os_from_image(&selected_image.metadata.os)?,
                 architecture: architecture_from_image(&selected_image.metadata.arch)?,
-                backend: Backend::Auto,
             },
             resources: Resources {
                 cpus: resolved_cpus,
@@ -798,8 +797,8 @@ mod tests {
     use super::{default_network_driver, LibVm, MachineStatus};
     use crate::{Layout, LibVmError, MachineRef};
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkDriver, Platform,
-        Resources, Settings, Storage, VmSpec,
+        Architecture, Boot, GuestOs, GuestSpec, Network, NetworkDriver, Platform, Resources,
+        Settings, Storage, VmSpec,
     };
 
     fn sample_vm_spec(name: &str) -> VmSpec {
@@ -809,7 +808,6 @@ mod tests {
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
-                backend: Backend::Auto,
             },
             resources: Resources {
                 cpus: 4,

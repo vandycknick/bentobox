@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bento_protocol::v1::LifecycleState;
-use bento_vmm::VmExit;
+use bento_virt::VmExit;
 use tokio::signal;
 
 use crate::context::{DaemonContext, RuntimeContext};
@@ -109,7 +109,7 @@ struct VmStopInfo {
 }
 
 async fn wait_for_machine_stop(
-    machine: &bento_vmm::VirtualMachine,
+    machine: &bento_virt::VirtualMachine,
 ) -> Result<VmStopInfo, eyre::Report> {
     let exit = machine.wait().await?;
     let message = match exit {

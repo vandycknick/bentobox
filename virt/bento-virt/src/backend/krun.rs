@@ -15,8 +15,8 @@ use tokio::time::{sleep, timeout};
 
 use crate::stream::{MachineSerialStream, VsockListener, VsockStream};
 use crate::types::{
-    Backend, DiskImage, NetworkMode, SharedDirectory, UserNetworkTransport, VmConfig, VmExit,
-    VmmError, VsockPortMode,
+    DiskImage, NetworkMode, SharedDirectory, UserNetworkTransport, VmConfig, VmExit, VmmError,
+    VsockPortMode,
 };
 
 const KRUN_BINARY_ENV: &str = "KRUN_BIN";
@@ -563,7 +563,7 @@ fn locate_krun_binary() -> Result<PathBuf, VmmError> {
             return Ok(path);
         }
         return Err(VmmError::UnsupportedBackend {
-            kind: Backend::Krun,
+            kind: "krun",
             reason: format!(
                 "{KRUN_BINARY_ENV} is set but does not point to a file: {}",
                 path.display()
@@ -581,7 +581,7 @@ fn locate_krun_binary() -> Result<PathBuf, VmmError> {
     }
 
     let path = env::var_os("PATH").ok_or_else(|| VmmError::UnsupportedBackend {
-        kind: Backend::Krun,
+        kind: "krun",
         reason: "PATH is not set, so the krun binary cannot be located".to_string(),
     })?;
     for entry in env::split_paths(&path) {
@@ -591,7 +591,7 @@ fn locate_krun_binary() -> Result<PathBuf, VmmError> {
         }
     }
     Err(VmmError::UnsupportedBackend {
-        kind: Backend::Krun,
+        kind: "krun",
         reason: "krun binary was not found in PATH".to_string(),
     })
 }

@@ -235,8 +235,8 @@ mod tests {
         guest_config_status, now_unix, process_started_at, process_status_label, relative_time,
     };
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkDriver, Platform,
-        Resources, Settings, Storage, VmSpec,
+        Architecture, Boot, GuestOs, GuestSpec, Network, NetworkDriver, Platform, Resources,
+        Settings, Storage, VmSpec,
     };
     use bento_libvm::MachineStatus;
     use std::fs;
@@ -249,7 +249,6 @@ mod tests {
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
-                backend: Backend::Auto,
             },
             resources: Resources {
                 cpus: 2,

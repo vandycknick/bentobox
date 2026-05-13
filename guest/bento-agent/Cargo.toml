@@ -3,7 +3,7 @@ name = "bento-agent"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 bento-core = { path = "../../common/bento-core" }
 bento-protocol = { path = "../../wire/bento-protocol" }
 eyre = "0.6.12"

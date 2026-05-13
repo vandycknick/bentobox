@@ -4,8 +4,17 @@ BENTO_CONFIG := $(HOME)/.config/bento/config.yaml
 ARCH ?= arm64
 PROFILE ?= debug
 RUST_HOST_TRIPLE := $(shell rustc -vV | awk '/host:/ { print $$2 }')
+HOST_OS := $(shell uname -s)
 KRUN_DEPS_DIR ?= $(CURDIR)/target/libs/krun/$(RUST_HOST_TRIPLE)
 export KRUN_DEPS_DIR
+
+ifeq ($(HOST_OS),Darwin)
+HOST_WORKSPACE_EXCLUDES := --exclude bento-agent
+else ifeq ($(HOST_OS),Linux)
+HOST_WORKSPACE_EXCLUDES := --exclude bento-vz
+else
+HOST_WORKSPACE_EXCLUDES := --exclude bento-agent --exclude bento-vz
+endif
 
 ifeq ($(PROFILE),release)
 CARGO_PROFILE_FLAGS := --release
@@ -29,6 +38,14 @@ build-guest-agent:
 .PHONY: build
 build: vmmon krun
 	cargo build $(CARGO_PROFILE_FLAGS) -p bentoctl
+
+.PHONY: clippy
+clippy:
+	cargo clippy --workspace --all-targets --all-features $(HOST_WORKSPACE_EXCLUDES)
+
+.PHONY: test
+test:
+	cargo test --workspace --all-targets --all-features $(HOST_WORKSPACE_EXCLUDES)
 
 .PHONY: build-libkrun
 build-libkrun:

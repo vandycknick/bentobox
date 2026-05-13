@@ -1,10 +1,9 @@
 [package]
-name = "bento-vmm"
+name = "bento-virt"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bento-fc = { path = "../bento-fc" }
 bento-protocol = { path = "../../wire/bento-protocol" }
 crossbeam = "0.8.4"
 nix = { version = "0.31.1", features = ["fs", "process", "signal", "socket", "term"] }
@@ -14,10 +13,6 @@ tracing = "0.1.41"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 bento-vz = { path = "../bento-vz" }
-block2 = "0.6.0"
-objc2 = { version = "0.6.0", features = ["catch-all", "exception"] }
-objc2-foundation = { version = "0.3.0", features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSFileHandle", "NSObject", "NSProcessInfo", "NSString", "NSURL"] }
-objc2-virtualization = { version = "0.3.0", features = ["default"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bento-krun = { path = "../bento-krun" }

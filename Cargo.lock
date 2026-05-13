@@ -405,19 +405,14 @@ name = "bento-utils"
 version = "0.1.0"
 
 [[package]]
-name = "bento-vmm"
+name = "bento-virt"
 version = "0.1.0"
 dependencies = [
- "bento-fc",
  "bento-krun",
  "bento-protocol",
  "bento-vz",
- "block2",
  "crossbeam",
  "nix 0.31.1",
- "objc2",
- "objc2-foundation",
- "objc2-virtualization",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -430,7 +425,7 @@ dependencies = [
  "bento-core",
  "bento-protocol",
  "bento-utils",
- "bento-vmm",
+ "bento-virt",
  "clap",
  "eyre",
  "futures",

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bento_core::{InstanceFile, VmSpec};
-use bento_vmm::{SerialConsole, VirtualMachine};
+use bento_virt::{SerialConsole, VirtualMachine};
 use tokio_util::sync::CancellationToken;
 
 use crate::state::InstanceStore;

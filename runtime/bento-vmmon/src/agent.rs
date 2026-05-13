@@ -5,7 +5,7 @@ use std::time::Duration;
 use bento_core::VmSpec;
 use bento_protocol::v1::agent_service_client::AgentServiceClient;
 use bento_protocol::v1::{AgentPingRequest, HealthRequest, HealthResponse};
-use bento_vmm::VirtualMachine;
+use bento_virt::VirtualMachine;
 use eyre::Context;
 use futures::stream::{self, Stream};
 use hyper_util::rt::TokioIo;
@@ -125,8 +125,8 @@ fn agent_port_from_spec(spec: &VmSpec) -> u32 {
 mod tests {
     use super::agent_port_from_spec;
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, GuestSpec, Network, NetworkDriver, Platform,
-        Resources, Settings, Storage, VmSpec,
+        Architecture, Boot, GuestOs, GuestSpec, Network, NetworkDriver, Platform, Resources,
+        Settings, Storage, VmSpec,
     };
 
     fn sample_spec(guest: Option<GuestSpec>) -> VmSpec {
@@ -136,7 +136,6 @@ mod tests {
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
-                backend: Backend::Auto,
             },
             resources: Resources {
                 cpus: 4,

@@ -11,7 +11,7 @@
 | Starting a task               | Read this guide end-to-end and align with any fresh user instructions.                                   |
 | Tool or command hangs         | If a command runs longer than 5 minutes, stop it, capture logs, and check with the user.                 |
 | Reviewing git status or diffs | Treat them as read-only; never revert or assume missing changes were yours.                              |
-| Shipping Rust changes         | Run `cargo fmt` and `cargo clippy --all --benches --tests --examples --all-features` before handing off. |
+| Shipping Rust changes         | Run `cargo fmt` and `make clippy` before handing off.                                           |
 | Adding a dependency           | Research well-maintained options and confirm fit with the user before adding.                            |
 
 ## Mindset & Process
@@ -38,7 +38,7 @@
 
 - **Task runner preference**. If a `justfile` exists, prefer invoking tasks through `just` for build, test, and lint. Do not add a `justfile` unless asked. If no `justfile` exists and there is a `Makefile` you can use that.
 - Default lint/test commands:
-    - Rust: use `just` targets if present; otherwise run `cargo fmt`, `cargo clippy --all --benches --tests --examples --all-features`, then the targeted `cargo test` commands.
+    - Rust: use `just` targets if present; otherwise run `cargo fmt`, `make clippy`, then the targeted `cargo test` commands. Use `make test` when a full host-aware workspace test run is needed.
     - TypeScript: use `just` targets; if none exist, confirm with the user before running `npm` or `pnpm` scripts.
     - Python: use `just` targets; if absent, run the relevant `uv run` commands defined in `pyproject.toml`.
 - **AST-first where it helps**. Prefer `ast-grep` for tree-safe edits when it is better than regex.
@@ -70,7 +70,7 @@
 #### Rust Workflow Checklist
 
 1. Run `cargo fmt`.
-1. Run `cargo clippy --all --benches --tests --examples --all-features` and address warnings.
+1. Run `make clippy` and address warnings.
 1. Execute the relevant `cargo test` or `just` targets to cover unit and end-to-end paths.
 
 ### TypeScript
@@ -83,17 +83,6 @@
 
 - **Python repos standard**. We use `uv` and `pyproject.toml` in all Python repos. Prefer `uv sync` for env and dependency resolution. Do not introduce `pip` venvs, Poetry, or `requirements.txt` unless asked. If you add a Nix shell, include `uv`.
 - Use strong types, prefer type hints everywhere, keep models explicit instead of loose dicts or strings.
-
-### KCL
-
-- Assume you have access to the Zoo MCP server, if you do not tell the user.
-- Use the multi-view snapshot tool to verify the code looks right with what the user asked for.
-- Do not use the text-to-cad tool, write code yourself.
-- Do not use external tools for doing math and injecting raw values into the KCL code, write the math into the model you are coding.
-- Write parametric cad models, that are maintainable, meaning if a user changes something later, we want to avoid the model breaking when a parameter changes.
-- Always verify your model compiles and looks right using the multi-view snapshot tool.
-- Don't trust other KCL on the host system to learn the language, look up KCL docs using web search if you need to. Other KCL files on the host could have stale syntax.
-- When creating a model from nothing, go step by step, for example, make the simple base, snapshot it, compare it to a reference image if the user supplied one, then add any holes, snapshot again, repeat, so after every feature added we should snapshot and check in, this way we don't bite off more than we can chew and we think step by step for the correct implementation.
 
 ## Final Handoff
 

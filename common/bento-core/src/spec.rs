@@ -145,10 +145,10 @@ const fn default_backoff_max() -> u64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Platform {
     pub guest_os: GuestOs,
     pub architecture: Architecture,
-    pub backend: Backend,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,59 +226,6 @@ pub enum Architecture {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Backend {
-    Auto,
-    Vz,
-    Firecracker,
-    Krun,
-}
-
-impl Backend {
-    pub fn needs_machine_identifier(self) -> bool {
-        matches!(self, Self::Vz)
-    }
-
-    pub fn uses_user_network_runtime(self) -> bool {
-        platform_backend_uses_user_network_runtime(self)
-    }
-
-    pub fn uses_configured_guest_mac(self) -> bool {
-        platform_backend_uses_configured_guest_mac(self)
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn platform_backend_uses_user_network_runtime(backend: Backend) -> bool {
-    matches!(backend, Backend::Auto | Backend::Krun)
-}
-
-#[cfg(target_os = "macos")]
-fn platform_backend_uses_user_network_runtime(backend: Backend) -> bool {
-    matches!(backend, Backend::Auto | Backend::Vz)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn platform_backend_uses_user_network_runtime(_backend: Backend) -> bool {
-    false
-}
-
-#[cfg(target_os = "linux")]
-fn platform_backend_uses_configured_guest_mac(backend: Backend) -> bool {
-    matches!(backend, Backend::Auto | Backend::Krun)
-}
-
-#[cfg(target_os = "macos")]
-fn platform_backend_uses_configured_guest_mac(backend: Backend) -> bool {
-    matches!(backend, Backend::Auto | Backend::Vz)
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn platform_backend_uses_configured_guest_mac(_backend: Backend) -> bool {
-    false
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum NetworkDriver {
     None,
     Gvisor,
@@ -288,7 +235,7 @@ pub enum NetworkDriver {
 #[cfg(test)]
 mod tests {
     use super::{
-        Architecture, Backend, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec,
+        Architecture, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec,
         LifecycleSpec, Mount, Network, NetworkDriver, Platform, PluginSpec, Resources,
         RestartPolicy, Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
     };
@@ -302,7 +249,6 @@ mod tests {
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
-                backend: Backend::Auto,
             },
             resources: Resources {
                 cpus: 4,
@@ -382,7 +328,7 @@ mod tests {
 
         assert!(yaml.contains("guest_os: linux"));
         assert!(yaml.contains("architecture: aarch64"));
-        assert!(yaml.contains("backend: auto"));
+        assert!(!yaml.contains("backend:"));
         assert!(yaml.contains("kind: root"));
         assert!(yaml.contains("kind: seed"));
         assert!(yaml.contains("vsock_endpoints:"));
@@ -401,7 +347,6 @@ name: dev
 platform:
   guest_os: linux
   architecture: aarch64
-  backend: auto
 resources:
   cpus: 4
   memory_mib: 4096
@@ -436,7 +381,6 @@ name: dev
 platform:
   guest_os: linux
   architecture: aarch64
-  backend: auto
 resources:
   cpus: 4
   memory_mib: 4096
@@ -462,7 +406,7 @@ settings:
     }
 
     #[test]
-    fn vm_spec_rejects_cloud_hypervisor_backend() {
+    fn vm_spec_rejects_backend_field() {
         let yaml = r#"
 version: 1
 name: dev
@@ -491,8 +435,8 @@ guest:
 "#;
 
         let err = serde_yaml_ng::from_str::<VmSpec>(yaml)
-            .expect_err("cloud-hypervisor backend should be rejected");
-        assert!(err.to_string().contains("cloud_hypervisor"));
+            .expect_err("backend selection should be rejected");
+        assert!(err.to_string().contains("backend"));
     }
 
     #[test]
@@ -503,7 +447,6 @@ name: dev
 platform:
   guest_os: linux
   architecture: aarch64
-  backend: auto
 resources:
   cpus: 4
   memory_mib: 4096

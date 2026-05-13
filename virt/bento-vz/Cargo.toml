@@ -14,5 +14,3 @@ tracing = "0.1.41"
 objc2 = { version = "0.6.0", features = ["catch-all", "exception"] }
 objc2-foundation = { version = "0.3.0", features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSFileHandle", "NSObject", "NSProcessInfo", "NSString", "NSURL"] }
 objc2-virtualization = { version = "0.3.0", features = ["default", "VZFileHandleNetworkDeviceAttachment", "VZMACAddress"] }
-
-[target.'cfg(not(target_os = "macos"))'.dependencies]

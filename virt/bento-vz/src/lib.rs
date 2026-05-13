@@ -1,6 +1,7 @@
-#![cfg(target_os = "macos")]
-
 //! Safe Rust abstractions over Apple's Virtualization.framework for BentoBox.
+
+#[cfg(not(target_os = "macos"))]
+compile_error!("bento-vz only supports macOS hosts");
 
 mod error;
 mod vm;

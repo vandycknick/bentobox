@@ -5,7 +5,9 @@ BentoBox is a microVM manager that boots a full Linux environment in seconds. It
 ## Runtime Backends
 
 - macOS: Apple `Virtualization.framework`
-- Linux: Firecracker backend (**work in progress**)
+- Linux: libkrun through the `krun` helper
+
+Backend selection is internal to BentoBox and depends on the host platform. `VmSpec` describes the VM; users do not choose the backend.
 
 ## Inspiration
 

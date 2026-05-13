@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 bento-core = { path = "../../common/bento-core" }
-bento-vmm = { path = "../../virt/bento-vmm" }
+bento-virt = { path = "../../virt/bento-virt" }
 bento-protocol = { path = "../../wire/bento-protocol" }
 bento-utils = { path = "../../common/bento-utils" }
 clap = { version = "4.5.31", features = ["derive"] }

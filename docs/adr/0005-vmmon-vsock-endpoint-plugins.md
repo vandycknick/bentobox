@@ -10,13 +10,13 @@ Implemented
 
 `vmmon` already owns per-VM runtime supervision. It reads `config.yaml`, starts the VM, exposes the monitor control surface, and tracks VM and guest readiness.
 
-Today, host to guest stream integrations are implemented as built-ins. `vmmon` already connects to guest vsock ports for things like the guest agent and shell access. That works for a small fixed set of features, but it does not scale well for arbitrary host to guest services. Every new service would require more built-in `vmmon` logic, more coupling to backend details, and more monitor-specific code for behavior that does not belong in the core VM supervisor.
+Today, host to guest stream integrations are implemented as built-ins. `vmmon` already connects to guest vsock ports for things like the guest agent and shell access. That works for a small fixed set of features, but it does not scale well for arbitrary host to guest services. Every new service would require more built-in `vmmon` logic, more coupling to host virtualization details, and more monitor-specific code for behavior that does not belong in the core VM supervisor.
 
 Bentobox needs a generic way for `vmmon` to launch long-running helpers that can consume host to guest byte streams without `vmmon` relaying data in userspace.
 
 This ADR defines that mechanism as endpoint plugins.
 
-The first implementation target is macOS Virtualization.framework. The plugin contract must remain backend-agnostic so the same plugin API can later be used by other backends.
+The first implementation target is macOS Virtualization.framework. The plugin contract must remain driver-agnostic so the same plugin API can later be used by other host virtualization drivers.
 
 ## Decision
 
@@ -68,7 +68,7 @@ The plugin interface is intentionally small:
 - `stderr`: freeform logs,
 - `fd 3`: the endpoint control socket.
 
-Plugins must not need to know which VM backend is in use.
+Plugins must not need to know which host virtualization driver is in use.
 
 ### Data plane
 
@@ -99,13 +99,13 @@ This keeps `vmmon` out of the data path while allowing one long-running plugin p
 sequenceDiagram
   participant libvm as libvm (launcher)
   participant vmmon as vmmon
-  participant vmm as bento-vmm / backend
+  participant virt as bento-virt
   participant plugin as plugin
 
   libvm->>vmmon: spawn vmmon (startup-fd pipe)
-  vmmon->>vmm: load config.yaml (VmSpec) and create VM
-  vmm-->>vmmon: VM handle
-  vmmon->>vmm: start VM
+  vmmon->>virt: load config.yaml (VmSpec) and create VM
+  virt-->>vmmon: VM handle
+  vmmon->>virt: start VM
   vmmon->>vmmon: start control socket + agent monitor
   vmmon->>vmmon: start endpoint supervisor
 
@@ -115,18 +115,18 @@ sequenceDiagram
     plugin-->>vmmon: {"event":"ready"} on stdout
     loop for each Plugin::connect()
       plugin->>vmmon: control message connect_open
-      vmmon->>vmm: connect_vsock(port)
-      vmm-->>vmmon: connected stream
+      vmmon->>virt: connect_vsock(port)
+      virt-->>vmmon: connected stream
       vmmon->>plugin: sendmsg(SCM_RIGHTS, conn_fd)
     end
   else endpoint.mode == "listen"
-    vmmon->>vmm: listen_vsock(port)
-    vmm-->>vmmon: listener
+    vmmon->>virt: listen_vsock(port)
+    virt-->>vmmon: listener
     vmmon->>plugin: spawn (fd3 = unix control socket)
     vmmon->>plugin: stdin startup JSON
     plugin-->>vmmon: {"event":"ready"} on stdout
     loop for each inbound guest connection
-      vmm-->>vmmon: accept() => connected stream
+      virt-->>vmmon: accept() => connected stream
       vmmon->>plugin: sendmsg(SCM_RIGHTS, conn_fd)
     end
   end
@@ -178,16 +178,16 @@ For this ADR, `VsockEndpointKind` is defined in terms of endpoint runtime type:
 
 ### Scope of first implementation
 
-The first implementation is macOS-first and relies on the existing Virtualization.framework vsock support already surfaced through `bento-vmm`.
+The first implementation is macOS-first and relies on the existing Virtualization.framework vsock support already surfaced through `bento-virt`.
 
-This ADR does not require the first implementation to add missing Linux `listen_vsock` support for Firecracker or Cloud Hypervisor. Those can adopt the same plugin contract later.
+This ADR does not require every host virtualization driver to expose `listen_vsock` immediately. Drivers can adopt the same plugin contract as support lands.
 
 ## Consequences
 
 ### Positive
 
 - `vmmon` stays generic and does not need service-specific built-ins for every new host to guest integration.
-- Plugins can be written against one small API with no backend-specific logic.
+- Plugins can be written against one small API with no driver-specific logic.
 - `vmmon` avoids becoming a per-byte relay in the hot data path.
 - One plugin process can serve multiple guest streams in both `connect` and `listen` mode.
 - Endpoint health becomes visible in monitor status without overloading guest-service readiness.
@@ -201,7 +201,7 @@ This ADR does not require the first implementation to add missing Linux `listen_
 
 ### Constraints
 
-- The plugin API must stay backend-agnostic.
+- The plugin API must stay driver-agnostic.
 - Endpoint runtime health must stay separate from instance readiness.
 - The first implementation must work on macOS without depending on unfinished Linux listener plumbing.
 
@@ -457,7 +457,7 @@ fn into_async_stream(fd: OwnedFd) -> std::io::Result<AsyncFd<File>> {
 }
 ```
 
-That contract is compatible with the macOS-first implementation and with future backends that also hand plugins generic stream fds.
+That contract is compatible with the macOS-first implementation and with future drivers that also hand plugins generic stream fds.
 
 ## Appendix C: Runtime Reporting
 

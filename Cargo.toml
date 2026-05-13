@@ -10,7 +10,7 @@ members = [
     "virt/bento-fc",
     "virt/bento-krun",
     "virt/bento-krun-sys",
-    "virt/bento-vmm",
+    "virt/bento-virt",
     "virt/bento-vz",
     "wire/bento-protocol",
 ]

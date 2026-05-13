@@ -1,13 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use bento_core::{
-    agent::RESERVED_SHELL_PORT, resolve_mount_location, Backend as SpecBackend, DiskKind,
-    InstanceFile, NetworkDriver, VmSpec, VsockEndpointMode,
+    agent::RESERVED_SHELL_PORT, resolve_mount_location, DiskKind, InstanceFile, NetworkDriver,
+    VmSpec, VsockEndpointMode,
 };
 use bento_utils::parse_mac;
-use bento_vmm::{
-    Backend, DiskImage, MachineIdentifier, NetworkMode, SharedDirectory, UserNetwork,
-    UserNetworkTransport, VmConfig, VmmError, VsockPort, VsockPortMode,
+use bento_virt::{
+    DiskImage, MachineIdentifier, NetworkMode, SharedDirectory, UserNetwork, UserNetworkTransport,
+    VmConfig, VmmError, VsockPort, VsockPortMode,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -44,11 +44,7 @@ pub(crate) fn vm_spec_machine_config(
     inputs: VmSpecInputs<'_>,
 ) -> Result<InstanceVmConfig, MachineSpecError> {
     let boot_assets = vm_spec_boot_assets(&inputs)?;
-    let machine_identifier = if inputs.spec.platform.backend.needs_machine_identifier() {
-        Some(load_machine_identifier_from_dir(inputs.data_dir)?)
-    } else {
-        None
-    };
+    let machine_identifier = load_host_machine_identifier(inputs.data_dir)?;
 
     let mut builder = VmConfig::builder(inputs.name)
         .vm_id(inputs.id)
@@ -151,6 +147,7 @@ pub(crate) fn machine_identifier_path_from_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(InstanceFile::AppleMachineIdentifier.as_str())
 }
 
+#[cfg(target_os = "macos")]
 fn load_machine_identifier_from_dir(
     data_dir: &Path,
 ) -> Result<MachineIdentifier, MachineSpecError> {
@@ -223,15 +220,6 @@ fn resolve_spec_path(data_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
-pub(crate) fn machine_backend_from_vm_spec(spec: &VmSpec) -> Backend {
-    match spec.platform.backend {
-        SpecBackend::Auto => Backend::Auto,
-        SpecBackend::Vz => Backend::Vz,
-        SpecBackend::Firecracker => Backend::Firecracker,
-        SpecBackend::Krun => Backend::Krun,
-    }
-}
-
 fn map_vm_spec_network_mode(driver: NetworkDriver) -> NetworkMode {
     match driver {
         NetworkDriver::None => NetworkMode::None,
@@ -256,9 +244,7 @@ fn user_network_from_runtime(
     data_dir: &Path,
     spec: &VmSpec,
 ) -> Result<Option<UserNetwork>, MachineSpecError> {
-    if !matches!(spec.network.driver, NetworkDriver::Gvisor)
-        || !spec.platform.backend.uses_user_network_runtime()
-    {
+    if !matches!(spec.network.driver, NetworkDriver::Gvisor) || !host_uses_user_network_runtime() {
         return Ok(None);
     }
 
@@ -298,14 +284,38 @@ fn user_network_from_runtime(
     }
 }
 
+#[cfg(target_os = "macos")]
+fn load_host_machine_identifier(
+    data_dir: &Path,
+) -> Result<Option<MachineIdentifier>, MachineSpecError> {
+    load_machine_identifier_from_dir(data_dir).map(Some)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_host_machine_identifier(
+    _data_dir: &Path,
+) -> Result<Option<MachineIdentifier>, MachineSpecError> {
+    Ok(None)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn host_uses_user_network_runtime() -> bool {
+    true
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn host_uses_user_network_runtime() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::{map_vm_spec_network_mode, vm_spec_machine_config, VmSpecInputs};
     use bento_core::{
-        agent::RESERVED_SHELL_PORT, Architecture, Backend as SpecBackend, Boot, GuestOs, GuestSpec,
-        Network, NetworkDriver, Platform, Resources, Settings, Storage, VmSpec,
+        agent::RESERVED_SHELL_PORT, Architecture, Boot, GuestOs, GuestSpec, Network, NetworkDriver,
+        Platform, Resources, Settings, Storage, VmSpec,
     };
-    use bento_vmm::{UserNetworkTransport, VsockPortMode};
+    use bento_virt::{UserNetworkTransport, VsockPortMode};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -322,11 +332,11 @@ mod tests {
     fn gvisor_network_maps_to_userspace_mode() {
         assert_eq!(
             map_vm_spec_network_mode(NetworkDriver::Gvisor),
-            bento_vmm::NetworkMode::User
+            bento_virt::NetworkMode::User
         );
         assert_eq!(
             map_vm_spec_network_mode(NetworkDriver::Gvisor),
-            bento_vmm::NetworkMode::User
+            bento_virt::NetworkMode::User
         );
     }
 
@@ -334,7 +344,7 @@ mod tests {
     fn vznat_network_maps_to_vz_nat_mode() {
         assert_eq!(
             map_vm_spec_network_mode(NetworkDriver::VzNat),
-            bento_vmm::NetworkMode::VzNat
+            bento_virt::NetworkMode::VzNat
         );
     }
 
@@ -353,7 +363,6 @@ mod tests {
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
-                backend: SpecBackend::Auto,
             },
             resources: Resources {
                 cpus: 2,
@@ -447,7 +456,6 @@ mod tests {
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
-                backend: SpecBackend::Auto,
             },
             resources: Resources {
                 cpus: 2,

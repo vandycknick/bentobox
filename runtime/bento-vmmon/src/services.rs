@@ -8,7 +8,7 @@ use bento_protocol::v1::vm_monitor_service_server::{VmMonitorService, VmMonitorS
 use bento_protocol::v1::{
     InspectRequest, InspectResponse, PingRequest, PingResponse, StatusUpdate, WatchStatusRequest,
 };
-use bento_vmm::{spawn_serial_tunnel, SerialAccess};
+use bento_virt::{spawn_serial_tunnel, SerialAccess};
 use eyre::Context;
 use futures::stream::{self, Stream, StreamExt};
 use tokio::net::{UnixListener, UnixStream};

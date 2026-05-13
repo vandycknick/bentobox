@@ -3,14 +3,6 @@ use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Backend {
-    Auto,
-    Vz,
-    Firecracker,
-    Krun,
-}
-
 #[derive(Debug, Default)]
 struct MachineIdentifierState {
     bytes: Vec<u8>,
@@ -290,12 +282,12 @@ pub enum VmmError {
     #[error("machine {name} is already running")]
     AlreadyRunning { name: String },
 
-    #[error("machine backend {kind:?} is unsupported on this host: {reason}")]
-    UnsupportedBackend { kind: Backend, reason: String },
+    #[error("machine backend {kind} is unsupported on this host: {reason}")]
+    UnsupportedBackend { kind: &'static str, reason: String },
 
-    #[error("machine backend {kind:?} does not implement {operation} yet")]
+    #[error("machine backend {kind} does not implement {operation} yet")]
     Unimplemented {
-        kind: Backend,
+        kind: &'static str,
         operation: &'static str,
     },
 
@@ -310,49 +302,4 @@ pub enum VmmError {
 
     #[error("machine registry lock was poisoned")]
     RegistryPoisoned,
-}
-
-pub(crate) fn resolve_backend(backend: Backend) -> Result<Backend, VmmError> {
-    match backend {
-        Backend::Auto => auto_backend(),
-        Backend::Vz => Ok(Backend::Vz),
-        Backend::Firecracker => Ok(Backend::Firecracker),
-        Backend::Krun => Ok(Backend::Krun),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn auto_backend() -> Result<Backend, VmmError> {
-    Ok(Backend::Vz)
-}
-
-#[cfg(target_os = "linux")]
-fn auto_backend() -> Result<Backend, VmmError> {
-    Ok(Backend::Krun)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn auto_backend() -> Result<Backend, VmmError> {
-    Err(VmmError::UnsupportedBackend {
-        kind: Backend::Vz,
-        reason: "no machine backend is available for this host platform".to_string(),
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::types::{resolve_backend, Backend};
-
-    #[test]
-    fn resolve_backend_preserves_explicit_krun() {
-        let backend = resolve_backend(Backend::Krun).expect("backend should resolve");
-        assert_eq!(backend, Backend::Krun);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn auto_backend_defaults_to_krun_on_linux() {
-        let backend = resolve_backend(Backend::Auto).expect("backend should resolve");
-        assert_eq!(backend, Backend::Krun);
-    }
 }

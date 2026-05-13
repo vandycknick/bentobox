@@ -28,7 +28,9 @@ Bentobox adopts a daemonless, config-driven architecture with these roles:
 - `bento-core` owns the canonical shared domain model, including `VmSpec`, machine identity types, and guest service configuration types.
 - `bento-libvm` owns manager-side lifecycle, machine inventory, on-disk layout, image policy, bootstrap materialization, Negotiate client behavior, and `vmmon` process spawning.
 - `bento-vmmon` is the canonical per-VM monitor. It is a small-footprint runtime supervisor that owns one running VM.
-- `bento-vmm` remains the backend abstraction for backend-specific VM execution.
+- `bento-virt` is the host virtualization facade used by `bento-vmmon`.
+
+Canonical vocabulary for these layers lives in [`../terminology.md`](../terminology.md).
 
 This architecture is intentionally daemonless by default. A future daemon or tunnel mode may be added later, but it must preserve the same `bento-libvm` to `vmmon` boundary and the same per-VM monitor model.
 
@@ -90,7 +92,7 @@ It does not own:
 - image policy,
 - process management,
 - RPC servers or RPC clients,
-- backend-specific VM execution logic.
+- host virtualization execution logic.
 
 ### `bento-libvm`
 
@@ -114,7 +116,7 @@ It owns:
 It does not own:
 
 - long-running per-VM supervision,
-- backend-specific VM execution,
+- host virtualization execution,
 - guest-agent implementation.
 
 The manager API is currently a library boundary implemented by `bento-libvm`. A future remote manager may expose an equivalent API over the network, but that wire service does not exist yet and is not required for the daemonless architecture.
@@ -146,15 +148,15 @@ It does not own:
 
 `vmmon` should remain small and focused. It is a runtime monitor, not a general manager.
 
-### `bento-vmm`
+### `bento-virt`
 
-`bento-vmm` remains the backend abstraction.
+`bento-virt` is the host virtualization facade.
 
 It owns:
 
-- backend-specific VM execution,
-- backend validation,
-- backend lifecycle primitives,
+- host-specific VM execution,
+- host VM configuration validation,
+- VM lifecycle primitives,
 - serial and vsock hooks consumed by `vmmon`.
 
 It does not own:
@@ -248,7 +250,6 @@ pub struct VmSpec {
 pub struct Platform {
     pub guest_os: GuestOs,
     pub architecture: Architecture,
-    pub backend: Backend,
 }
 
 pub struct Resources {
@@ -306,13 +307,6 @@ pub enum GuestOs {
 pub enum Architecture {
     Aarch64,
     X86_64,
-}
-
-pub enum Backend {
-    Auto,
-    Vz,
-    Firecracker,
-    Krun,
 }
 
 pub enum NetworkMode {
@@ -401,7 +395,7 @@ Shutdown behavior is:
 
 - first signal requests graceful shutdown,
 - `vmmon` transitions runtime state toward stopping,
-- `vmmon` asks the backend to stop the VM,
+- `vmmon` asks `bento-virt` to stop the VM,
 - a second signal forces immediate exit,
 - `vmmon` exits after supervision shuts down.
 

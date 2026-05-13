@@ -47,7 +47,7 @@ pub(crate) async fn prepare_network_runtime(
     reconcile_network_runtime(layout, state, metadata, false)?;
 
     match spec.network.driver {
-        NetworkDriver::Gvisor if spec.platform.backend.uses_user_network_runtime() => {
+        NetworkDriver::Gvisor if host_uses_user_network_runtime() => {
             prepare_gvisor_network_runtime(layout, state, metadata).await
         }
         NetworkDriver::None | NetworkDriver::VzNat => {
@@ -55,6 +55,16 @@ pub(crate) async fn prepare_network_runtime(
         }
         NetworkDriver::Gvisor => Ok(()),
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn host_uses_user_network_runtime() -> bool {
+    true
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn host_uses_user_network_runtime() -> bool {
+    false
 }
 
 pub(crate) fn reconcile_network_runtime(
@@ -356,25 +366,13 @@ fn now_unix() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{configure_gvproxy_command, write_runtime_file};
-    use bento_core::Backend;
+    use super::{configure_gvproxy_command, host_uses_user_network_runtime, write_runtime_file};
     use std::path::Path;
     use std::process::Command;
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn linux_gvisor_runtime_backends_stay_auto_and_krun() {
-        assert!(Backend::Auto.uses_user_network_runtime());
-        assert!(Backend::Krun.uses_user_network_runtime());
-        assert!(!Backend::Vz.uses_user_network_runtime());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn macos_gvisor_runtime_backends_are_auto_and_vz() {
-        assert!(Backend::Auto.uses_user_network_runtime());
-        assert!(Backend::Vz.uses_user_network_runtime());
-        assert!(!Backend::Krun.uses_user_network_runtime());
+    fn supported_hosts_use_gvisor_runtime() {
+        assert!(host_uses_user_network_runtime());
     }
 
     #[test]

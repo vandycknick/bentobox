@@ -77,9 +77,9 @@ fn read_vm_spec_from_dir(instance_dir: &Path) -> eyre::Result<VmSpec> {
 mod tests {
     use super::{render_network_config_for_instance, resolve_guest_runtime_config};
     use bento_core::{
-        Architecture, Backend, Boot, GuestOs, GuestSpec, LifecycleSpec, MachineId, Network,
-        NetworkDriver, Platform, PluginSpec, Resources, Settings, Storage, VmSpec,
-        VsockEndpointMode, VsockEndpointSpec,
+        Architecture, Boot, GuestOs, GuestSpec, LifecycleSpec, MachineId, Network, NetworkDriver,
+        Platform, PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode,
+        VsockEndpointSpec,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -92,7 +92,6 @@ mod tests {
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
-                backend: Backend::Auto,
             },
             resources: Resources {
                 cpus: 4,
@@ -702,7 +701,7 @@ fn render_network_config_for_instance(
     spec: &VmSpec,
 ) -> eyre::Result<Option<String>> {
     match spec.network.driver {
-        NetworkDriver::Gvisor if spec.platform.backend.uses_configured_guest_mac() => {
+        NetworkDriver::Gvisor if host_uses_configured_guest_mac() => {
             let machine_id = machine_id_from_instance_dir(instance_dir)?;
             render_network_config(GuestNetworkInterface::Mac {
                 mac: mac_from_machine_id(machine_id),
@@ -720,6 +719,16 @@ fn render_network_config_for_instance(
         }
         NetworkDriver::None => Ok(None),
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn host_uses_configured_guest_mac() -> bool {
+    true
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn host_uses_configured_guest_mac() -> bool {
+    false
 }
 
 fn machine_id_from_instance_dir(instance_dir: &Path) -> eyre::Result<MachineId> {

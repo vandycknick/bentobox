@@ -4,15 +4,12 @@ use std::os::fd::{BorrowedFd, FromRawFd};
 use std::sync::Arc;
 
 use bento_core::{InstanceFile, VmSpec};
-use bento_vmm::Vmm;
+use bento_virt::Vmm;
 use eyre::Context;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::{DaemonContext, RuntimeContext};
-use crate::machine::{
-    machine_backend_from_vm_spec, machine_identifier_path_from_dir, vm_spec_machine_config,
-    VmSpecInputs,
-};
+use crate::machine::{machine_identifier_path_from_dir, vm_spec_machine_config, VmSpecInputs};
 use crate::state::{new_instance_store, Action};
 
 pub struct StartupReporter {
@@ -77,7 +74,7 @@ pub async fn init(runtime: &RuntimeContext, machine_id: &str) -> eyre::Result<Da
         data_dir: runtime.dir(),
         spec: &spec,
     })?;
-    let vmm = Vmm::new(machine_backend_from_vm_spec(&spec))?;
+    let vmm = Vmm::new()?;
     let machine = vmm.create(machine_config.config).await?;
     if let Some(machine_identifier) = machine_config.machine_identifier.as_ref() {
         if machine_identifier.was_generated() {
