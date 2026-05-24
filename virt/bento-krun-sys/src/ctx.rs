@@ -226,13 +226,6 @@ pub fn add_net_unixgram_fd(ctx: u32, fd: RawFd, mut mac: [u8; 6]) -> Result<()> 
     })
 }
 
-pub fn set_port_map(ctx: u32, port_map: &[String]) -> Result<()> {
-    let port_map = CStringArray::new(port_map)?;
-    check("set_port_map", unsafe {
-        sys::krun_set_port_map(ctx, port_map.as_ptr())
-    })
-}
-
 pub fn set_console_output(ctx: u32, path: &str) -> Result<()> {
     let path = CString::new(path)?;
     check("set_console_output", unsafe {

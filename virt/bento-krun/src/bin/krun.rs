@@ -276,8 +276,6 @@ fn configure_ctx(ctx_id: u32, config: &KrunConfig) -> eyre::Result<()> {
         ctx::set_kernel_console(ctx_id, "hvc0")?;
     }
 
-    ctx::set_port_map(ctx_id, &[])?;
-
     Ok(())
 }
 
