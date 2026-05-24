@@ -90,6 +90,8 @@ fn start_enter(config: &KrunConfig) -> eyre::Result<()> {
 
 fn configure_ctx(ctx_id: u32, config: &KrunConfig) -> eyre::Result<()> {
     ctx::set_vm_config(ctx_id, config.cpus, config.memory_mib)?;
+    ctx::disable_implicit_console(ctx_id)?;
+    ctx::disable_implicit_vsock(ctx_id)?;
 
     if let Some(kernel) = config.kernel.as_ref() {
         let cmdline = (!config.cmdline.is_empty()).then(|| config.cmdline.join(" "));
@@ -129,6 +131,9 @@ fn configure_ctx(ctx_id: u32, config: &KrunConfig) -> eyre::Result<()> {
         )?;
     }
 
+    if !config.vsock_ports.is_empty() {
+        ctx::add_vsock(ctx_id, 0)?;
+    }
     for port in &config.vsock_ports {
         ctx::add_vsock_port2(ctx_id, port.port, &path_string(&port.path), port.listen)?;
     }
@@ -140,14 +145,11 @@ fn configure_ctx(ctx_id: u32, config: &KrunConfig) -> eyre::Result<()> {
     }
 
     if config.stdio_console {
-        ctx::disable_implicit_console(ctx_id)?;
         ctx::add_virtio_console_default(ctx_id, 0, 1, 2)?;
         ctx::set_kernel_console(ctx_id, "hvc0")?;
     }
 
-    if config.disable_implicit_vsock {
-        ctx::disable_implicit_vsock(ctx_id)?;
-    }
+    ctx::set_port_map(ctx_id, &[])?;
 
     Ok(())
 }
