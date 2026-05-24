@@ -114,10 +114,15 @@ impl VirtualMachineBuilder {
         validate_config(&self.config)?;
 
         let args = command_args(&self.config);
+        let (watchdog_fd, watchdog_keepalive) = crate::watchdog::create()?;
         let mut command = Command::new(&self.krun_binary);
         for arg in &args {
             command.arg(arg);
         }
+        command.env(
+            crate::watchdog::ENV_WATCHDOG_FD,
+            crate::watchdog::fd_env_value(&watchdog_fd),
+        );
         let serial = if self.config.stdio_console {
             let serial_pty = open_krun_serial_pty()?;
             command
@@ -136,11 +141,13 @@ impl VirtualMachineBuilder {
         tracing::debug!(command = %format_command(self.krun_binary.as_os_str(), &args), "launching krun backend");
 
         let child = command.spawn()?;
+        drop(watchdog_fd);
         Ok(VirtualMachine::new(
             child,
             self.krun_binary,
             self.config,
             serial,
+            Some(watchdog_keepalive),
         ))
     }
 }

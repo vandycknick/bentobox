@@ -5,6 +5,7 @@ mod config;
 mod error;
 mod serial;
 mod vm;
+mod watchdog;
 
 pub use crate::builder::VirtualMachineBuilder;
 pub use crate::config::{

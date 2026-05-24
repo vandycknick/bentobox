@@ -12,6 +12,8 @@ use nix::sys::socket::{setsockopt, sockopt};
 
 #[path = "../internal/parse.rs"]
 mod parse;
+#[path = "../watchdog.rs"]
+mod watchdog;
 
 const LOCAL_SOCKET_ID_LEN: usize = 12;
 const DEFAULT_SOCKET_BUF_SIZE: usize = 7 * 1024 * 1024;
@@ -183,6 +185,7 @@ fn reject_arg(present: bool, flag: &'static str, mode: &'static str) -> eyre::Re
 }
 
 fn main() -> eyre::Result<()> {
+    watchdog::start_from_env();
     let cli = Cli::parse();
     let config = cli.into_config()?;
     validate_config(&config)?;

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::error::{KrunBackendError, Result};
 
@@ -132,7 +132,7 @@ fn validate_vm_id(config: &KrunConfig, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_peer_path(path: &PathBuf, name: &str) -> Result<()> {
+fn validate_peer_path(path: &Path, name: &str) -> Result<()> {
     if path.as_os_str().is_empty() {
         return Err(KrunBackendError::InvalidConfig(format!(
             "{name} peer path cannot be empty"
