@@ -37,7 +37,7 @@ impl Display for Cmd {
 impl Cmd {
     pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
         let machine_ref = MachineRef::parse(self.name.clone())?;
-        let machine = libvm.inspect(&machine_ref)?;
+        let machine = libvm.inspect(&machine_ref).await?;
         if self.json {
             println!(
                 "{}",

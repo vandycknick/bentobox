@@ -3,7 +3,6 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub mod config;
 mod core;
 mod netd_driver;
 mod vznat_driver;
@@ -12,11 +11,11 @@ use bento_core::{MachineId, Network};
 use serde::Serialize;
 
 use crate::global_config::GlobalConfig;
-use crate::network::config::{
-    NamedNetworkMode, NetworkDefinitionSpec, NetworkDriverKind, NetworkDriverPreference,
-    RequestedNetwork,
+use crate::models::{
+    Machine, NamedNetworkMode, NetworkDefinition, NetworkDriverKind, NetworkDriverPreference,
+    NetworkInstance, RequestedNetwork,
 };
-use crate::state::{MachineState, NetworkInstanceState, StateStore};
+use crate::store::{Database, Sqlite};
 use crate::{Layout, LibVmError};
 
 use self::core::{
@@ -36,14 +35,14 @@ struct NetworkRuntimeFile {
 
 pub(crate) async fn prepare_network_runtime(
     layout: &Layout,
-    state: &StateStore,
-    metadata: &MachineState,
+    db: &Sqlite,
+    metadata: &Machine,
 ) -> Result<Network, LibVmError> {
-    reconcile_network_runtime(layout, state, metadata, false)?;
+    reconcile_network_runtime(layout, db, metadata, false).await?;
 
     match metadata.network.clone() {
         RequestedNetwork::None => {
-            remove_attached_network(layout, state, metadata.id)?;
+            remove_attached_network(layout, db, metadata.id).await?;
             Ok(Network::None)
         }
         RequestedNetwork::Private { policy } => {
@@ -57,7 +56,7 @@ pub(crate) async fn prepare_network_runtime(
                 selected_private_driver(global_config.networking.private_driver),
                 &NetworkDriverContext {
                     layout,
-                    state,
+                    db,
                     metadata,
                     config: &global_config.networking,
                 },
@@ -76,30 +75,32 @@ pub(crate) async fn prepare_network_runtime(
                     ),
                 });
             }
-            let definition =
-                state
-                    .get_network_definition(&name)?
-                    .ok_or_else(|| LibVmError::NetworkRuntime {
-                        reference: metadata.name.clone(),
-                        message: format!("named network {:?} is not defined", name),
-                    })?;
-            resolve_named_network(layout, state, metadata, &definition).await
+            let definition = db.get_network_definition(&name).await?.ok_or_else(|| {
+                LibVmError::NetworkRuntime {
+                    reference: metadata.name.clone(),
+                    message: format!("named network {:?} is not defined", name),
+                }
+            })?;
+            resolve_named_network(layout, db, metadata, &definition).await
         }
     }
 }
 
-pub(crate) fn reconcile_network_runtime(
+pub(crate) async fn reconcile_network_runtime(
     layout: &Layout,
-    state: &StateStore,
-    metadata: &MachineState,
+    db: &Sqlite,
+    metadata: &Machine,
     monitor_running: bool,
 ) -> Result<(), LibVmError> {
-    let Some(attachment) = state.get_network_attachment(metadata.id)? else {
+    let Some(attachment) = db.get_network_attachment(metadata.id).await? else {
         return Ok(());
     };
-    let Some(instance) = state.get_network_instance(&attachment.network_instance_id)? else {
+    let Some(instance) = db
+        .get_network_instance(&attachment.network_instance_id)
+        .await?
+    else {
         remove_instance_network_link(layout, metadata.id)?;
-        state.remove_network_attachment(metadata.id)?;
+        db.remove_network_attachment(metadata.id).await?;
         return Ok(());
     };
 
@@ -108,11 +109,11 @@ pub(crate) fn reconcile_network_runtime(
         return Ok(());
     }
 
-    state.remove_network_attachment(metadata.id)?;
+    db.remove_network_attachment(metadata.id).await?;
     remove_instance_network_link(layout, metadata.id)?;
-    if state.count_network_attachments(&instance.id)? == 0 {
+    if db.count_network_attachments(&instance.id).await? == 0 {
         terminate_network_instance(&instance)?;
-        state.remove_network_instance(&instance.id)?;
+        db.remove_network_instance(&instance.id).await?;
         remove_runtime_dir(Path::new(&instance.runtime_dir))?;
     }
     Ok(())
@@ -120,9 +121,9 @@ pub(crate) fn reconcile_network_runtime(
 
 async fn resolve_named_network(
     layout: &Layout,
-    state: &StateStore,
-    metadata: &MachineState,
-    definition: &NetworkDefinitionSpec,
+    db: &Sqlite,
+    metadata: &Machine,
+    definition: &NetworkDefinition,
 ) -> Result<Network, LibVmError> {
     let global_config = load_global_config(&metadata.name)?;
     match definition.mode {
@@ -142,7 +143,7 @@ async fn resolve_named_network(
                 selected_private_driver(driver),
                 &NetworkDriverContext {
                     layout,
-                    state,
+                    db,
                     metadata,
                     config: &global_config.networking,
                 },
@@ -216,22 +217,24 @@ async fn prepare_with_driver(
     driver.prepare(ctx, request).await
 }
 
-pub(super) fn remove_attached_network(
+pub(super) async fn remove_attached_network(
     layout: &Layout,
-    state: &StateStore,
+    db: &Sqlite,
     machine_id: MachineId,
 ) -> Result<(), LibVmError> {
-    let Some(attachment) = state.get_network_attachment(machine_id)? else {
+    let Some(attachment) = db.get_network_attachment(machine_id).await? else {
         remove_instance_network_link(layout, machine_id)?;
         return Ok(());
     };
-    let instance = state.get_network_instance(&attachment.network_instance_id)?;
-    state.remove_network_attachment(machine_id)?;
+    let instance = db
+        .get_network_instance(&attachment.network_instance_id)
+        .await?;
+    db.remove_network_attachment(machine_id).await?;
     remove_instance_network_link(layout, machine_id)?;
     if let Some(instance) = instance {
-        if state.count_network_attachments(&instance.id)? == 0 {
+        if db.count_network_attachments(&instance.id).await? == 0 {
             terminate_network_instance(&instance)?;
-            state.remove_network_instance(&instance.id)?;
+            db.remove_network_instance(&instance.id).await?;
             remove_runtime_dir(Path::new(&instance.runtime_dir))?;
         }
     }
@@ -280,7 +283,7 @@ fn hex_nibble(value: u8) -> Option<u8> {
     }
 }
 
-fn network_instance_is_alive(instance: &NetworkInstanceState) -> bool {
+fn network_instance_is_alive(instance: &NetworkInstance) -> bool {
     match instance.driver.as_str() {
         DRIVER_NETD => netd_driver::instance_is_alive(instance),
         _ => false,
@@ -288,7 +291,7 @@ fn network_instance_is_alive(instance: &NetworkInstanceState) -> bool {
 }
 
 pub(super) fn network_attachment_from_instance(
-    instance: &NetworkInstanceState,
+    instance: &NetworkInstance,
     mac: String,
 ) -> Result<Network, LibVmError> {
     let mut attachment: Network =
@@ -307,7 +310,7 @@ pub(super) fn network_attachment_from_instance(
     Ok(attachment)
 }
 
-fn terminate_network_instance(instance: &NetworkInstanceState) -> Result<(), LibVmError> {
+fn terminate_network_instance(instance: &NetworkInstance) -> Result<(), LibVmError> {
     if instance.driver == DRIVER_NETD {
         netd_driver::terminate_instance(instance)?;
     }

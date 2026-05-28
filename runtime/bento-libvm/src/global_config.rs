@@ -4,7 +4,7 @@ use eyre::Context;
 use serde::Deserialize;
 
 use crate::layout::resolve_config_dir;
-use crate::network::config::NetworkDriverKind;
+use crate::models::NetworkDriverKind;
 
 const CONFIG_FILE_NAME: &str = "config.yaml";
 

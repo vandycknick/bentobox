@@ -30,7 +30,7 @@ impl Cmd {
                 Err(err) => return Err(err.into()),
             }
         }
-        libvm.remove(&machine)?;
+        libvm.remove(&machine).await?;
         println!("removed {}", self.name);
         Ok(())
     }

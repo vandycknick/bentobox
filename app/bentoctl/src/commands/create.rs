@@ -105,7 +105,7 @@ impl Cmd {
             network: Some(resolved.network),
         };
 
-        libvm.create_from_image(request)?;
+        libvm.create_from_image(request).await?;
         println!("created {}", self.name);
 
         if self.start {

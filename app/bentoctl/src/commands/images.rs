@@ -106,10 +106,11 @@ impl Cmd {
                 println!("imported {}", rec.source_ref);
             }
             ImageSubcommand::Pack(cmd) => {
-                let libvm =
-                    LibVm::from_env().map_err(|e| eyre::eyre!("initialize bento-libvm: {e}"))?;
+                let libvm = LibVm::from_env()
+                    .await
+                    .map_err(|e| eyre::eyre!("initialize bento-libvm: {e}"))?;
                 let machine_ref = MachineRef::parse(cmd.vm.clone())?;
-                let machine = libvm.inspect(&machine_ref)?;
+                let machine = libvm.inspect(&machine_ref).await?;
                 if machine.status.is_running() {
                     eyre::bail!(
                         "instance {} must be stopped before packing",

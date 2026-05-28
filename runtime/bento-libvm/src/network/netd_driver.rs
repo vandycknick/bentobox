@@ -11,7 +11,8 @@ use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
-use crate::state::{MachineState, NetworkAttachmentState, NetworkInstanceState, StateStore};
+use crate::models::{Machine, NetworkAttachment, NetworkInstance};
+use crate::store::{Database, Sqlite};
 use crate::{Layout, LibVmError};
 
 use super::core::{NetworkDriver, NetworkDriverContext, NetworkRequest, PreparedNetwork};
@@ -63,7 +64,7 @@ async fn prepare_netd_runtime(
     request: &NetworkRequest<'_>,
 ) -> Result<PreparedNetwork, LibVmError> {
     let layout = ctx.layout;
-    let state = ctx.state;
+    let db = ctx.db;
     let metadata = ctx.metadata;
     let config = ctx.config.netd.clone();
     if !host_uses_user_network_runtime() {
@@ -74,11 +75,14 @@ async fn prepare_netd_runtime(
     }
 
     if let Some(definition_name) = request.definition_name {
-        if let Some(instance) = state.get_network_instance_by_definition(definition_name)? {
+        if let Some(instance) = db
+            .get_network_instance_by_definition(definition_name)
+            .await?
+        {
             if instance_is_alive(&instance) {
-                return attach_existing_runtime(layout, state, metadata, &instance);
+                return attach_existing_runtime(layout, db, metadata, &instance).await;
             }
-            state.remove_network_instance(&instance.id)?;
+            db.remove_network_instance(&instance.id).await?;
             remove_runtime_dir(Path::new(&instance.runtime_dir))?;
         }
     }
@@ -165,7 +169,7 @@ async fn prepare_netd_runtime(
         pcap_path: pcap_path.clone(),
     };
     let now = now_unix();
-    state.upsert_network_instance(&NetworkInstanceState {
+    db.upsert_network_instance(&NetworkInstance {
         id: network_id.clone(),
         driver: DRIVER_NETD.to_string(),
         definition_name: request.definition_name.map(str::to_string),
@@ -175,14 +179,16 @@ async fn prepare_netd_runtime(
         state: RUNNING_STATE.to_string(),
         created_at: now,
         modified_at: now,
-    })?;
-    state.upsert_network_attachment(&NetworkAttachmentState {
+    })
+    .await?;
+    db.upsert_network_attachment(&NetworkAttachment {
         machine_id: metadata.id,
         network_instance_id: network_id,
         guest_mac: format_mac(mac),
         created_at: now,
         modified_at: now,
-    })?;
+    })
+    .await?;
     Ok(PreparedNetwork {
         attachment: network,
     })
@@ -210,23 +216,24 @@ fn host_uses_user_network_runtime() -> bool {
     false
 }
 
-fn attach_existing_runtime(
+async fn attach_existing_runtime(
     layout: &Layout,
-    state: &StateStore,
-    metadata: &MachineState,
-    instance: &NetworkInstanceState,
+    db: &Sqlite,
+    metadata: &Machine,
+    instance: &NetworkInstance,
 ) -> Result<PreparedNetwork, LibVmError> {
     ensure_instance_network_link(layout, metadata.id, Path::new(&instance.runtime_dir))?;
     let now = now_unix();
     let mac = format_mac(mac_from_machine_id(metadata.id));
     let attachment = network_attachment_from_instance(instance, mac.clone())?;
-    state.upsert_network_attachment(&NetworkAttachmentState {
+    db.upsert_network_attachment(&NetworkAttachment {
         machine_id: metadata.id,
         network_instance_id: instance.id.clone(),
         guest_mac: mac.clone(),
         created_at: now,
         modified_at: now,
-    })?;
+    })
+    .await?;
     Ok(PreparedNetwork { attachment })
 }
 
@@ -368,20 +375,20 @@ fn resolve_sibling_binary(name: &str) -> String {
         .unwrap_or_else(|| name.to_string())
 }
 
-pub(super) fn instance_is_alive(instance: &NetworkInstanceState) -> bool {
+pub(super) fn instance_is_alive(instance: &NetworkInstance) -> bool {
     driver_state(instance)
         .map(|state| process_is_alive(state.helper_pid))
         .unwrap_or(false)
 }
 
-pub(super) fn terminate_instance(instance: &NetworkInstanceState) -> Result<(), LibVmError> {
+pub(super) fn terminate_instance(instance: &NetworkInstance) -> Result<(), LibVmError> {
     if let Some(state) = driver_state(instance) {
         terminate_helper(state.helper_pid)?;
     }
     Ok(())
 }
 
-fn driver_state(instance: &NetworkInstanceState) -> Option<NetdDriverState> {
+fn driver_state(instance: &NetworkInstance) -> Option<NetdDriverState> {
     serde_json::from_str(&instance.driver_state_json).ok()
 }
 

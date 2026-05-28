@@ -23,7 +23,7 @@ impl Display for Cmd {
 
 impl Cmd {
     pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
-        let machines = libvm.list()?;
+        let machines = libvm.list().await?;
         let host_arch = std::env::consts::ARCH;
         let now = now_unix();
 

@@ -50,7 +50,7 @@ impl Cmd {
             eyre::bail!("--keep-on-failure requires a command");
         }
 
-        let resolved = self.resolve(libvm)?;
+        let resolved = self.resolve(libvm).await?;
         if !resolved.ssh_enabled {
             eyre::bail!("profile ssh.enabled is false; bento run needs SSH to open a shell or execute a command");
         }
@@ -73,7 +73,7 @@ impl Cmd {
             network: Some(resolved.network),
         };
 
-        let machine = libvm.create_from_image(request)?;
+        let machine = libvm.create_from_image(request).await?;
         let machine_ref = MachineRef::Id(machine.id);
         let machine = libvm.start(&machine_ref).await?;
         if machine.spec.guest_agent().is_some() {
@@ -100,7 +100,7 @@ impl Cmd {
         std::process::exit(code);
     }
 
-    fn resolve(&self, libvm: &LibVm) -> eyre::Result<ResolvedRun> {
+    async fn resolve(&self, libvm: &LibVm) -> eyre::Result<ResolvedRun> {
         if self.profile.is_some() && self.profile_name.is_some() {
             eyre::bail!("profile specified twice; use either positional profile or --profile");
         }
@@ -151,7 +151,7 @@ impl Cmd {
             network = network_override;
         }
 
-        let name = libvm.allocate_ephemeral_name(&prefix)?;
+        let name = libvm.allocate_ephemeral_name(&prefix).await?;
         Ok(ResolvedRun {
             name,
             image_ref,
@@ -199,7 +199,7 @@ async fn cleanup_ephemeral(libvm: &LibVm, name: &str) -> eyre::Result<()> {
         Err(err) if err.to_string().contains("is not running") => {}
         Err(err) => return Err(err.into()),
     }
-    libvm.remove(&machine)?;
+    libvm.remove(&machine).await?;
     Ok(())
 }
 

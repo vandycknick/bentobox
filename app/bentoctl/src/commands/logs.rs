@@ -25,7 +25,9 @@ impl Display for Cmd {
 
 impl Cmd {
     pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
-        let machine = libvm.inspect(&MachineRef::parse(self.name.clone())?)?;
+        let machine = libvm
+            .inspect(&MachineRef::parse(self.name.clone())?)
+            .await?;
         let path = machine.dir.join(InstanceFile::VmmonTraceLog.as_str());
         if !path.exists() {
             return Ok(());

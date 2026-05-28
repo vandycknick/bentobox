@@ -76,8 +76,17 @@ pub enum LibVmError {
     #[error("ambiguous machine id prefix {prefix:?} matched {count} machines")]
     AmbiguousIdPrefix { prefix: String, count: usize },
 
+    #[error("failed to decode state field {field}: {message}")]
+    StateDecode {
+        field: &'static str,
+        message: String,
+    },
+
     #[error(transparent)]
-    StateStore(#[from] rusqlite::Error),
+    Database(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    DatabaseMigration(#[from] sqlx::migrate::MigrateError),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),

@@ -37,7 +37,7 @@ impl NetworkDriver for VzNatDriver {
         ctx: &NetworkDriverContext<'_>,
         _request: &NetworkRequest<'_>,
     ) -> Result<PreparedNetwork, LibVmError> {
-        remove_attached_network(ctx.layout, ctx.state, ctx.metadata.id)?;
+        remove_attached_network(ctx.layout, ctx.db, ctx.metadata.id).await?;
         let runtime_dir = ctx.layout.instance_network_link(ctx.metadata.id);
         fs::create_dir_all(&runtime_dir)?;
         let attachment = Network::VzNat { mac: None };
@@ -48,13 +48,30 @@ impl NetworkDriver for VzNatDriver {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
     use super::VzNatDriver;
     use crate::global_config::{NetdConfig, NetworkingConfig};
-    use crate::network::config::NetworkDriverKind;
+    use crate::models::{Machine, NetworkDriverKind, RequestedNetwork};
     use crate::network::core::{NetworkDriver, NetworkDriverContext, NetworkRequest, NetworkScope};
-    use crate::state::{machine_state_from_path, StateStore};
+    use crate::store::{Database, Sqlite};
     use crate::Layout;
-    use bento_core::{NetworkPolicySpec, PolicyAction};
+    use bento_core::{MachineId, NetworkPolicySpec, PolicyAction};
+
+    fn machine_from_path(id: MachineId, name: String, instance_dir: &Path) -> Machine {
+        Machine {
+            id,
+            name,
+            instance_dir: instance_dir.display().to_string(),
+            created_at: 1,
+            modified_at: 1,
+            image_ref: String::new(),
+            labels: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            network: RequestedNetwork::default(),
+        }
+    }
 
     #[test]
     fn vznat_driver_supports_private_and_named_nat_networks() {
@@ -107,9 +124,9 @@ mod tests {
     async fn vznat_prepare_writes_instance_runtime_file() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let layout = Layout::new(dir.path());
-        let state = StateStore::open(&layout).expect("open store");
+        let db = Sqlite::new(&layout).await.expect("open db");
         let machine_id = bento_core::MachineId::new();
-        let metadata = machine_state_from_path(
+        let metadata = machine_from_path(
             machine_id,
             "devbox".to_string(),
             &layout.instance_dir(machine_id),
@@ -124,7 +141,7 @@ mod tests {
             .prepare(
                 &NetworkDriverContext {
                     layout: &layout,
-                    state: &state,
+                    db: &db,
                     metadata: &metadata,
                     config: &config,
                 },

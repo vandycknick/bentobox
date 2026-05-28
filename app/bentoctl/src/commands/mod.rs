@@ -103,66 +103,66 @@ impl BentoCtlCmd {
     async fn invoke_sub_command(&self) -> eyre::Result<()> {
         match &self.cmd {
             Command::Run(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Create(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::New(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Start(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Stop(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Restart(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Rm(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Shell(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Exec(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::List(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Status(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Inspect(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Logs(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Network(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
             Command::Profile(cmd) => cmd.run().await,
 
             Command::Images(cmd) => cmd.run().await,
             Command::ShellProxy(cmd) => {
-                let libvm = libvm()?;
+                let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
         }
@@ -176,6 +176,6 @@ fn apply_help_template(command: clap::Command) -> clap::Command {
         .mut_subcommands(apply_help_template)
 }
 
-fn libvm() -> eyre::Result<LibVm> {
-    LibVm::from_env().context("initialize bento-libvm")
+async fn libvm() -> eyre::Result<LibVm> {
+    LibVm::from_env().await.context("initialize bento-libvm")
 }

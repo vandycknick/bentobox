@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter};
 use std::io::Write;
 
 use bento_libvm::{
-    LibVm, MachineRef, NamedNetworkMode, NetworkDefinitionSpec, NetworkDriverPreference,
+    LibVm, MachineRef, NamedNetworkMode, NetworkDefinition, NetworkDriverPreference,
     RequestedNetwork,
 };
 use clap::{Args, Subcommand};
@@ -93,17 +93,17 @@ pub struct SetCmd {
 impl Cmd {
     pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
         match &self.command {
-            NetworkSubcommand::List(cmd) => list_networks(libvm, cmd),
-            NetworkSubcommand::Show(cmd) => show_network(libvm, cmd),
-            NetworkSubcommand::Create(cmd) => create_network(libvm, cmd),
-            NetworkSubcommand::Rm(cmd) => remove_network(libvm, cmd),
-            NetworkSubcommand::Set(cmd) => set_machine_network(libvm, cmd),
+            NetworkSubcommand::List(cmd) => list_networks(libvm, cmd).await,
+            NetworkSubcommand::Show(cmd) => show_network(libvm, cmd).await,
+            NetworkSubcommand::Create(cmd) => create_network(libvm, cmd).await,
+            NetworkSubcommand::Rm(cmd) => remove_network(libvm, cmd).await,
+            NetworkSubcommand::Set(cmd) => set_machine_network(libvm, cmd).await,
         }
     }
 }
 
-fn list_networks(libvm: &LibVm, cmd: &ListCmd) -> eyre::Result<()> {
-    let definitions = libvm.list_network_definitions()?;
+async fn list_networks(libvm: &LibVm, cmd: &ListCmd) -> eyre::Result<()> {
+    let definitions = libvm.list_network_definitions().await?;
     if cmd.json {
         println!("{}", serde_json::to_string_pretty(&definitions)?);
         return Ok(());
@@ -124,9 +124,10 @@ fn list_networks(libvm: &LibVm, cmd: &ListCmd) -> eyre::Result<()> {
     Ok(())
 }
 
-fn show_network(libvm: &LibVm, cmd: &ShowCmd) -> eyre::Result<()> {
+async fn show_network(libvm: &LibVm, cmd: &ShowCmd) -> eyre::Result<()> {
     let definition = libvm
-        .get_network_definition(&cmd.name)?
+        .get_network_definition(&cmd.name)
+        .await?
         .ok_or_else(|| eyre::eyre!("network `{}` not found", cmd.name))?;
     if cmd.json {
         println!("{}", serde_json::to_string_pretty(&definition)?);
@@ -136,31 +137,33 @@ fn show_network(libvm: &LibVm, cmd: &ShowCmd) -> eyre::Result<()> {
     Ok(())
 }
 
-fn create_network(libvm: &LibVm, cmd: &CreateCmd) -> eyre::Result<()> {
-    let definition = NetworkDefinitionSpec {
+async fn create_network(libvm: &LibVm, cmd: &CreateCmd) -> eyre::Result<()> {
+    let definition = NetworkDefinition {
         name: cmd.name.clone(),
         mode: cmd.mode,
         driver_preference: cmd.driver,
     };
-    libvm.create_network_definition(definition)?;
+    libvm.create_network_definition(definition).await?;
     println!("created {}", cmd.name);
     Ok(())
 }
 
-fn remove_network(libvm: &LibVm, cmd: &RmCmd) -> eyre::Result<()> {
+async fn remove_network(libvm: &LibVm, cmd: &RmCmd) -> eyre::Result<()> {
     if !cmd.force {
         eyre::bail!("refusing to remove network `{}` without --force", cmd.name);
     }
-    if libvm.get_network_definition(&cmd.name)?.is_none() {
+    if libvm.get_network_definition(&cmd.name).await?.is_none() {
         eyre::bail!("network `{}` not found", cmd.name);
     }
-    libvm.remove_network_definition(&cmd.name)?;
+    libvm.remove_network_definition(&cmd.name).await?;
     println!("removed {}", cmd.name);
     Ok(())
 }
 
-fn set_machine_network(libvm: &LibVm, cmd: &SetCmd) -> eyre::Result<()> {
-    let machine = libvm.set_network(&MachineRef::parse(cmd.vm.clone())?, cmd.network.clone())?;
+async fn set_machine_network(libvm: &LibVm, cmd: &SetCmd) -> eyre::Result<()> {
+    let machine = libvm
+        .set_network(&MachineRef::parse(cmd.vm.clone())?, cmd.network.clone())
+        .await?;
     println!(
         "network for {} set to {}",
         machine.spec.name,

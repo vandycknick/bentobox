@@ -1,7 +1,8 @@
 use bento_core::{Network, NetworkPolicySpec};
 
 use crate::global_config::NetworkingConfig;
-use crate::state::{MachineState, StateStore};
+use crate::models::Machine;
+use crate::store::Sqlite;
 use crate::{Layout, LibVmError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,8 +19,8 @@ pub(super) struct NetworkRequest<'a> {
 
 pub(super) struct NetworkDriverContext<'a> {
     pub(super) layout: &'a Layout,
-    pub(super) state: &'a StateStore,
-    pub(super) metadata: &'a MachineState,
+    pub(super) db: &'a Sqlite,
+    pub(super) metadata: &'a Machine,
     pub(super) config: &'a NetworkingConfig,
 }
 
