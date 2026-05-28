@@ -22,7 +22,7 @@ use crate::context::{DaemonContext, RuntimeContext};
 use crate::endpoints::start_endpoint_supervisor;
 use crate::net::server::NegotiateServer;
 use crate::net::tunnel::spawn_tunnel;
-use crate::startup::StartupReporter;
+use crate::startup::SyncReporter;
 use crate::state::{
     guest_shell_ready as state_guest_shell_ready, select_current_events, select_current_inspect,
     select_current_ping, Action, InstanceStore,
@@ -101,7 +101,7 @@ impl VmMonitorService for VmMonitorSvc {
 pub async fn start_services(
     runtime: &RuntimeContext,
     ctx: &DaemonContext,
-    startup_reporter: &mut StartupReporter,
+    sync_reporter: &mut SyncReporter,
 ) -> eyre::Result<ServiceHandles> {
     let path = runtime.file(bento_core::InstanceFile::VmmonSocket);
     let listener = UnixListener::bind(&path).context(format!("bind socket {}", path.display()))?;
@@ -137,7 +137,7 @@ pub async fn start_services(
 
     let endpoint_supervisor = start_endpoint_supervisor(ctx.clone(), runtime.dir().to_path_buf());
 
-    startup_reporter.report_started()?;
+    sync_reporter.report_started()?;
     tracing::info!(instance = %ctx.machine.name(), "vmmon running");
 
     Ok(ServiceHandles {

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -29,6 +29,8 @@ use crate::state::{machine_state_from_path_with_details, MachineState, StateStor
 use crate::{Layout, LibVmError, MachineRef};
 
 const BYTES_PER_GB: u64 = 1_000_000_000;
+const ENV_VM_STARTPIPE: &str = "_VM_STARTPIPE";
+const ENV_VM_SYNCPIPE: &str = "_VM_SYNCPIPE";
 
 #[derive(Debug, Clone)]
 pub struct CreateMachineRequest {
@@ -353,8 +355,13 @@ impl LibVm {
             },
         )?;
 
-        let startup_pipe = spawn_vmmon(metadata.id, Path::new(&metadata.instance_dir))?;
-        wait_for_monitor_start(startup_pipe, &self.layout.monitor_trace_path(metadata.id)).await?;
+        let handshake = spawn_vmmon(metadata.id, Path::new(&metadata.instance_dir))?;
+        release_startpipe(handshake.start_write)?;
+        wait_for_monitor_start(
+            handshake.sync_read,
+            &self.layout.monitor_trace_path(metadata.id),
+        )
+        .await?;
         self.machine_record(metadata)
     }
 
@@ -642,8 +649,14 @@ fn canonicalize_existing_path(path: &Path, kind: &str) -> Result<PathBuf, LibVmE
     })
 }
 
-fn spawn_vmmon(machine_id: MachineId, instance_dir: &Path) -> Result<OwnedFd, LibVmError> {
-    let (read_fd, write_fd) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
+struct VmmonHandshake {
+    start_write: OwnedFd,
+    sync_read: OwnedFd,
+}
+
+fn spawn_vmmon(machine_id: MachineId, instance_dir: &Path) -> Result<VmmonHandshake, LibVmError> {
+    let (start_read, start_write) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
+    let (sync_read, sync_write) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
 
     let mut command = Command::new(resolve_vmmon_executable()?);
     command
@@ -652,20 +665,13 @@ fn spawn_vmmon(machine_id: MachineId, instance_dir: &Path) -> Result<OwnedFd, Li
         .arg("--data-dir")
         .arg(instance_dir);
     command
-        .arg("--startup-fd")
-        .arg(write_fd.as_raw_fd().to_string());
+        .env(ENV_VM_STARTPIPE, start_read.as_raw_fd().to_string())
+        .env(ENV_VM_SYNCPIPE, sync_write.as_raw_fd().to_string());
 
     // vmmon handles its own daemonization via double-fork internally,
-    // so we just need to make sure the write end of the startup pipe
-    // is inherited by the child. nix::pipe() sets FD_CLOEXEC by default,
-    // so we need to clear it for the write fd.
-    use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-    let flags =
-        fcntl(&write_fd, FcntlArg::F_GETFD).map_err(|err| io::Error::other(err.to_string()))?;
-    let mut fd_flags = FdFlag::from_bits_retain(flags);
-    fd_flags.remove(FdFlag::FD_CLOEXEC);
-    fcntl(&write_fd, FcntlArg::F_SETFD(fd_flags))
-        .map_err(|err| io::Error::other(err.to_string()))?;
+    // so only the child-side pipe fds must survive exec/self-spawn.
+    clear_cloexec(&start_read)?;
+    clear_cloexec(&sync_write)?;
 
     command
         .stdin(Stdio::null())
@@ -673,9 +679,13 @@ fn spawn_vmmon(machine_id: MachineId, instance_dir: &Path) -> Result<OwnedFd, Li
         .stderr(Stdio::null())
         .spawn()?;
 
-    drop(write_fd);
+    drop(start_read);
+    drop(sync_write);
 
-    Ok(read_fd)
+    Ok(VmmonHandshake {
+        start_write,
+        sync_read,
+    })
 }
 
 fn resolve_vmmon_executable() -> Result<PathBuf, LibVmError> {
@@ -701,28 +711,25 @@ fn resolve_vmmon_executable() -> Result<PathBuf, LibVmError> {
     Err(LibVmError::VmMonExecutableNotFound { expected_path })
 }
 
-async fn wait_for_monitor_start(
-    startup_pipe: OwnedFd,
-    trace_path: &Path,
-) -> Result<(), LibVmError> {
+async fn wait_for_monitor_start(syncpipe: OwnedFd, trace_path: &Path) -> Result<(), LibVmError> {
     let deadline_duration = std::time::Duration::from_secs(30);
     let trace_path = trace_path.to_path_buf();
     let result = tokio::time::timeout(
         deadline_duration,
-        tokio::task::spawn_blocking(move || read_startup_pipe(startup_pipe)),
+        tokio::task::spawn_blocking(move || read_syncpipe(syncpipe)),
     )
     .await
     .map_err(|_| {
         io::Error::new(
             io::ErrorKind::TimedOut,
             format!(
-                "vmmon startup pipe did not report readiness in {:?} (hint: see {})",
+                "vmmon syncpipe did not report readiness in {:?} (hint: see {})",
                 deadline_duration,
                 trace_path.display(),
             ),
         )
     })?
-    .map_err(|err| io::Error::other(format!("join vmmon startup wait task: {err}")))??;
+    .map_err(|err| io::Error::other(format!("join vmmon syncpipe wait task: {err}")))??;
 
     match result {
         StartupResult::Started => Ok(()),
@@ -730,9 +737,15 @@ async fn wait_for_monitor_start(
     }
 }
 
-fn read_startup_pipe(startup_pipe: OwnedFd) -> io::Result<StartupResult> {
+fn release_startpipe(startpipe: OwnedFd) -> io::Result<()> {
+    let mut file = std::fs::File::from(startpipe);
+    file.write_all(&[1])?;
+    file.flush()
+}
+
+fn read_syncpipe(syncpipe: OwnedFd) -> io::Result<StartupResult> {
     let mut input = String::new();
-    let mut file = std::fs::File::from(startup_pipe);
+    let mut file = std::fs::File::from(syncpipe);
     std::io::BufReader::new(&mut file).read_line(&mut input)?;
 
     if input == "started\n" {
@@ -746,14 +759,24 @@ fn read_startup_pipe(startup_pipe: OwnedFd) -> io::Result<StartupResult> {
     if input.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
-            "vmmon exited before reporting startup result",
+            "vmmon exited before reporting syncpipe result",
         ));
     }
 
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("unexpected vmmon startup message: {input:?}"),
+        format!("unexpected vmmon syncpipe message: {input:?}"),
     ))
+}
+
+fn clear_cloexec(fd: &OwnedFd) -> io::Result<()> {
+    use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+
+    let flags = fcntl(fd, FcntlArg::F_GETFD).map_err(|err| io::Error::other(err.to_string()))?;
+    let mut fd_flags = FdFlag::from_bits_retain(flags);
+    fd_flags.remove(FdFlag::FD_CLOEXEC);
+    fcntl(fd, FcntlArg::F_SETFD(fd_flags)).map_err(|err| io::Error::other(err.to_string()))?;
+    Ok(())
 }
 
 enum StartupResult {
@@ -875,11 +898,16 @@ fn create_staging_dir(layout: &Layout) -> Result<PathBuf, LibVmError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{guest_kernel_cmdline, guest_spec_from_request, LibVm, MachineStatus};
+    use super::{
+        guest_kernel_cmdline, guest_spec_from_request, read_syncpipe, release_startpipe, LibVm,
+        MachineStatus, StartupResult,
+    };
     use crate::{Layout, LibVmError, MachineRef};
     use bento_core::{
         Architecture, Boot, GuestOs, GuestSpec, Platform, Resources, Settings, Storage, VmSpec,
     };
+    use nix::unistd::pipe;
+    use std::io::{Read, Write};
 
     fn sample_vm_spec(name: &str) -> VmSpec {
         VmSpec {
@@ -932,6 +960,46 @@ mod tests {
         let enabled = guest_spec_from_request(true);
         assert!(enabled.is_some());
         assert!(!guest_kernel_cmdline(&enabled).is_empty());
+    }
+
+    #[test]
+    fn release_startpipe_writes_one_byte() {
+        let (read_fd, write_fd) = pipe().expect("create pipe");
+
+        release_startpipe(write_fd).expect("release startpipe");
+
+        let mut file = std::fs::File::from(read_fd);
+        let mut byte = [0_u8; 1];
+        file.read_exact(&mut byte).expect("read release byte");
+        assert_eq!(byte, [1]);
+    }
+
+    #[test]
+    fn read_syncpipe_accepts_started_message() {
+        let (read_fd, write_fd) = pipe().expect("create pipe");
+        let mut write_file = std::fs::File::from(write_fd);
+        write_file.write_all(b"started\n").expect("write started");
+        drop(write_file);
+
+        assert!(matches!(
+            read_syncpipe(read_fd).expect("read syncpipe"),
+            StartupResult::Started
+        ));
+    }
+
+    #[test]
+    fn read_syncpipe_accepts_failed_message() {
+        let (read_fd, write_fd) = pipe().expect("create pipe");
+        let mut write_file = std::fs::File::from(write_fd);
+        write_file
+            .write_all(b"failed\tkrun exploded\n")
+            .expect("write failure");
+        drop(write_file);
+
+        assert!(matches!(
+            read_syncpipe(read_fd).expect("read syncpipe"),
+            StartupResult::Failed(message) if message == "krun exploded"
+        ));
     }
 
     #[test]
