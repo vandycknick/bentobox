@@ -28,7 +28,7 @@ impl Cmd {
         let machine = libvm
             .inspect(&MachineRef::parse(self.name.clone())?)
             .await?;
-        let state = if machine.status.is_running() {
+        let state = if machine.is_running() {
             "running"
         } else {
             "stopped"
@@ -39,7 +39,7 @@ impl Cmd {
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "id": machine.id.to_string(),
-                    "name": machine.spec.name,
+                    "name": machine.name,
                     "state": state,
                     "profile": machine.metadata.get(PROFILE_METADATA_KEY),
                     "image": machine.image_ref,
@@ -54,7 +54,7 @@ impl Cmd {
             return Ok(());
         }
         println!("id: {}", machine.id);
-        println!("name: {}", machine.spec.name);
+        println!("name: {}", machine.name);
         println!("state: {state}");
         if let Some(profile) = machine.metadata.get(PROFILE_METADATA_KEY) {
             println!("profile: {profile}");

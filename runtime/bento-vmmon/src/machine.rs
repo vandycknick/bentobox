@@ -1,15 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use bento_core::{
-    agent::RESERVED_SHELL_PORT, resolve_mount_location, DiskKind, InstanceFile, Network, VmSpec,
-    VsockEndpointMode,
-};
+use bento_core::{agent::RESERVED_SHELL_PORT, DiskKind, VmSpec, VsockEndpointMode};
 use bento_utils::parse_mac;
 use bento_virt::{
     DiskImage, MachineIdentifier, SharedDirectory, VirtError, VmConfig, VmConfigBuilder, VsockPort,
     VsockPortMode,
 };
 use thiserror::Error;
+
+const APPLE_MACHINE_IDENTIFIER_FILE: &str = "apple-machine-id";
 
 #[derive(Debug, Error)]
 pub enum MachineSpecError {
@@ -18,9 +17,6 @@ pub enum MachineSpecError {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
-
-    #[error("invalid mount location: {0}")]
-    InvalidMountLocation(String),
 
     #[error("invalid mount tag for {mount_source}: mount tags must be non-empty")]
     InvalidMountTag { mount_source: String },
@@ -37,7 +33,16 @@ pub(crate) struct VmSpecInputs<'a> {
     pub id: &'a str,
     pub data_dir: &'a Path,
     pub spec: &'a VmSpec,
-    pub network: &'a Network,
+    pub network: &'a RuntimeNetwork,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RuntimeNetwork {
+    None,
+    VzNat { mac: Option<String> },
+    UnixDatagram { path: PathBuf, mac: String },
+    UnixStream { path: PathBuf, mac: String },
+    Tap { name: String, mac: String },
 }
 
 pub(crate) fn vm_spec_machine_config(
@@ -78,15 +83,13 @@ pub(crate) fn vm_spec_machine_config(
     }
 
     for mount in &inputs.spec.mounts {
-        let host_path = resolve_mount_location(&mount.source)
-            .map_err(MachineSpecError::InvalidMountLocation)?;
         if mount.tag.trim().is_empty() {
             return Err(MachineSpecError::InvalidMountTag {
                 mount_source: mount.source.display().to_string(),
             });
         }
         builder = builder.mount(SharedDirectory {
-            host_path,
+            host_path: mount.source.clone(),
             tag: mount.tag.clone(),
             read_only: mount.read_only,
         });
@@ -133,7 +136,7 @@ fn map_vsock_endpoint_mode(mode: VsockEndpointMode) -> VsockPortMode {
 }
 
 pub(crate) fn machine_identifier_path_from_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join(InstanceFile::AppleMachineIdentifier.as_str())
+    data_dir.join(APPLE_MACHINE_IDENTIFIER_FILE)
 }
 
 #[cfg(target_os = "macos")]
@@ -211,20 +214,20 @@ fn resolve_spec_path(data_dir: &Path, path: &Path) -> PathBuf {
 
 fn apply_runtime_network(
     builder: VmConfigBuilder,
-    network: &Network,
+    network: &RuntimeNetwork,
 ) -> Result<VmConfigBuilder, MachineSpecError> {
     match network {
-        Network::None => Ok(builder.no_network()),
-        Network::VzNat { .. } => Ok(builder.vz_nat_network()),
-        Network::UnixDatagram { path, mac } => {
+        RuntimeNetwork::None => Ok(builder.no_network()),
+        RuntimeNetwork::VzNat { .. } => Ok(builder.vz_nat_network()),
+        RuntimeNetwork::UnixDatagram { path, mac } => {
             Ok(builder.unix_datagram_network(path.clone(), parse_mac_str(mac)?))
         }
-        Network::UnixStream { .. } => Err(std::io::Error::new(
+        RuntimeNetwork::UnixStream { .. } => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "unixstream network runtime attachments are not supported by the current virt runtime",
         )
         .into()),
-        Network::Tap { .. } => Err(std::io::Error::new(
+        RuntimeNetwork::Tap { .. } => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "tap network runtime attachments are not supported by the current virt runtime",
         )
@@ -258,15 +261,17 @@ fn load_host_machine_identifier(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_runtime_network, vm_spec_machine_config, VmSpecInputs};
+    use super::{apply_runtime_network, vm_spec_machine_config, RuntimeNetwork, VmSpecInputs};
     use bento_core::{
         agent::RESERVED_SHELL_PORT, Architecture, Boot, Disk, DiskKind, GuestOs, GuestSpec,
-        InstanceFile, Network, Platform, Resources, Settings, Storage, VmSpec,
+        Platform, Resources, Settings, Storage, VmSpec,
     };
     use bento_virt::{VmConfig, VsockPortMode};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    const CIDATA_DISK: &str = "cidata.img";
 
     fn temp_dir(name: &str) -> PathBuf {
         let now = SystemTime::now()
@@ -280,7 +285,7 @@ mod tests {
     fn unix_datagram_runtime_attachment_maps_to_network_mode() {
         let config = apply_runtime_network(
             VmConfig::builder("devbox"),
-            &Network::UnixDatagram {
+            &RuntimeNetwork::UnixDatagram {
                 path: PathBuf::from("/tmp/net.sock"),
                 mac: "02:00:00:00:00:01".to_string(),
             },
@@ -298,10 +303,13 @@ mod tests {
     #[test]
     fn vznat_network_maps_to_vz_nat_mode() {
         assert_eq!(
-            apply_runtime_network(VmConfig::builder("devbox"), &Network::VzNat { mac: None })
-                .expect("runtime network")
-                .build()
-                .network,
+            apply_runtime_network(
+                VmConfig::builder("devbox"),
+                &RuntimeNetwork::VzNat { mac: None }
+            )
+            .expect("runtime network")
+            .build()
+            .network,
             bento_virt::NetworkMode::VzNat
         );
     }
@@ -317,7 +325,6 @@ mod tests {
 
         let spec = VmSpec {
             version: 1,
-            name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
@@ -356,11 +363,11 @@ mod tests {
         };
 
         let machine_config = vm_spec_machine_config(VmSpecInputs {
-            name: &spec.name,
+            name: "devbox",
             id: "vm123",
             data_dir: &dir,
             spec: &spec,
-            network: &Network::None,
+            network: &RuntimeNetwork::None,
         })
         .expect("machine config should resolve");
 
@@ -387,12 +394,10 @@ mod tests {
     fn vm_spec_machine_config_does_not_attach_implicit_cidata_disk() {
         let dir = temp_dir("implicit-cidata");
         fs::create_dir_all(&dir).expect("create temp dir");
-        fs::write(dir.join(InstanceFile::CidataDisk.as_str()), b"cidata")
-            .expect("write cidata disk");
+        fs::write(dir.join(CIDATA_DISK), b"cidata").expect("write cidata disk");
 
         let spec = VmSpec {
             version: 1,
-            name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
@@ -418,11 +423,11 @@ mod tests {
         };
 
         let machine_config = vm_spec_machine_config(VmSpecInputs {
-            name: &spec.name,
+            name: "devbox",
             id: "vm789",
             data_dir: &dir,
             spec: &spec,
-            network: &Network::None,
+            network: &RuntimeNetwork::None,
         })
         .expect("machine config should resolve");
 
@@ -438,7 +443,6 @@ mod tests {
 
         let spec = VmSpec {
             version: 1,
-            name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
@@ -455,7 +459,7 @@ mod tests {
             },
             storage: Storage {
                 disks: vec![Disk {
-                    path: PathBuf::from(InstanceFile::CidataDisk.as_str()),
+                    path: PathBuf::from(CIDATA_DISK),
                     kind: DiskKind::Data,
                     read_only: true,
                 }],
@@ -470,18 +474,18 @@ mod tests {
         };
 
         let machine_config = vm_spec_machine_config(VmSpecInputs {
-            name: &spec.name,
+            name: "devbox",
             id: "vm790",
             data_dir: &dir,
             spec: &spec,
-            network: &Network::None,
+            network: &RuntimeNetwork::None,
         })
         .expect("machine config should resolve");
 
         assert_eq!(machine_config.config.data_disks.len(), 1);
         assert_eq!(
             machine_config.config.data_disks[0].path,
-            dir.join(InstanceFile::CidataDisk.as_str())
+            dir.join(CIDATA_DISK)
         );
         assert!(machine_config.config.data_disks[0].read_only);
 
@@ -499,7 +503,6 @@ mod tests {
 
         let spec = VmSpec {
             version: 1,
-            name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
@@ -533,13 +536,13 @@ mod tests {
             },
             guest: None,
         };
-        let runtime_network = Network::UnixDatagram {
+        let runtime_network = RuntimeNetwork::UnixDatagram {
             path: PathBuf::from("/tmp/gvproxy.sock"),
             mac: "02:19:e0:00:e2:e6".to_string(),
         };
 
         let machine_config = vm_spec_machine_config(VmSpecInputs {
-            name: &spec.name,
+            name: "devbox",
             id: "vm456",
             data_dir: &dir,
             spec: &spec,

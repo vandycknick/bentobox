@@ -1,7 +1,8 @@
-use bento_core::MachineId;
+use bento_core::{MachineId, VmSpec};
 
 use crate::models::{
-    Machine, NetworkAttachment, NetworkDefinition, NetworkInstance, RequestedNetwork,
+    Machine, MachineRuntime, NetworkAttachment, NetworkDefinition, NetworkInstance,
+    RequestedNetwork,
 };
 use crate::LibVmError;
 
@@ -16,12 +17,23 @@ pub(crate) trait Database: Sized + Clone + Send + Sync + 'static {
         machine_id: MachineId,
         network: &RequestedNetwork,
     ) -> Result<(), LibVmError>;
+    async fn update_machine_config(
+        &self,
+        machine_id: MachineId,
+        config: &VmSpec,
+    ) -> Result<(), LibVmError>;
     async fn get_machine_by_id(&self, id: MachineId) -> Result<Option<Machine>, LibVmError>;
     async fn get_machine_by_name(&self, name: &str) -> Result<Option<Machine>, LibVmError>;
     async fn get_machine_by_id_prefix(&self, prefix: &str) -> Result<Vec<Machine>, LibVmError>;
     async fn list_machines(&self) -> Result<Vec<Machine>, LibVmError>;
     async fn allocate_ephemeral_name(&self, prefix: &str) -> Result<String, LibVmError>;
     async fn remove_machine(&self, machine: &Machine) -> Result<(), LibVmError>;
+    async fn get_machine_runtime(
+        &self,
+        machine_id: MachineId,
+    ) -> Result<Option<MachineRuntime>, LibVmError>;
+    async fn upsert_machine_runtime(&self, runtime: &MachineRuntime) -> Result<(), LibVmError>;
+    async fn remove_machine_runtime(&self, machine_id: MachineId) -> Result<(), LibVmError>;
 
     async fn get_network_attachment(
         &self,

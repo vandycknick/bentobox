@@ -131,7 +131,6 @@ mod tests {
     fn sample_spec(guest: Option<GuestSpec>) -> VmSpec {
         VmSpec {
             version: 1,
-            name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,

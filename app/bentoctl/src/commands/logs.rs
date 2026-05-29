@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter};
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Duration;
 
-use bento_core::InstanceFile;
+use bento_libvm::InstanceFile;
 use bento_libvm::{LibVm, MachineRef};
 use clap::Args;
 

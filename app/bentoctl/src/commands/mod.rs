@@ -6,6 +6,7 @@ use crate::constants::HELP_TEMPLATE;
 use eyre::Context;
 
 pub mod create;
+pub mod edit;
 pub mod exec;
 pub mod images;
 pub mod inspect;
@@ -49,6 +50,7 @@ pub enum Command {
     Rm(rm::Cmd),
     Shell(shell::Cmd),
     Exec(exec::Cmd),
+    Edit(edit::Cmd),
     #[command(visible_alias = "ls")]
     List(list::Cmd),
     Status(status::Cmd),
@@ -74,6 +76,7 @@ impl Display for Command {
             Command::Rm(cmd) => write!(f, "rm {}", cmd),
             Command::Shell(cmd) => write!(f, "shell {}", cmd),
             Command::Exec(cmd) => write!(f, "exec {}", cmd),
+            Command::Edit(cmd) => write!(f, "edit {}", cmd),
             Command::List(_) => write!(f, "list"),
             Command::Status(cmd) => write!(f, "status {}", cmd),
             Command::Inspect(cmd) => write!(f, "inspect {}", cmd),
@@ -135,6 +138,10 @@ impl BentoCtlCmd {
                 cmd.run(&libvm).await
             }
             Command::Exec(cmd) => {
+                let libvm = libvm().await?;
+                cmd.run(&libvm).await
+            }
+            Command::Edit(cmd) => {
                 let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }

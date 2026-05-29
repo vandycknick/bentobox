@@ -1,7 +1,6 @@
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 
-use bento_core::InstanceFile;
 use clap::Parser;
 
 mod agent;
@@ -25,8 +24,29 @@ struct Args {
     #[arg(long, help = "identifier of the virtual machine")]
     id: String,
 
+    #[arg(long, help = "human-readable name of the virtual machine")]
+    name: String,
+
     #[arg(long = "data-dir")]
     data_dir: PathBuf,
+
+    #[arg(long = "pidfile")]
+    pidfile: PathBuf,
+
+    #[arg(long = "config")]
+    config: PathBuf,
+
+    #[arg(long = "socket")]
+    socket: PathBuf,
+
+    #[arg(long = "serial-log")]
+    serial_log: PathBuf,
+
+    #[arg(long = "trace-log")]
+    trace_log: PathBuf,
+
+    #[arg(long = "network")]
+    network: Vec<String>,
 
     #[arg(long, hide = true)]
     foreground: bool,
@@ -51,13 +71,11 @@ fn main() -> eyre::Result<()> {
     let sync_reporter = SyncReporter::from_fd(inherited_fds.syncpipe)
         .map_err(|err| eyre::eyre!("open syncpipe reporter: {err}"))?;
 
-    let trace_path = args.data_dir.join(InstanceFile::VmmonTraceLog.as_str());
-
     let trace_file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&trace_path)
-        .map_err(|err| eyre::eyre!("open {}: {err}", trace_path.display()))?;
+        .open(&args.trace_log)
+        .map_err(|err| eyre::eyre!("open {}: {err}", args.trace_log.display()))?;
 
     let (writer, _guard) = tracing_appender::non_blocking(trace_file);
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -81,10 +99,23 @@ fn main() -> eyre::Result<()> {
 async fn run(args: Args, start_gate: StartGate, sync_reporter: SyncReporter) -> eyre::Result<()> {
     let mut start_gate = start_gate;
     let mut sync_reporter = sync_reporter;
-    let runtime = RuntimeContext::new(args.data_dir.clone());
-    let _guard = PidGuard::create(&runtime.file(InstanceFile::VmmonPid)).await?;
+    let runtime = RuntimeContext::new(
+        args.data_dir.clone(),
+        args.config.clone(),
+        args.socket.clone(),
+        args.serial_log.clone(),
+    );
+    let _guard = PidGuard::create(&args.pidfile).await?;
 
-    let result = match startup::init(&runtime, &args.id, &mut start_gate).await {
+    let result = match startup::init(
+        &runtime,
+        &args.id,
+        &args.name,
+        &args.network,
+        &mut start_gate,
+    )
+    .await
+    {
         Ok(ctx) => match services::start_services(&runtime, &ctx, &mut sync_reporter).await {
             Ok(handles) => shutdown::run(runtime, ctx, handles).await,
             Err(err) => Err(err),
@@ -121,8 +152,23 @@ fn daemonize(args: &Args, inherited_fds: InheritedPipeFds) -> eyre::Result<()> {
     let mut cmd = Command::new(std::env::current_exe()?);
     cmd.arg("--id")
         .arg(&args.id)
+        .arg("--name")
+        .arg(&args.name)
         .arg("--data-dir")
-        .arg(&args.data_dir);
+        .arg(&args.data_dir)
+        .arg("--pidfile")
+        .arg(&args.pidfile)
+        .arg("--config")
+        .arg(&args.config)
+        .arg("--socket")
+        .arg(&args.socket)
+        .arg("--serial-log")
+        .arg(&args.serial_log)
+        .arg("--trace-log")
+        .arg(&args.trace_log);
+    for network in &args.network {
+        cmd.arg("--network").arg(network);
+    }
     inherited_fds.clear_cloexec()?;
     unsafe {
         cmd.pre_exec(|| {

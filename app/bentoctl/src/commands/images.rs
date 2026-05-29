@@ -2,11 +2,11 @@ use std::fmt::{Display, Formatter};
 use std::io::Write;
 use std::path::PathBuf;
 
-use bento_core::InstanceFile;
 use bento_libvm::images::metadata::{
     host_arch, ImageMetadata, ImageMetadataBootstrap, ImageMetadataDefaults,
 };
 use bento_libvm::images::store::{human_size, image_size_bytes, ImageStore};
+use bento_libvm::InstanceFile;
 use bento_libvm::{LibVm, MachineRef};
 use clap::{Args, Subcommand};
 use tabwriter::TabWriter;
@@ -111,16 +111,13 @@ impl Cmd {
                     .map_err(|e| eyre::eyre!("initialize bento-libvm: {e}"))?;
                 let machine_ref = MachineRef::parse(cmd.vm.clone())?;
                 let machine = libvm.inspect(&machine_ref).await?;
-                if machine.status.is_running() {
-                    eyre::bail!(
-                        "instance {} must be stopped before packing",
-                        machine.spec.name
-                    );
+                if machine.is_running() {
+                    eyre::bail!("instance {} must be stopped before packing", machine.name);
                 }
 
                 let root_disk_path = machine.dir.join(InstanceFile::RootDisk.as_str());
                 if !root_disk_path.is_file() {
-                    eyre::bail!("instance {} has no root disk to pack", machine.spec.name);
+                    eyre::bail!("instance {} has no root disk to pack", machine.name);
                 }
 
                 let kernel_path = if cmd.include_kernel {

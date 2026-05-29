@@ -1,8 +1,9 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use bento_core::{InstanceFile, MachineId};
+use bento_core::MachineId;
 
+use crate::InstanceFile;
 use crate::LibVmError;
 
 pub const STATE_DB_FILE_NAME: &str = "state.db";
@@ -60,6 +61,15 @@ impl Layout {
             .join(InstanceFile::VmmonTraceLog.as_str())
     }
 
+    pub fn monitor_serial_log_path(&self, machine_id: MachineId) -> PathBuf {
+        self.instance_dir(machine_id)
+            .join(InstanceFile::SerialLog.as_str())
+    }
+
+    pub fn machine_lock_path(&self, machine_id: MachineId) -> PathBuf {
+        self.instance_dir(machine_id).join("vm.lock")
+    }
+
     pub fn net_dir(&self) -> PathBuf {
         self.data_dir.join("net")
     }
@@ -70,10 +80,6 @@ impl Layout {
 
     pub fn instance_network_link(&self, machine_id: MachineId) -> PathBuf {
         self.instance_dir(machine_id).join("net")
-    }
-
-    pub fn network_runtime_path(&self, network_id: &str) -> PathBuf {
-        self.network_instance_dir(network_id).join("runtime.json")
     }
 
     pub fn network_policy_path(&self, network_id: &str) -> PathBuf {
@@ -149,7 +155,9 @@ fn absolute_path(name: &'static str, value: OsString) -> Result<PathBuf, LibVmEr
 #[cfg(test)]
 mod tests {
     use super::{resolve_data_dir_from, Layout};
-    use bento_core::{InstanceFile, MachineId};
+    use bento_core::MachineId;
+
+    use crate::InstanceFile;
     use std::path::PathBuf;
 
     #[test]
@@ -207,10 +215,6 @@ mod tests {
             PathBuf::from("/tmp/bento/instances")
                 .join(machine_id.to_string())
                 .join("net")
-        );
-        assert_eq!(
-            layout.network_runtime_path(network_id),
-            PathBuf::from("/tmp/bento/net/net123/runtime.json")
         );
         assert_eq!(
             layout.network_policy_path(network_id),

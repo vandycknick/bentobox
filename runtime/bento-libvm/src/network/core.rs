@@ -1,9 +1,11 @@
-use bento_core::{Network, NetworkPolicySpec};
+use crate::NetworkPolicySpec;
 
 use crate::global_config::NetworkingConfig;
 use crate::models::Machine;
 use crate::store::Sqlite;
 use crate::{Layout, LibVmError};
+
+use super::RuntimeNetwork;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NetworkScope {
@@ -25,7 +27,7 @@ pub(super) struct NetworkDriverContext<'a> {
 }
 
 pub(super) struct PreparedNetwork {
-    pub(super) attachment: Network,
+    pub(super) attachment: RuntimeNetwork,
 }
 
 pub(super) trait NetworkDriver {

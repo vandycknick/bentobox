@@ -1,7 +1,7 @@
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 
-use bento_libvm::{LibVm, MachineStatus};
+use bento_libvm::{LibVm, MachineRuntimeState};
 use clap::Args;
 use tabwriter::TabWriter;
 
@@ -33,8 +33,8 @@ impl Cmd {
                 .map(|machine| {
                     serde_json::json!({
                         "id": machine.id.to_string(),
-                        "name": machine.spec.name,
-                        "state": state_label(machine.status),
+                        "name": machine.name,
+                        "state": state_label(machine.state),
                         "profile": machine.metadata.get(PROFILE_METADATA_KEY),
                         "image": machine.image_ref,
                         "created_at": machine.created_at,
@@ -55,7 +55,7 @@ impl Cmd {
             let cpus = machine.spec.resources.cpus.to_string();
             let memory = machine.spec.resources.memory_mib.to_string();
             let created = relative_time(machine.created_at, now);
-            let status = status_label(machine.status, now);
+            let status = status_label(machine.state, machine.started_at, now);
             let profile = machine
                 .metadata
                 .get(PROFILE_METADATA_KEY)
@@ -71,7 +71,7 @@ impl Cmd {
                 &mut out,
                 "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 short_id(&machine.id.to_string()),
-                machine.spec.name,
+                machine.name,
                 status,
                 profile,
                 image,
@@ -92,20 +92,22 @@ fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
-fn state_label(status: MachineStatus) -> &'static str {
-    match status {
-        MachineStatus::Running { .. } => "running",
-        MachineStatus::Stopped => "stopped",
+fn state_label(state: MachineRuntimeState) -> &'static str {
+    if state.is_running() {
+        "running"
+    } else {
+        "stopped"
     }
 }
 
-fn status_label(status: MachineStatus, now: i64) -> String {
-    match status {
-        MachineStatus::Running { started_at } => {
-            let uptime = relative_time(started_at, now);
-            format!("Up {uptime}")
-        }
-        MachineStatus::Stopped => "Stopped".to_string(),
+fn status_label(state: MachineRuntimeState, started_at: Option<i64>, now: i64) -> String {
+    if state.is_running() {
+        let uptime = started_at
+            .map(|started_at| relative_time(started_at, now))
+            .unwrap_or_else(|| "N/A".to_string());
+        format!("Up {uptime}")
+    } else {
+        "Stopped".to_string()
     }
 }
 

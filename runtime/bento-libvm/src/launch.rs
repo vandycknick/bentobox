@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bento_core::agent::{
     AgentConfig, AgentDnsConfig, AgentForwardConfig, AgentSshConfig, AgentUdsForwardConfig,
 };
-use bento_core::{resolve_mount_location, Disk, DiskKind, InstanceFile, Network, VmSpec};
+use bento_core::{Disk, DiskKind, VmSpec};
 use bento_utils::format_mac;
 use eyre::Context;
 use fatfs::{format_volume, FileSystem, FormatVolumeOptions, FsOptions};
@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::global_config::{ensure_guest_binary, GlobalConfig};
 use crate::host_user::{self, HostUser};
+use crate::network::RuntimeNetwork;
 use crate::ssh_keys;
+use crate::{resolve_mount_location, InstanceFile};
 
 const GUEST_AGENT_CIDATA_ENTRY: &str = "bento-agent";
 const GUEST_AGENT_INSTALL_SCRIPT_ENTRY: &str = "bento-install-guest-agent.sh";
@@ -56,32 +58,45 @@ struct MonitorMount {
     writable: bool,
 }
 
-pub(crate) fn prepare_instance_runtime(instance_dir: &Path, network: &Network) -> eyre::Result<()> {
-    let mut spec = read_vm_spec_from_dir(instance_dir)?;
-    let guest_runtime = resolve_guest_runtime_config(&spec, network)?;
-    let needs_bootstrap = requires_bootstrap(&spec, &guest_runtime);
-    let spec_changed = reconcile_cidata_disk(&mut spec, needs_bootstrap);
+pub(crate) fn prepare_instance_runtime(
+    instance_dir: &Path,
+    name: &str,
+    spec: &mut VmSpec,
+    network: &RuntimeNetwork,
+) -> eyre::Result<()> {
+    let guest_runtime = resolve_guest_runtime_config(spec, network)?;
+    let needs_bootstrap = requires_bootstrap(spec, &guest_runtime);
+    reconcile_cidata_disk(spec, needs_bootstrap);
+    normalize_runtime_mounts(spec)?;
 
     rebuild_bootstrap(
         instance_dir,
-        &spec,
+        name,
+        spec,
         network,
         &guest_runtime,
         needs_bootstrap,
     )?;
-    if spec_changed {
-        write_vm_spec_to_dir(instance_dir, &spec)?;
-    }
+    write_vm_spec_to_dir(instance_dir, spec)?;
 
     Ok(())
 }
 
-fn read_vm_spec_from_dir(instance_dir: &Path) -> eyre::Result<VmSpec> {
-    let config_path = instance_dir.join(InstanceFile::Config.as_str());
-    let raw = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("read vm spec at {}", config_path.display()))?;
-    serde_yaml_ng::from_str(&raw)
-        .map_err(|err| eyre::eyre!("parse vm spec at {}: {}", config_path.display(), err))
+fn normalize_runtime_mounts(spec: &mut VmSpec) -> eyre::Result<()> {
+    for mount in &mut spec.mounts {
+        let resolved = resolve_mount_location(&mount.source)
+            .map_err(eyre::Report::msg)
+            .with_context(|| format!("resolve mount source {}", mount.source.display()))?;
+        mount.source = if resolved.is_absolute() {
+            resolved
+        } else {
+            std::env::current_dir()
+                .context("resolve current directory for relative mount source")?
+                .join(resolved)
+        };
+    }
+
+    Ok(())
 }
 
 fn write_vm_spec_to_dir(instance_dir: &Path, spec: &VmSpec) -> eyre::Result<()> {
@@ -133,20 +148,23 @@ fn reconcile_cidata_disk(spec: &mut VmSpec, required: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_network_config_for_instance, resolve_guest_runtime_config};
+    use super::{
+        normalize_runtime_mounts, render_network_config_for_instance, resolve_guest_runtime_config,
+    };
     use bento_core::{
-        Architecture, Boot, Disk, DiskKind, GuestOs, GuestSpec, InstanceFile, LifecycleSpec,
-        Network, Platform, PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode,
-        VsockEndpointSpec,
+        Architecture, Boot, Disk, DiskKind, GuestOs, GuestSpec, LifecycleSpec, Mount, Platform,
+        PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
+    use crate::network::RuntimeNetwork;
+    use crate::InstanceFile;
+
     fn sample_spec(kernel_cmdline: Vec<String>, guest_configured: bool) -> VmSpec {
         VmSpec {
             version: 1,
-            name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
@@ -172,10 +190,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn normalize_runtime_mounts_resolves_sources() {
+        let mut spec = sample_spec(Vec::new(), false);
+        spec.mounts = vec![Mount {
+            source: PathBuf::from("workspace"),
+            tag: "workspace".to_string(),
+            read_only: false,
+        }];
+
+        normalize_runtime_mounts(&mut spec).expect("normalize runtime mounts");
+
+        assert!(spec.mounts[0].source.is_absolute());
+        assert!(spec.mounts[0].source.ends_with("workspace"));
+    }
+
+    #[test]
+    fn normalize_runtime_mounts_rejects_unsupported_tilde_forms() {
+        let mut spec = sample_spec(Vec::new(), false);
+        spec.mounts = vec![Mount {
+            source: PathBuf::from("~somebody"),
+            tag: "bad".to_string(),
+            read_only: false,
+        }];
+
+        let err =
+            normalize_runtime_mounts(&mut spec).expect_err("unsupported tilde form should fail");
+
+        assert!(err
+            .root_cause()
+            .to_string()
+            .contains("only '~' and '~/...'"));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn network_config_for_libkrun_attachment_matches_generated_mac() {
-        let network = Network::UnixDatagram {
+        let network = RuntimeNetwork::UnixDatagram {
             path: PathBuf::from("/run/bento/net.sock"),
             mac: "02:00:00:00:00:01".to_string(),
         };
@@ -196,7 +247,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn network_config_for_vz_attachment_matches_generated_mac() {
-        let network = Network::UnixDatagram {
+        let network = RuntimeNetwork::UnixDatagram {
             path: PathBuf::from("/run/bento/net.sock"),
             mac: "02:00:00:00:00:01".to_string(),
         };
@@ -215,7 +266,7 @@ mod tests {
 
     #[test]
     fn network_config_for_vznat_matches_virtio_net_driver() {
-        let config = render_network_config_for_instance(&Network::VzNat { mac: None })
+        let config = render_network_config_for_instance(&RuntimeNetwork::VzNat { mac: None })
             .expect("network config should render")
             .expect("vznat should configure network");
 
@@ -248,7 +299,7 @@ mod tests {
     fn guest_runtime_defaults_to_ssh_and_dns_when_guest_is_enabled() {
         let runtime = resolve_guest_runtime_config(
             &sample_spec(Vec::new(), true),
-            &Network::UnixDatagram {
+            &RuntimeNetwork::UnixDatagram {
                 path: PathBuf::from("/run/bento/net.sock"),
                 mac: "02:00:00:00:00:01".to_string(),
             },
@@ -264,7 +315,7 @@ mod tests {
     fn guest_runtime_disables_dns_but_keeps_ssh_without_guest_networking() {
         let spec = sample_spec(Vec::new(), true);
 
-        let runtime = resolve_guest_runtime_config(&spec, &Network::None)
+        let runtime = resolve_guest_runtime_config(&spec, &RuntimeNetwork::None)
             .expect("runtime config should resolve");
 
         assert!(runtime.ssh.enabled);
@@ -274,8 +325,9 @@ mod tests {
 
     #[test]
     fn guest_runtime_disables_ssh_dns_and_forward_when_guest_is_disabled() {
-        let runtime = resolve_guest_runtime_config(&sample_spec(Vec::new(), false), &Network::None)
-            .expect("runtime config should resolve");
+        let runtime =
+            resolve_guest_runtime_config(&sample_spec(Vec::new(), false), &RuntimeNetwork::None)
+                .expect("runtime config should resolve");
 
         assert!(!runtime.ssh.enabled);
         assert!(!runtime.dns.enabled);
@@ -287,7 +339,7 @@ mod tests {
         let mut spec = sample_spec(Vec::new(), true);
         spec.vsock_endpoints.push(forward_endpoint(4100, None));
 
-        let runtime = resolve_guest_runtime_config(&spec, &Network::None)
+        let runtime = resolve_guest_runtime_config(&spec, &RuntimeNetwork::None)
             .expect("runtime config should resolve");
 
         assert!(runtime.forward.enabled);
@@ -314,7 +366,7 @@ mod tests {
             })),
         ));
 
-        let runtime = resolve_guest_runtime_config(&spec, &Network::None)
+        let runtime = resolve_guest_runtime_config(&spec, &RuntimeNetwork::None)
             .expect("runtime config should resolve");
 
         assert_eq!(
@@ -333,7 +385,7 @@ mod tests {
         let mut spec = sample_spec(Vec::new(), false);
         spec.vsock_endpoints.push(forward_endpoint(4100, None));
 
-        let runtime = resolve_guest_runtime_config(&spec, &Network::None)
+        let runtime = resolve_guest_runtime_config(&spec, &RuntimeNetwork::None)
             .expect("runtime config should resolve");
 
         assert!(!runtime.forward.enabled);
@@ -384,13 +436,16 @@ mod tests {
     }
 }
 
-fn resolve_guest_runtime_config(spec: &VmSpec, network: &Network) -> eyre::Result<AgentConfig> {
+fn resolve_guest_runtime_config(
+    spec: &VmSpec,
+    network: &RuntimeNetwork,
+) -> eyre::Result<AgentConfig> {
     Ok(AgentConfig {
         ssh: AgentSshConfig {
             enabled: spec.guest_agent().is_some(),
         },
         dns: AgentDnsConfig {
-            enabled: spec.guest_agent().is_some() && !matches!(network, Network::None),
+            enabled: spec.guest_agent().is_some() && !matches!(network, RuntimeNetwork::None),
             ..AgentDnsConfig::default()
         },
         forward: resolve_forward_runtime_config(spec)?,
@@ -442,8 +497,9 @@ fn requires_bootstrap(spec: &VmSpec, guest_runtime: &AgentConfig) -> bool {
 
 fn rebuild_bootstrap(
     instance_dir: &Path,
+    name: &str,
     spec: &VmSpec,
-    network: &Network,
+    network: &RuntimeNetwork,
     guest_runtime: &AgentConfig,
     required: bool,
 ) -> eyre::Result<()> {
@@ -461,6 +517,7 @@ fn rebuild_bootstrap(
 
     build_cidata_disk(
         instance_dir,
+        name,
         spec,
         &host_user,
         &user_keys.public_key_openssh,
@@ -471,10 +528,11 @@ fn rebuild_bootstrap(
 
 fn build_cidata_disk(
     instance_dir: &Path,
+    name: &str,
     spec: &VmSpec,
     host_user: &HostUser,
     ssh_public_key: &str,
-    network: &Network,
+    network: &RuntimeNetwork,
     guest_runtime: &AgentConfig,
 ) -> eyre::Result<()> {
     let global_config = GlobalConfig::load()?;
@@ -483,10 +541,10 @@ fn build_cidata_disk(
         .with_context(|| format!("read guest agent binary {}", agent_binary_path.display()))?;
 
     let user_data = render_user_data(spec, host_user, ssh_public_key)?;
-    let meta_data = render_meta_data(&spec.name)?;
+    let meta_data = render_meta_data(name)?;
     let network_config = render_network_config_for_instance(network)?;
     let agent_config = render_agent_config(guest_runtime)?;
-    let config_env = render_config_env(spec)?;
+    let config_env = render_config_env(name, spec)?;
     let iso_path = instance_dir.join(InstanceFile::CidataDisk.as_str());
 
     let mut files = vec![
@@ -799,16 +857,16 @@ enum GuestNetworkInterface {
     Mac { mac: [u8; 6] },
 }
 
-fn render_network_config_for_instance(network: &Network) -> eyre::Result<Option<String>> {
+fn render_network_config_for_instance(network: &RuntimeNetwork) -> eyre::Result<Option<String>> {
     match network {
-        Network::None => Ok(None),
-        Network::VzNat { .. } => render_network_config(GuestNetworkInterface::Driver {
+        RuntimeNetwork::None => Ok(None),
+        RuntimeNetwork::VzNat { .. } => render_network_config(GuestNetworkInterface::Driver {
             driver: "virtio_net",
         })
         .map(Some),
-        Network::UnixDatagram { mac, .. }
-        | Network::UnixStream { mac, .. }
-        | Network::Tap { mac, .. } => render_network_config(GuestNetworkInterface::Mac {
+        RuntimeNetwork::UnixDatagram { mac, .. }
+        | RuntimeNetwork::UnixStream { mac, .. }
+        | RuntimeNetwork::Tap { mac, .. } => render_network_config(GuestNetworkInterface::Mac {
             mac: parse_mac_string(mac)?,
         })
         .map(Some),
@@ -841,10 +899,7 @@ fn cloud_mount_entries(spec: &VmSpec) -> Vec<[String; 6]> {
     mounts(spec)
         .iter()
         .map(|mount| {
-            let path = resolve_mount_location(&mount.source)
-                .unwrap_or_else(|_| mount.source.clone())
-                .to_string_lossy()
-                .to_string();
+            let path = mount.source.to_string_lossy().to_string();
             [
                 mount.tag.clone(),
                 path,
@@ -876,13 +931,10 @@ fn render_agent_config(guest_runtime: &AgentConfig) -> eyre::Result<String> {
     serde_yaml_ng::to_string(guest_runtime).context("serialize agent config")
 }
 
-fn render_config_env(spec: &VmSpec) -> eyre::Result<String> {
+fn render_config_env(name: &str, spec: &VmSpec) -> eyre::Result<String> {
     let mut env = String::new();
 
-    env.push_str(&format!(
-        "BENTO_INSTANCE_NAME={}\n",
-        shell_quote(&spec.name)
-    ));
+    env.push_str(&format!("BENTO_INSTANCE_NAME={}\n", shell_quote(name)));
     env.push_str("BENTO_AGENT_CONFIG_PATH=/etc/bento/agent.yaml\n");
     env.push_str(&format!(
         "BENTO_ROSETTA={}\n",

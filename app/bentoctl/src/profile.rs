@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bento_core::Mount;
-use bento_core::{NetworkPolicySpec, NetworkProtocol};
 use bento_libvm::RequestedNetwork;
+use bento_libvm::{NetworkPolicySpec, NetworkProtocol};
 use eyre::{bail, Context};
 use serde::{Deserialize, Serialize};
 

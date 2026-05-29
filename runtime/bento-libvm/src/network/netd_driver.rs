@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use bento_core::{MachineId, Network, NetworkPolicyFeature, NetworkPolicySpec};
+use bento_core::MachineId;
 use bento_utils::format_mac;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -13,12 +13,12 @@ use tokio::time::sleep;
 
 use crate::models::{Machine, NetworkAttachment, NetworkInstance};
 use crate::store::{Database, Sqlite};
-use crate::{Layout, LibVmError};
+use crate::{Layout, LibVmError, NetworkPolicyFeature, NetworkPolicySpec};
 
 use super::core::{NetworkDriver, NetworkDriverContext, NetworkRequest, PreparedNetwork};
 use super::{
     ensure_instance_network_link, mac_from_machine_id, network_attachment_from_instance, now_unix,
-    remove_file_if_exists, remove_runtime_dir, serialize_json, write_runtime_file, DRIVER_NETD,
+    remove_file_if_exists, remove_runtime_dir, serialize_json, DRIVER_NETD,
 };
 
 const NETD_BINARY_ENV: &str = "NETD_BIN";
@@ -99,7 +99,6 @@ async fn prepare_netd_runtime(
     let default_audit_log_path = layout.network_audit_log_path(&network_id);
     let pcap_path = config.pcap.then(|| layout.network_pcap_path(&network_id));
     remove_file_if_exists(&socket_path)?;
-    remove_file_if_exists(&layout.network_runtime_path(&network_id))?;
     remove_file_if_exists(&policy_path)?;
     remove_file_if_exists(&default_audit_log_path)?;
     remove_file_if_exists(&pid_path)?;
@@ -155,11 +154,10 @@ async fn prepare_netd_runtime(
     }
 
     let mac = mac_from_machine_id(metadata.id);
-    let network = Network::UnixDatagram {
+    let network = super::RuntimeNetwork::UnixDatagram {
         path: socket_path.clone(),
         mac: format_mac(mac),
     };
-    write_runtime_file(&runtime_dir, &network)?;
     let driver_state = NetdDriverState {
         helper_pid: pid,
         subnet: config.subnet.clone(),

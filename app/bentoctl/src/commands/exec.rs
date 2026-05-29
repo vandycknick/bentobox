@@ -45,7 +45,7 @@ impl Cmd {
             .inspect(&MachineRef::parse(self.name.clone())?)
             .await?;
 
-        if !machine.status.is_running() {
+        if !machine.is_running() {
             return Err(bento_libvm::LibVmError::MachineNotRunning {
                 reference: self.name.clone(),
             }

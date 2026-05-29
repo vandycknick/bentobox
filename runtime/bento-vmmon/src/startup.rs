@@ -3,14 +3,17 @@ use std::io::{self, Read, Write};
 use std::os::fd::{BorrowedFd, FromRawFd, RawFd};
 use std::sync::Arc;
 
-use bento_core::{InstanceFile, Network, VmSpec};
+use std::path::PathBuf;
+
+use bento_core::VmSpec;
 use bento_virt::VirtualMachine;
 use eyre::Context;
-use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::{DaemonContext, RuntimeContext};
-use crate::machine::{machine_identifier_path_from_dir, vm_spec_machine_config, VmSpecInputs};
+use crate::machine::{
+    machine_identifier_path_from_dir, vm_spec_machine_config, RuntimeNetwork, VmSpecInputs,
+};
 use crate::state::{new_instance_store, Action};
 
 pub const ENV_STARTPIPE: &str = "_VM_STARTPIPE";
@@ -125,16 +128,18 @@ impl SyncReporter {
 pub async fn init(
     runtime: &RuntimeContext,
     machine_id: &str,
+    name: &str,
+    network_args: &[String],
     start_gate: &mut StartGate,
 ) -> eyre::Result<DaemonContext> {
     let spec = load_spec(runtime)?;
-    let network = load_network_runtime(runtime)?;
+    let network = parse_network_args(network_args)?;
 
-    tracing::info!(instance = %spec.name, "vmmon starting");
-    remove_stale_socket(&runtime.file(InstanceFile::VmmonSocket))?;
+    tracing::info!(instance = %name, "vmmon starting");
+    remove_stale_socket(runtime.socket())?;
 
     let machine_config = vm_spec_machine_config(VmSpecInputs {
-        name: &spec.name,
+        name,
         id: machine_id,
         data_dir: runtime.dir(),
         spec: &spec,
@@ -165,32 +170,55 @@ pub async fn init(
     })
 }
 
-#[derive(Debug, Deserialize)]
-struct NetworkRuntimeFile {
-    attachment: Network,
-}
-
 fn load_spec(runtime: &RuntimeContext) -> eyre::Result<VmSpec> {
-    let config_path = runtime.file(InstanceFile::Config);
-    let raw = std::fs::read_to_string(&config_path)
-        .wrap_err_with(|| format!("read vm spec at {}", config_path.display()))?;
+    let raw = std::fs::read_to_string(runtime.config())
+        .wrap_err_with(|| format!("read vm spec at {}", runtime.config().display()))?;
     serde_yaml_ng::from_str(&raw)
-        .map_err(|err| eyre::eyre!("parse vm spec at {}: {}", config_path.display(), err))
+        .map_err(|err| eyre::eyre!("parse vm spec at {}: {}", runtime.config().display(), err))
 }
 
-fn load_network_runtime(runtime: &RuntimeContext) -> eyre::Result<Network> {
-    let runtime_path = runtime.dir().join("net/runtime.json");
-    let raw = match std::fs::read_to_string(&runtime_path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Network::None),
-        Err(err) => {
-            return Err(err)
-                .wrap_err_with(|| format!("read network runtime at {}", runtime_path.display()))
-        }
+fn parse_network_args(values: &[String]) -> eyre::Result<RuntimeNetwork> {
+    match values {
+        [] => Ok(RuntimeNetwork::None),
+        [value] => parse_network_arg(value),
+        _ => Err(eyre::eyre!(
+            "multiple --network attachments are not supported by this virt backend yet"
+        )),
+    }
+}
+
+fn parse_network_arg(value: &str) -> eyre::Result<RuntimeNetwork> {
+    let parts = value.split(',').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["none"] => Ok(RuntimeNetwork::None),
+        ["vznat"] => Ok(RuntimeNetwork::VzNat { mac: None }),
+        ["vznat", option] => Ok(RuntimeNetwork::VzNat {
+            mac: Some(parse_key_value(option, "mac")?.to_string()),
+        }),
+        ["unixdg", path, mac] => Ok(RuntimeNetwork::UnixDatagram {
+            path: PathBuf::from(path),
+            mac: parse_key_value(mac, "mac")?.to_string(),
+        }),
+        ["unixstream", path, mac] => Ok(RuntimeNetwork::UnixStream {
+            path: PathBuf::from(path),
+            mac: parse_key_value(mac, "mac")?.to_string(),
+        }),
+        ["tap", name, mac] => Ok(RuntimeNetwork::Tap {
+            name: name.to_string(),
+            mac: parse_key_value(mac, "mac")?.to_string(),
+        }),
+        _ => Err(eyre::eyre!("invalid --network value {value:?}")),
+    }
+}
+
+fn parse_key_value<'a>(value: &'a str, key: &str) -> eyre::Result<&'a str> {
+    let Some((actual_key, actual_value)) = value.split_once('=') else {
+        return Err(eyre::eyre!("expected {key}=... in {value:?}"));
     };
-    let runtime: NetworkRuntimeFile = serde_json::from_str(&raw)
-        .wrap_err_with(|| format!("parse network runtime at {}", runtime_path.display()))?;
-    Ok(runtime.attachment)
+    if actual_key != key || actual_value.is_empty() {
+        return Err(eyre::eyre!("expected {key}=... in {value:?}"));
+    }
+    Ok(actual_value)
 }
 
 fn remove_stale_socket(path: &std::path::Path) -> eyre::Result<()> {

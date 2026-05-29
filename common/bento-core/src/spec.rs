@@ -9,7 +9,6 @@ pub const DEFAULT_GUEST_CONTROL_PORT: u32 = 1027;
 #[serde(deny_unknown_fields)]
 pub struct VmSpec {
     pub version: u32,
-    pub name: String,
     pub platform: Platform,
     pub resources: Resources,
     pub boot: Boot,
@@ -198,92 +197,6 @@ pub struct Mount {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Network {
-    None,
-    VzNat {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mac: Option<String>,
-    },
-    UnixDatagram {
-        path: PathBuf,
-        mac: String,
-    },
-    UnixStream {
-        path: PathBuf,
-        mac: String,
-    },
-    Tap {
-        name: String,
-        mac: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NetworkPolicySpec {
-    pub default_action: PolicyAction,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub audit_log: Option<AuditLogSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cidr_rules: Vec<CidrRuleSpec>,
-}
-
-impl NetworkPolicySpec {
-    pub fn required_features(&self) -> std::collections::BTreeSet<NetworkPolicyFeature> {
-        let mut features = std::collections::BTreeSet::new();
-        if !self.cidr_rules.is_empty() {
-            features.insert(NetworkPolicyFeature::CidrRules);
-        }
-        features
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PolicyAction {
-    Allow,
-    Deny,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuditLogSpec {
-    pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CidrRuleSpec {
-    pub name: String,
-    pub action: PolicyAction,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub protocols: Vec<NetworkProtocol>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub source_cidrs: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dest_cidrs: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NetworkProtocol {
-    Tcp,
-    Udp,
-    Icmp,
-    Any,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum NetworkPolicyFeature {
-    CidrRules,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub nested_virtualization: bool,
@@ -316,7 +229,6 @@ mod tests {
     fn sample_vm_spec() -> VmSpec {
         VmSpec {
             version: 1,
-            name: "dev".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
@@ -403,6 +315,7 @@ mod tests {
         assert!(yaml.contains("guest:"));
         assert!(yaml.contains("control_port: 1027"));
         assert!(!yaml.contains("network:"));
+        assert!(!yaml.contains("name: dev"));
         assert!(yaml.contains("mode: connect"));
         assert!(!yaml.contains("guest_enabled"));
     }
@@ -411,7 +324,6 @@ mod tests {
     fn vm_spec_defaults_missing_vsock_endpoints() {
         let yaml = r#"
 version: 1
-name: dev
 platform:
   guest_os: linux
   architecture: aarch64
@@ -443,7 +355,6 @@ guest:
     fn vm_spec_rejects_legacy_guest_enabled_setting() {
         let yaml = r#"
 version: 1
-name: dev
 platform:
   guest_os: linux
   architecture: aarch64
@@ -473,7 +384,6 @@ settings:
     fn vm_spec_rejects_backend_field() {
         let yaml = r#"
 version: 1
-name: dev
 platform:
   guest_os: linux
   architecture: aarch64
@@ -505,7 +415,6 @@ guest:
     fn vm_spec_rejects_legacy_endpoints_field() {
         let yaml = r#"
 version: 1
-name: dev
 platform:
   guest_os: linux
   architecture: aarch64

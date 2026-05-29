@@ -18,6 +18,11 @@ impl Drop for PidGuard {
 impl PidGuard {
     pub async fn create(path: &Path) -> eyre::Result<Self> {
         let pid = std::process::id();
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .context(format!("create pid parent {}", parent.display()))?;
+        }
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)

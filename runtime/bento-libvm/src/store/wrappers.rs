@@ -6,10 +6,12 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row};
 
 use crate::models::{
-    Machine, NetworkAttachment, NetworkDefinition, NetworkDriverPreference, NetworkInstance,
+    Machine, MachineRuntime, MachineRuntimeState, NetworkAttachment, NetworkDefinition,
+    NetworkDriverPreference, NetworkInstance,
 };
 
 pub(crate) struct DbMachine(pub(crate) Machine);
+pub(crate) struct DbMachineRuntime(pub(crate) MachineRuntime);
 pub(crate) struct DbNetworkAttachment(pub(crate) NetworkAttachment);
 pub(crate) struct DbNetworkInstance(pub(crate) NetworkInstance);
 pub(crate) struct DbNetworkDefinition(pub(crate) NetworkDefinition);
@@ -21,6 +23,7 @@ impl<'row> FromRow<'row, SqliteRow> for DbMachine {
         Ok(Self(Machine {
             id,
             name: row.try_get("name")?,
+            config: deserialize_json(row.try_get("config_json")?, "machines.config_json")?,
             instance_dir: row.try_get("instance_dir")?,
             created_at: row.try_get("created_at")?,
             modified_at: row.try_get("modified_at")?,
@@ -28,6 +31,25 @@ impl<'row> FromRow<'row, SqliteRow> for DbMachine {
             labels: deserialize_json(row.try_get("labels")?, "machines.labels")?,
             metadata: deserialize_json(row.try_get("metadata")?, "machines.metadata")?,
             network: deserialize_json(row.try_get("network")?, "machines.network")?,
+        }))
+    }
+}
+
+impl<'row> FromRow<'row, SqliteRow> for DbMachineRuntime {
+    fn from_row(row: &'row SqliteRow) -> sqlx::Result<Self> {
+        let id_str: String = row.try_get("machine_id")?;
+        let machine_id = parse_machine_id(&id_str, "machine_runtime.machine_id")?;
+        let state_str: String = row.try_get("state")?;
+        let state = MachineRuntimeState::parse(&state_str).map_err(|err| {
+            column_decode_error("machine_runtime.state", std::io::Error::other(err))
+        })?;
+        Ok(Self(MachineRuntime {
+            machine_id,
+            state,
+            vmmon_pid: row.try_get("vmmon_pid")?,
+            started_at: row.try_get("started_at")?,
+            last_error: row.try_get("last_error")?,
+            updated_at: row.try_get("updated_at")?,
         }))
     }
 }

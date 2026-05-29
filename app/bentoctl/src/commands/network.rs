@@ -166,10 +166,10 @@ async fn set_machine_network(libvm: &LibVm, cmd: &SetCmd) -> eyre::Result<()> {
         .await?;
     println!(
         "network for {} set to {}",
-        machine.spec.name,
+        machine.name,
         machine.network.name()
     );
-    if machine.status.is_running() {
+    if machine.is_running() {
         println!("change applies on next restart");
     }
     Ok(())

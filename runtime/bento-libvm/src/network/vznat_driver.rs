@@ -1,13 +1,11 @@
 use std::fs;
 
-use bento_core::Network;
-
 use crate::LibVmError;
 
 use super::core::{
     NetworkDriver, NetworkDriverContext, NetworkRequest, NetworkScope, PreparedNetwork,
 };
-use super::{remove_attached_network, write_runtime_file, DRIVER_VZNAT};
+use super::{remove_attached_network, RuntimeNetwork, DRIVER_VZNAT};
 
 pub(super) struct VzNatDriver;
 
@@ -40,8 +38,7 @@ impl NetworkDriver for VzNatDriver {
         remove_attached_network(ctx.layout, ctx.db, ctx.metadata.id).await?;
         let runtime_dir = ctx.layout.instance_network_link(ctx.metadata.id);
         fs::create_dir_all(&runtime_dir)?;
-        let attachment = Network::VzNat { mac: None };
-        write_runtime_file(&runtime_dir, &attachment)?;
+        let attachment = RuntimeNetwork::VzNat { mac: None };
         Ok(PreparedNetwork { attachment })
     }
 }
@@ -55,14 +52,21 @@ mod tests {
     use crate::global_config::{NetdConfig, NetworkingConfig};
     use crate::models::{Machine, NetworkDriverKind, RequestedNetwork};
     use crate::network::core::{NetworkDriver, NetworkDriverContext, NetworkRequest, NetworkScope};
+    use crate::network::RuntimeNetwork;
     use crate::store::{Database, Sqlite};
     use crate::Layout;
-    use bento_core::{MachineId, NetworkPolicySpec, PolicyAction};
+    use bento_core::{
+        Architecture, Boot, GuestOs, MachineId, Platform, Resources, Settings, Storage, VmSpec,
+    };
+
+    use crate::{NetworkPolicySpec, PolicyAction};
 
     fn machine_from_path(id: MachineId, name: String, instance_dir: &Path) -> Machine {
+        let config = sample_vm_spec();
         Machine {
             id,
             name,
+            config,
             instance_dir: instance_dir.display().to_string(),
             created_at: 1,
             modified_at: 1,
@@ -70,6 +74,34 @@ mod tests {
             labels: BTreeMap::new(),
             metadata: BTreeMap::new(),
             network: RequestedNetwork::default(),
+        }
+    }
+
+    fn sample_vm_spec() -> VmSpec {
+        VmSpec {
+            version: 1,
+            platform: Platform {
+                guest_os: GuestOs::Linux,
+                architecture: Architecture::Aarch64,
+            },
+            resources: Resources {
+                cpus: 2,
+                memory_mib: 1024,
+            },
+            boot: Boot {
+                kernel: None,
+                initramfs: None,
+                kernel_cmdline: Vec::new(),
+                bootstrap: None,
+            },
+            storage: Storage { disks: Vec::new() },
+            mounts: Vec::new(),
+            vsock_endpoints: Vec::new(),
+            settings: Settings {
+                nested_virtualization: false,
+                rosetta: false,
+            },
+            guest: None,
         }
     }
 
@@ -154,18 +186,6 @@ mod tests {
             .await
             .expect("prepare vznat runtime");
 
-        assert_eq!(
-            prepared.attachment,
-            bento_core::Network::VzNat { mac: None }
-        );
-        let raw = std::fs::read_to_string(
-            layout
-                .instance_network_link(machine_id)
-                .join("runtime.json"),
-        )
-        .expect("read runtime file");
-        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse runtime");
-
-        assert_eq!(value["attachment"]["kind"], "vz_nat");
+        assert_eq!(prepared.attachment, RuntimeNetwork::VzNat { mac: None });
     }
 }

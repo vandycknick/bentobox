@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::images::store::ImageStore;
 use crate::launch::prepare_instance_runtime;
-use bento_core::InstanceFile;
+use crate::InstanceFile;
 use bento_core::{
     Architecture, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec, MachineId, Mount, Platform,
     Resources, Settings, Storage, VmSpec,
@@ -16,17 +16,20 @@ use bento_core::{
 use bento_protocol::agent_port_arg;
 use bento_protocol::v1::InspectResponse;
 use nix::{
-    sys::signal::Signal,
+    errno::Errno,
+    sys::signal::{kill, Signal},
     unistd::{pipe, Pid},
 };
 
 use crate::layout::CONFIG_FILE_NAME;
 use crate::models::{
-    validate_machine_name, Machine, MachineRef, NetworkDefinition, RequestedNetwork,
+    validate_machine_name, Machine, MachineRef, MachineRuntime, MachineRuntimeState,
+    NetworkDefinition, RequestedNetwork,
 };
 use crate::monitor;
-use crate::network::{prepare_network_runtime, reconcile_network_runtime};
+use crate::network::{prepare_network_runtime, reconcile_network_runtime, RuntimeNetwork};
 use crate::store::{Database, Sqlite};
+use crate::vm_lock::VmLock;
 use crate::{Layout, LibVmError};
 
 const BYTES_PER_GB: u64 = 1_000_000_000;
@@ -56,9 +59,13 @@ pub struct CreateMachineRequest {
 #[derive(Debug, Clone)]
 pub struct MachineRecord {
     pub id: MachineId,
+    pub name: String,
     pub spec: VmSpec,
     pub dir: PathBuf,
-    pub status: MachineStatus,
+    pub state: MachineRuntimeState,
+    /// Unix timestamp when the VM started (derived from the pidfile mtime),
+    /// present only while the machine is running.
+    pub started_at: Option<i64>,
     pub created_at: i64,
     pub image_ref: String,
     pub labels: BTreeMap<String, String>,
@@ -66,19 +73,23 @@ pub struct MachineRecord {
     pub network: RequestedNetwork,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MachineStatus {
-    /// VM is running. `started_at` is the unix timestamp when it started
-    /// (derived from the pidfile mtime).
-    Running {
-        started_at: i64,
-    },
-    Stopped,
+impl MachineRecord {
+    pub fn is_running(&self) -> bool {
+        self.state.is_running()
+    }
 }
 
-impl MachineStatus {
-    pub fn is_running(&self) -> bool {
-        matches!(self, Self::Running { .. })
+/// Live runtime observation for a machine: its reconciled state plus the
+/// start timestamp when running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeStatus {
+    state: MachineRuntimeState,
+    started_at: Option<i64>,
+}
+
+impl RuntimeStatus {
+    fn is_running(&self) -> bool {
+        self.state.is_running()
     }
 }
 
@@ -89,6 +100,7 @@ pub struct LibVm {
 
 struct PendingMachine {
     id: MachineId,
+    name: String,
     spec: VmSpec,
     staged_dir: PathBuf,
     final_dir: PathBuf,
@@ -97,6 +109,34 @@ struct PendingMachine {
     metadata: BTreeMap<String, String>,
     network: RequestedNetwork,
     committed: bool,
+}
+
+struct ObservedRuntime {
+    state: MachineRuntimeState,
+    pid: Option<i32>,
+    started_at: Option<i64>,
+    last_error: Option<String>,
+    needs_writeback: bool,
+}
+
+impl ObservedRuntime {
+    fn runtime(&self, machine_id: MachineId) -> MachineRuntime {
+        MachineRuntime {
+            machine_id,
+            state: self.state,
+            vmmon_pid: self.pid,
+            started_at: self.started_at,
+            last_error: self.last_error.clone(),
+            updated_at: current_unix(),
+        }
+    }
+
+    fn status(&self) -> RuntimeStatus {
+        RuntimeStatus {
+            state: self.state,
+            started_at: self.started_at,
+        }
+    }
 }
 
 impl LibVm {
@@ -151,9 +191,10 @@ impl LibVm {
             .memory_mib
             .unwrap_or(selected_image.metadata.defaults.memory_mib);
 
+        let mounts = assign_mount_tags(request.mounts);
+
         let spec = VmSpec {
             version: 1,
-            name: request.name.clone(),
             platform: Platform {
                 guest_os: guest_os_from_image(&selected_image.metadata.os)?,
                 architecture: architecture_from_image(&selected_image.metadata.arch)?,
@@ -181,7 +222,7 @@ impl LibVm {
                 }))
                 .collect(),
             },
-            mounts: assign_mount_tags(request.mounts),
+            mounts,
             vsock_endpoints: Vec::new(),
             settings: Settings {
                 nested_virtualization: request.nested_virtualization,
@@ -195,6 +236,7 @@ impl LibVm {
 
         let pending = self
             .create_pending(
+                request.name.clone(),
                 spec,
                 request.image_ref.clone(),
                 request.labels,
@@ -214,23 +256,17 @@ impl LibVm {
 
     async fn create_pending(
         &self,
+        name: String,
         spec: VmSpec,
         image_ref: String,
         labels: BTreeMap<String, String>,
         metadata: BTreeMap<String, String>,
         network: RequestedNetwork,
     ) -> Result<PendingMachine, LibVmError> {
-        validate_machine_name(&spec.name)?;
+        validate_machine_name(&name)?;
 
-        if self
-            .db
-            .get_machine_by_name(spec.name.as_str())
-            .await?
-            .is_some()
-        {
-            return Err(LibVmError::MachineAlreadyExists {
-                name: spec.name.clone(),
-            });
+        if self.db.get_machine_by_name(name.as_str()).await?.is_some() {
+            return Err(LibVmError::MachineAlreadyExists { name });
         }
 
         let id = MachineId::new();
@@ -242,7 +278,7 @@ impl LibVm {
         let staged_dir = create_staging_dir(&self.layout)?;
         let config = serde_yaml_ng::to_string(&spec).map_err(|source| {
             LibVmError::VmSpecSerializeFailed {
-                name: spec.name.clone(),
+                name: name.clone(),
                 source,
             }
         })?;
@@ -250,6 +286,7 @@ impl LibVm {
 
         Ok(PendingMachine {
             id,
+            name,
             spec,
             staged_dir,
             final_dir,
@@ -263,13 +300,16 @@ impl LibVm {
 
     pub async fn inspect(&self, machine: &MachineRef) -> Result<MachineRecord, LibVmError> {
         let metadata = self.resolve_machine_state(machine).await?;
+        self.reconcile_machine_runtime(&metadata).await?;
         self.machine_record(metadata)
     }
 
     pub async fn list(&self) -> Result<Vec<MachineRecord>, LibVmError> {
-        self.db
-            .list_machines()
-            .await?
+        let machines = self.db.list_machines().await?;
+        for metadata in &machines {
+            self.reconcile_machine_runtime(metadata).await?;
+        }
+        machines
             .into_iter()
             .map(|metadata| self.machine_record(metadata))
             .collect()
@@ -314,6 +354,13 @@ impl LibVm {
     ) -> Result<MachineRecord, LibVmError> {
         self.validate_requested_network(&network).await?;
         let metadata = self.resolve_machine_state(machine).await?;
+        let _lock = self.acquire_machine_lock(metadata.id)?;
+        let status = self.reconcile_machine_runtime_locked(&metadata).await?;
+        if status.is_running() {
+            return Err(LibVmError::MachineAlreadyRunning {
+                reference: metadata.name.clone(),
+            });
+        }
         self.db
             .update_machine_network(metadata.id, &network)
             .await?;
@@ -322,12 +369,32 @@ impl LibVm {
         self.machine_record(updated)
     }
 
+    pub async fn replace_config(
+        &self,
+        machine: &MachineRef,
+        config: VmSpec,
+    ) -> Result<MachineRecord, LibVmError> {
+        let metadata = self.resolve_machine_state(machine).await?;
+        let _lock = self.acquire_machine_lock(metadata.id)?;
+        let status = self.reconcile_machine_runtime_locked(&metadata).await?;
+        if status.is_running() {
+            return Err(LibVmError::MachineAlreadyRunning {
+                reference: metadata.name.clone(),
+            });
+        }
+        self.db.update_machine_config(metadata.id, &config).await?;
+        let mut updated = metadata;
+        updated.config = config;
+        self.machine_record(updated)
+    }
+
     pub async fn remove(&self, machine: &MachineRef) -> Result<(), LibVmError> {
         let metadata = self.resolve_machine_state(machine).await?;
-        let pid_path = self.layout.monitor_pid_path(metadata.id);
-        reconcile_network_runtime(&self.layout, &self.db, &metadata, pid_path.exists()).await?;
+        let _lock = self.acquire_machine_lock(metadata.id)?;
+        let status = self.reconcile_machine_runtime_locked(&metadata).await?;
+        reconcile_network_runtime(&self.layout, &self.db, &metadata, status.is_running()).await?;
 
-        if pid_path.exists() {
+        if status.is_running() {
             return Err(LibVmError::MachineAlreadyRunning {
                 reference: metadata.name.clone(),
             });
@@ -339,33 +406,92 @@ impl LibVm {
             Err(err) => return Err(err.into()),
         }
 
+        self.db.remove_machine_runtime(metadata.id).await?;
         self.db.remove_machine(&metadata).await
     }
 
     pub async fn start(&self, machine: &MachineRef) -> Result<MachineRecord, LibVmError> {
         let metadata = self.resolve_machine_state(machine).await?;
-        let pid_path = self.layout.monitor_pid_path(metadata.id);
-        reconcile_network_runtime(&self.layout, &self.db, &metadata, pid_path.exists()).await?;
+        let _lock = self.acquire_machine_lock(metadata.id)?;
+        let status = self.reconcile_machine_runtime_locked(&metadata).await?;
+        reconcile_network_runtime(&self.layout, &self.db, &metadata, status.is_running()).await?;
 
-        if pid_path.exists() {
+        if status.is_running() {
             return Err(LibVmError::MachineAlreadyRunning {
                 reference: metadata.name.clone(),
             });
         }
 
         let resolved_network = prepare_network_runtime(&self.layout, &self.db, &metadata).await?;
-        prepare_instance_runtime(Path::new(&metadata.instance_dir), &resolved_network).map_err(
-            |err| LibVmError::InstancePreparationFailed {
-                reference: metadata.name.clone(),
-                message: err.to_string(),
-            },
-        )?;
+        let mut spec = metadata.config.clone();
+        prepare_instance_runtime(
+            Path::new(&metadata.instance_dir),
+            &metadata.name,
+            &mut spec,
+            &resolved_network,
+        )
+        .map_err(|err| LibVmError::InstancePreparationFailed {
+            reference: metadata.name.clone(),
+            message: err.to_string(),
+        })?;
 
-        let handshake = spawn_vmmon(metadata.id, Path::new(&metadata.instance_dir))?;
-        release_startpipe(handshake.start_write)?;
-        wait_for_monitor_start(
+        self.set_machine_runtime(metadata.id, MachineRuntimeState::Starting, None, None, None)
+            .await?;
+
+        let pid_path = self.layout.monitor_pid_path(metadata.id);
+        let config_path = self.layout.instance_config_path(metadata.id);
+        let socket_path = self.layout.monitor_socket_path(metadata.id);
+        let trace_path = self.layout.monitor_trace_path(metadata.id);
+        let serial_log_path = self.layout.monitor_serial_log_path(metadata.id);
+        let launch = VmmonLaunch {
+            machine_id: metadata.id,
+            name: &metadata.name,
+            instance_dir: Path::new(&metadata.instance_dir),
+            pidfile: &pid_path,
+            config: &config_path,
+            socket: &socket_path,
+            serial_log: &serial_log_path,
+            trace_log: &trace_path,
+            network: &resolved_network,
+        };
+        let handshake = match spawn_vmmon(&launch) {
+            Ok(handshake) => handshake,
+            Err(err) => {
+                self.mark_machine_stopped(metadata.id, Some(err.to_string()))
+                    .await?;
+                return Err(err);
+            }
+        };
+        if let Err(err) = release_startpipe(handshake.start_write) {
+            self.mark_machine_stopped(metadata.id, Some(err.to_string()))
+                .await?;
+            return Err(err.into());
+        }
+        if let Err(err) = wait_for_monitor_start(
             handshake.sync_read,
             &self.layout.monitor_trace_path(metadata.id),
+        )
+        .await
+        {
+            self.mark_machine_stopped(metadata.id, Some(err.to_string()))
+                .await?;
+            return Err(err);
+        }
+
+        let pid = read_monitor_pid(&pid_path)?;
+        if !process_is_alive(pid)? {
+            return Err(LibVmError::MonitorConnection {
+                reference: metadata.name.clone(),
+                message: format!("vmmon pid {pid} from {} is not running", pid_path.display()),
+            });
+        }
+        let started_at = pid_file_mtime(&pid_path);
+        self.set_machine_runtime(
+            metadata.id,
+            MachineRuntimeState::Running,
+            Some(pid),
+            Some(started_at),
+            None,
         )
         .await?;
         self.machine_record(metadata)
@@ -387,25 +513,37 @@ impl LibVm {
 
     pub async fn stop(&self, machine: &MachineRef) -> Result<MachineRecord, LibVmError> {
         let metadata = self.resolve_machine_state(machine).await?;
-        let pid_path = self.layout.monitor_pid_path(metadata.id);
-        let pid = read_monitor_pid(&pid_path).map_err(|err| match err.kind() {
-            io::ErrorKind::NotFound => LibVmError::MachineNotRunning {
+        let _lock = self.acquire_machine_lock(metadata.id)?;
+        let status = self.reconcile_machine_runtime_locked(&metadata).await?;
+        if !status.is_running() {
+            return Err(LibVmError::MachineNotRunning {
                 reference: metadata.name.clone(),
-            },
-            _ => err.into(),
-        })?;
+            });
+        }
+        let pid_path = self.layout.monitor_pid_path(metadata.id);
+        let pid = read_monitor_pid(&pid_path)?;
 
-        nix::sys::signal::kill(Pid::from_raw(pid), Signal::SIGINT)
+        self.set_machine_runtime(
+            metadata.id,
+            MachineRuntimeState::Stopping,
+            Some(pid),
+            status.started_at,
+            None,
+        )
+        .await?;
+
+        kill(Pid::from_raw(pid), Some(Signal::SIGINT))
             .map_err(|err| io::Error::other(err.to_string()))?;
         wait_for_monitor_stop(&pid_path, &metadata.name).await?;
+        self.mark_machine_stopped(metadata.id, None).await?;
         reconcile_network_runtime(&self.layout, &self.db, &metadata, false).await?;
         self.machine_record(metadata)
     }
 
     pub async fn get_status(&self, machine: &MachineRef) -> Result<InspectResponse, LibVmError> {
         let metadata = self.resolve_machine_state(machine).await?;
-        let monitor_running = self.layout.monitor_pid_path(metadata.id).exists();
-        reconcile_network_runtime(&self.layout, &self.db, &metadata, monitor_running).await?;
+        let status = self.reconcile_machine_runtime(&metadata).await?;
+        reconcile_network_runtime(&self.layout, &self.db, &metadata, status.is_running()).await?;
         let (metadata, socket_path) = self.resolve_running_socket(machine).await?;
         monitor::get_vm_monitor_inspect(&socket_path)
             .await
@@ -422,7 +560,11 @@ impl LibVm {
         let metadata = self.resolve_machine_state(machine).await?;
         let socket_path = self.layout.monitor_socket_path(metadata.id);
 
-        if !self.layout.monitor_pid_path(metadata.id).exists() {
+        if !self
+            .reconcile_machine_runtime(&metadata)
+            .await?
+            .is_running()
+        {
             return Err(LibVmError::MachineNotRunning {
                 reference: metadata.name.clone(),
             });
@@ -444,7 +586,11 @@ impl LibVm {
         let metadata = self.resolve_machine_state(machine).await?;
         let socket_path = self.layout.monitor_socket_path(metadata.id);
 
-        if !self.layout.monitor_pid_path(metadata.id).exists() {
+        if !self
+            .reconcile_machine_runtime(&metadata)
+            .await?
+            .is_running()
+        {
             return Err(LibVmError::MachineNotRunning {
                 reference: metadata.name.clone(),
             });
@@ -507,6 +653,117 @@ impl LibVm {
         }
     }
 
+    fn acquire_machine_lock(&self, machine_id: MachineId) -> Result<VmLock, LibVmError> {
+        Ok(VmLock::acquire(&self.layout.machine_lock_path(machine_id))?)
+    }
+
+    async fn reconcile_machine_runtime(
+        &self,
+        metadata: &Machine,
+    ) -> Result<RuntimeStatus, LibVmError> {
+        let observed = self.observe_machine_runtime(metadata).await?;
+        if observed.needs_writeback {
+            let _lock = self.acquire_machine_lock(metadata.id)?;
+            return self.reconcile_machine_runtime_locked(metadata).await;
+        }
+        Ok(observed.status())
+    }
+
+    async fn reconcile_machine_runtime_locked(
+        &self,
+        metadata: &Machine,
+    ) -> Result<RuntimeStatus, LibVmError> {
+        let observed = self.observe_machine_runtime(metadata).await?;
+        if observed.needs_writeback {
+            self.db
+                .upsert_machine_runtime(&observed.runtime(metadata.id))
+                .await?;
+        }
+        Ok(observed.status())
+    }
+
+    async fn observe_machine_runtime(
+        &self,
+        metadata: &Machine,
+    ) -> Result<ObservedRuntime, LibVmError> {
+        let runtime = self.db.get_machine_runtime(metadata.id).await?;
+        let pid_path = self.layout.monitor_pid_path(metadata.id);
+        let pid = match read_monitor_pid(&pid_path) {
+            Ok(pid) => Some(pid),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(_) => None,
+        };
+        let live_pid = match pid {
+            Some(pid) if process_is_alive(pid)? => Some(pid),
+            _ => None,
+        };
+
+        let current_state = runtime
+            .as_ref()
+            .map(|runtime| runtime.state)
+            .unwrap_or(MachineRuntimeState::Stopped);
+        let desired_state = if live_pid.is_some() {
+            MachineRuntimeState::Running
+        } else {
+            MachineRuntimeState::Stopped
+        };
+        let started_at = live_pid.map(|_| {
+            runtime
+                .as_ref()
+                .and_then(|runtime| runtime.started_at)
+                .unwrap_or_else(|| pid_file_mtime(&pid_path))
+        });
+        let needs_writeback = current_state != desired_state
+            || runtime.as_ref().and_then(|runtime| runtime.vmmon_pid) != live_pid;
+
+        Ok(ObservedRuntime {
+            state: desired_state,
+            pid: live_pid,
+            started_at,
+            last_error: if desired_state == MachineRuntimeState::Stopped {
+                runtime.and_then(|runtime| runtime.last_error)
+            } else {
+                None
+            },
+            needs_writeback,
+        })
+    }
+
+    async fn set_machine_runtime(
+        &self,
+        machine_id: MachineId,
+        state: MachineRuntimeState,
+        vmmon_pid: Option<i32>,
+        started_at: Option<i64>,
+        last_error: Option<String>,
+    ) -> Result<(), LibVmError> {
+        self.db
+            .upsert_machine_runtime(&MachineRuntime {
+                machine_id,
+                state,
+                vmmon_pid,
+                started_at,
+                last_error,
+                updated_at: current_unix(),
+            })
+            .await
+    }
+
+    async fn mark_machine_stopped(
+        &self,
+        machine_id: MachineId,
+        last_error: Option<String>,
+    ) -> Result<(), LibVmError> {
+        self.set_machine_runtime(
+            machine_id,
+            MachineRuntimeState::Stopped,
+            None,
+            None,
+            last_error,
+        )
+        .await
+    }
+
     async fn validate_requested_network(
         &self,
         network: &RequestedNetwork,
@@ -524,33 +781,24 @@ impl LibVm {
 
     fn machine_record(&self, machine: Machine) -> Result<MachineRecord, LibVmError> {
         let dir = PathBuf::from(&machine.instance_dir);
-        let config_path = dir.join(CONFIG_FILE_NAME);
-        let config = fs::read_to_string(&config_path)?;
-        let spec =
-            serde_yaml_ng::from_str(&config).map_err(|source| LibVmError::VmSpecLoadFailed {
-                id: machine.id,
-                path: config_path,
-                source,
-            })?;
-
         let pid_path = self.layout.monitor_pid_path(machine.id);
-        let status = if pid_path.exists() {
-            let started_at = std::fs::metadata(&pid_path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            MachineStatus::Running { started_at }
+        let started_at = read_monitor_pid(&pid_path)
+            .ok()
+            .and_then(|pid| process_is_alive(pid).ok().filter(|alive| *alive))
+            .map(|_| pid_file_mtime(&pid_path));
+        let state = if started_at.is_some() {
+            MachineRuntimeState::Running
         } else {
-            MachineStatus::Stopped
+            MachineRuntimeState::Stopped
         };
 
         Ok(MachineRecord {
             id: machine.id,
-            spec,
+            name: machine.name,
+            spec: machine.config,
             dir,
-            status,
+            state,
+            started_at,
             created_at: machine.created_at,
             image_ref: machine.image_ref,
             labels: machine.labels,
@@ -564,7 +812,11 @@ impl LibVm {
         machine: &MachineRef,
     ) -> Result<(Machine, PathBuf), LibVmError> {
         let metadata = self.resolve_machine_state(machine).await?;
-        if !self.layout.monitor_pid_path(metadata.id).exists() {
+        if !self
+            .reconcile_machine_runtime(&metadata)
+            .await?
+            .is_running()
+        {
             return Err(LibVmError::MachineNotRunning {
                 reference: metadata.name,
             });
@@ -662,16 +914,42 @@ struct VmmonHandshake {
     sync_read: OwnedFd,
 }
 
-fn spawn_vmmon(machine_id: MachineId, instance_dir: &Path) -> Result<VmmonHandshake, LibVmError> {
+struct VmmonLaunch<'a> {
+    machine_id: MachineId,
+    name: &'a str,
+    instance_dir: &'a Path,
+    pidfile: &'a Path,
+    config: &'a Path,
+    socket: &'a Path,
+    serial_log: &'a Path,
+    trace_log: &'a Path,
+    network: &'a RuntimeNetwork,
+}
+
+fn spawn_vmmon(launch: &VmmonLaunch<'_>) -> Result<VmmonHandshake, LibVmError> {
     let (start_read, start_write) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
     let (sync_read, sync_write) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
 
     let mut command = Command::new(resolve_vmmon_executable()?);
     command
         .arg("--id")
-        .arg(machine_id.to_string())
+        .arg(launch.machine_id.to_string())
+        .arg("--name")
+        .arg(launch.name)
         .arg("--data-dir")
-        .arg(instance_dir);
+        .arg(launch.instance_dir)
+        .arg("--pidfile")
+        .arg(launch.pidfile)
+        .arg("--config")
+        .arg(launch.config)
+        .arg("--socket")
+        .arg(launch.socket)
+        .arg("--serial-log")
+        .arg(launch.serial_log)
+        .arg("--trace-log")
+        .arg(launch.trace_log)
+        .arg("--network")
+        .arg(launch.network.to_vmmon_arg());
     command
         .env(ENV_VM_STARTPIPE, start_read.as_raw_fd().to_string())
         .env(ENV_VM_SYNCPIPE, sync_write.as_raw_fd().to_string());
@@ -830,6 +1108,31 @@ fn read_monitor_pid(pid_path: &Path) -> io::Result<i32> {
     })
 }
 
+fn process_is_alive(pid: i32) -> Result<bool, LibVmError> {
+    match kill(Pid::from_raw(pid), None) {
+        Ok(()) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(Errno::EPERM) => Ok(true),
+        Err(err) => Err(io::Error::other(err.to_string()).into()),
+    }
+}
+
+fn pid_file_mtime(pid_path: &Path) -> i64 {
+    std::fs::metadata(pid_path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn current_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 impl PendingMachine {
     fn dir(&self) -> &Path {
         &self.staged_dir
@@ -851,7 +1154,8 @@ impl PendingMachine {
             .as_secs() as i64;
         let metadata = Machine {
             id: self.id,
-            name: self.spec.name.clone(),
+            name: self.name.clone(),
+            config: self.spec.clone(),
             instance_dir: self.final_dir.display().to_string(),
             created_at: now,
             modified_at: now,
@@ -861,6 +1165,22 @@ impl PendingMachine {
             network: self.network.clone(),
         };
         if let Err(err) = libvm.db.insert_machine(&metadata).await {
+            let _ = fs::remove_dir_all(&self.final_dir);
+            return Err(err);
+        }
+        if let Err(err) = libvm
+            .db
+            .upsert_machine_runtime(&MachineRuntime {
+                machine_id: self.id,
+                state: MachineRuntimeState::Stopped,
+                vmmon_pid: None,
+                started_at: None,
+                last_error: None,
+                updated_at: now,
+            })
+            .await
+        {
+            let _ = libvm.db.remove_machine(&metadata).await;
             let _ = fs::remove_dir_all(&self.final_dir);
             return Err(err);
         }
@@ -913,20 +1233,21 @@ fn create_staging_dir(layout: &Layout) -> Result<PathBuf, LibVmError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        guest_kernel_cmdline, guest_spec_from_request, read_syncpipe, release_startpipe, LibVm,
-        MachineStatus, StartupResult,
+        assign_mount_tags, guest_kernel_cmdline, guest_spec_from_request, read_syncpipe,
+        release_startpipe, LibVm, StartupResult,
     };
-    use crate::{Layout, LibVmError, MachineRef};
+    use crate::{Layout, LibVmError, MachineRef, MachineRuntimeState};
     use bento_core::{
-        Architecture, Boot, GuestOs, GuestSpec, Platform, Resources, Settings, Storage, VmSpec,
+        Architecture, Boot, GuestOs, GuestSpec, Mount, Platform, Resources, Settings, Storage,
+        VmSpec,
     };
     use nix::unistd::pipe;
     use std::io::{Read, Write};
+    use std::path::PathBuf;
 
-    fn sample_vm_spec(name: &str) -> VmSpec {
+    fn sample_vm_spec() -> VmSpec {
         VmSpec {
             version: 1,
-            name: name.to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
@@ -958,7 +1279,8 @@ mod tests {
     ) -> Result<super::PendingMachine, LibVmError> {
         libvm
             .create_pending(
-                sample_vm_spec(name),
+                name.to_string(),
+                sample_vm_spec(),
                 "test-image:latest".to_string(),
                 std::collections::BTreeMap::new(),
                 std::collections::BTreeMap::new(),
@@ -976,6 +1298,18 @@ mod tests {
         let enabled = guest_spec_from_request(true);
         assert!(enabled.is_some());
         assert!(!guest_kernel_cmdline(&enabled).is_empty());
+    }
+
+    #[test]
+    fn assign_mount_tags_fills_missing_tags_without_rewriting_sources() {
+        let mounts = assign_mount_tags(vec![Mount {
+            source: PathBuf::from("~"),
+            tag: String::new(),
+            read_only: false,
+        }]);
+
+        assert_eq!(mounts[0].tag, "mount0");
+        assert_eq!(mounts[0].source, PathBuf::from("~"));
     }
 
     #[test]
@@ -1033,8 +1367,8 @@ mod tests {
 
         let machine = pending.commit(&libvm).await.expect("commit machine");
 
-        assert_eq!(machine.spec.name, "devbox");
-        assert_eq!(machine.status, MachineStatus::Stopped);
+        assert_eq!(machine.name, "devbox");
+        assert_eq!(machine.state, MachineRuntimeState::Stopped);
         assert_eq!(machine.dir, libvm.layout().instance_dir(machine.id));
         assert!(libvm.layout().instance_config_path(machine.id).exists());
     }
@@ -1066,7 +1400,68 @@ mod tests {
         assert_eq!(by_name.id, machine.id);
         assert_eq!(by_id.id, machine.id);
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].spec.name, "devbox");
+        assert_eq!(listed[0].name, "devbox");
+    }
+
+    #[tokio::test]
+    async fn inspect_uses_sqlite_config_when_config_file_is_missing() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let libvm = LibVm::new(Layout::new(temp.path().join("bento")))
+            .await
+            .expect("create libvm");
+
+        let machine = create_pending_sample(&libvm, "devbox")
+            .await
+            .expect("create pending machine")
+            .commit(&libvm)
+            .await
+            .expect("commit machine");
+        std::fs::remove_file(libvm.layout().instance_config_path(machine.id))
+            .expect("remove generated config");
+
+        let inspected = libvm
+            .inspect(&MachineRef::parse(machine.id.to_string()).expect("parse machine ref"))
+            .await
+            .expect("inspect machine");
+
+        assert_eq!(inspected.name, "devbox");
+    }
+
+    #[tokio::test]
+    async fn replace_config_updates_stopped_machine_config() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let libvm = LibVm::new(Layout::new(temp.path().join("bento")))
+            .await
+            .expect("create libvm");
+
+        let machine = create_pending_sample(&libvm, "devbox")
+            .await
+            .expect("create pending machine")
+            .commit(&libvm)
+            .await
+            .expect("commit machine");
+        let mut updated = machine.spec.clone();
+        updated.resources.cpus = 6;
+
+        let edited = libvm
+            .replace_config(
+                &MachineRef::parse(machine.id.to_string()).expect("parse machine ref"),
+                updated,
+            )
+            .await
+            .expect("replace config");
+
+        assert_eq!(edited.spec.resources.cpus, 6);
+        assert_eq!(
+            libvm
+                .inspect(&MachineRef::parse(machine.id.to_string()).expect("parse machine ref"))
+                .await
+                .expect("inspect")
+                .spec
+                .resources
+                .cpus,
+            6
+        );
     }
 
     #[tokio::test]
@@ -1107,7 +1502,7 @@ mod tests {
             .expect("commit machine");
 
         let pid_path = libvm.layout().monitor_pid_path(machine.id);
-        std::fs::write(&pid_path, b"12345\n").expect("write pid file");
+        std::fs::write(&pid_path, format!("{}\n", std::process::id())).expect("write pid file");
 
         let err = libvm
             .remove(&MachineRef::parse(machine.id.to_string()).expect("parse machine ref"))

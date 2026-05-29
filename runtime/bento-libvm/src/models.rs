@@ -1,15 +1,16 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use bento_core::{looks_like_id_prefix, MachineId, NetworkPolicySpec};
+use bento_core::{looks_like_id_prefix, MachineId, VmSpec};
 use serde::{Deserialize, Serialize};
 
-use crate::LibVmError;
+use crate::{LibVmError, NetworkPolicySpec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Machine {
     pub id: MachineId,
     pub name: String,
+    pub config: VmSpec,
     pub instance_dir: String,
     pub created_at: i64,
     pub modified_at: i64,
@@ -17,6 +18,52 @@ pub(crate) struct Machine {
     pub labels: BTreeMap<String, String>,
     pub metadata: BTreeMap<String, String>,
     pub network: RequestedNetwork,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MachineRuntime {
+    pub machine_id: MachineId,
+    pub state: MachineRuntimeState,
+    pub vmmon_pid: Option<i32>,
+    pub started_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MachineRuntimeState {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+    Error,
+}
+
+impl MachineRuntimeState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Stopping => "stopping",
+            Self::Error => "error",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "stopped" => Ok(Self::Stopped),
+            "starting" => Ok(Self::Starting),
+            "running" => Ok(Self::Running),
+            "stopping" => Ok(Self::Stopping),
+            "error" => Ok(Self::Error),
+            other => Err(format!("unknown machine runtime state {other:?}")),
+        }
+    }
+
+    pub fn is_running(self) -> bool {
+        matches!(self, Self::Running)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,18 +192,13 @@ pub enum NamedNetworkMode {
     Isolated,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkDriverPreference {
+    #[default]
     Auto,
     Netd,
     VzNat,
-}
-
-impl Default for NetworkDriverPreference {
-    fn default() -> Self {
-        NetworkDriverPreference::Auto
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

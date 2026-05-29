@@ -2,8 +2,9 @@ use clap::Args;
 use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bento_core::{InstanceFile, VmSpec};
-use bento_libvm::{LibVm, MachineRef, MachineStatus};
+use bento_core::VmSpec;
+use bento_libvm::InstanceFile;
+use bento_libvm::{LibVm, MachineRef, MachineRuntimeState};
 use bento_protocol::v1::LifecycleState;
 
 use crate::constants::PROFILE_METADATA_KEY;
@@ -42,8 +43,8 @@ impl Cmd {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "name": machine.spec.name,
-                    "state": process_status_label(machine.status),
+                    "name": machine.name,
+                    "state": process_status_label(machine.state),
                     "profile": machine.metadata.get(PROFILE_METADATA_KEY),
                     "image": machine.image_ref,
                     "network": machine.network.clone(),
@@ -53,7 +54,7 @@ impl Cmd {
             return Ok(());
         }
 
-        println!("name: {}", machine.spec.name);
+        println!("name: {}", machine.name);
         if let Some(profile) = machine.metadata.get(PROFILE_METADATA_KEY) {
             println!("profile: {profile}");
         }
@@ -61,9 +62,9 @@ impl Cmd {
             println!("image: {}", machine.image_ref);
         }
         println!("network: {}", machine.network.name());
-        print_process(machine.status);
+        print_process(machine.state, machine.started_at);
 
-        if !machine.status.is_running() {
+        if !machine.is_running() {
             print_guest(None, guest_config_status(&machine.spec, &machine.dir));
             println!("ready: no");
             return Ok(());
@@ -130,11 +131,11 @@ fn guest_config_status(spec: &VmSpec, machine_dir: &std::path::Path) -> GuestCon
     }
 }
 
-fn print_process(status: MachineStatus) {
+fn print_process(state: MachineRuntimeState, started_at: Option<i64>) {
     println!("process:");
-    println!("  status: {}", process_status_label(status));
-    if let Some(started_at) = process_started_at(status) {
-        println!("  started_at: {}", started_at);
+    println!("  status: {}", process_status_label(state));
+    if let Some(label) = process_started_at(state, started_at) {
+        println!("  started_at: {}", label);
     }
 }
 
@@ -177,17 +178,19 @@ fn present_absent(value: bool) -> &'static str {
     }
 }
 
-fn process_status_label(status: MachineStatus) -> &'static str {
-    match status {
-        MachineStatus::Running { .. } => "running",
-        MachineStatus::Stopped => "stopped",
+fn process_status_label(state: MachineRuntimeState) -> &'static str {
+    if state.is_running() {
+        "running"
+    } else {
+        "stopped"
     }
 }
 
-fn process_started_at(status: MachineStatus) -> Option<String> {
-    match status {
-        MachineStatus::Running { started_at } => Some(relative_time(started_at, now_unix())),
-        MachineStatus::Stopped => None,
+fn process_started_at(state: MachineRuntimeState, started_at: Option<i64>) -> Option<String> {
+    if state.is_running() {
+        started_at.map(|started_at| relative_time(started_at, now_unix()))
+    } else {
+        None
     }
 }
 
@@ -266,14 +269,13 @@ mod tests {
     use bento_core::{
         Architecture, Boot, GuestOs, GuestSpec, Platform, Resources, Settings, Storage, VmSpec,
     };
-    use bento_libvm::MachineStatus;
+    use bento_libvm::MachineRuntimeState;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn sample_spec(guest: Option<GuestSpec>, bootstrap: bool) -> VmSpec {
         VmSpec {
             version: 1,
-            name: "devbox".to_string(),
             platform: Platform {
                 guest_os: GuestOs::Linux,
                 architecture: Architecture::Aarch64,
@@ -355,13 +357,14 @@ mod tests {
 
     #[test]
     fn process_helpers_render_running_and_stopped_states() {
-        assert_eq!(process_status_label(MachineStatus::Stopped), "stopped");
-        assert_eq!(process_started_at(MachineStatus::Stopped), None);
+        assert_eq!(
+            process_status_label(MachineRuntimeState::Stopped),
+            "stopped"
+        );
+        assert_eq!(process_started_at(MachineRuntimeState::Stopped, None), None);
 
-        let started = process_started_at(MachineStatus::Running {
-            started_at: now_unix() - 60,
-        })
-        .expect("running machine should have started_at");
+        let started = process_started_at(MachineRuntimeState::Running, Some(now_unix() - 60))
+            .expect("running machine should have started_at");
         assert!(!started.is_empty());
     }
 }

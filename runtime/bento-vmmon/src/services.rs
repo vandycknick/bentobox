@@ -103,7 +103,7 @@ pub async fn start_services(
     ctx: &DaemonContext,
     sync_reporter: &mut SyncReporter,
 ) -> eyre::Result<ServiceHandles> {
-    let path = runtime.file(bento_core::InstanceFile::VmmonSocket);
+    let path = runtime.socket().to_path_buf();
     let listener = UnixListener::bind(&path).context(format!("bind socket {}", path.display()))?;
     let server = NegotiateServer::new(listener, ctx.shutdown.clone());
     let handler_ctx = ctx.clone();
@@ -112,7 +112,7 @@ pub async fn start_services(
         async move { handle_connection(stream, upgrade, ctx).await }
     });
 
-    let serial_log_path = runtime.file(bento_core::InstanceFile::SerialLog);
+    let serial_log_path = runtime.serial_log().to_path_buf();
     let serial_console_for_log = ctx.serial_console.clone();
     let serial_log = tokio::spawn(async move {
         if let Err(err) = serial_console_for_log

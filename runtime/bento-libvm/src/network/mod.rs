@@ -7,8 +7,8 @@ mod core;
 mod netd_driver;
 mod vznat_driver;
 
-use bento_core::{MachineId, Network};
-use serde::Serialize;
+use bento_core::MachineId;
+use serde::{Deserialize, Serialize};
 
 use crate::global_config::GlobalConfig;
 use crate::models::{
@@ -27,23 +27,52 @@ use self::vznat_driver::VzNatDriver;
 const DRIVER_NETD: &str = "netd";
 const DRIVER_VZNAT: &str = "vznat";
 
-#[derive(Debug, Serialize)]
-struct NetworkRuntimeFile {
-    version: u32,
-    attachment: Network,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum RuntimeNetwork {
+    None,
+    VzNat {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mac: Option<String>,
+    },
+    UnixDatagram {
+        path: std::path::PathBuf,
+        mac: String,
+    },
+    UnixStream {
+        path: std::path::PathBuf,
+        mac: String,
+    },
+    Tap {
+        name: String,
+        mac: String,
+    },
+}
+
+impl RuntimeNetwork {
+    pub(crate) fn to_vmmon_arg(&self) -> String {
+        match self {
+            Self::None => "none".to_string(),
+            Self::VzNat { mac: None } => "vznat".to_string(),
+            Self::VzNat { mac: Some(mac) } => format!("vznat,mac={mac}"),
+            Self::UnixDatagram { path, mac } => format!("unixdg,{},mac={mac}", path.display()),
+            Self::UnixStream { path, mac } => format!("unixstream,{},mac={mac}", path.display()),
+            Self::Tap { name, mac } => format!("tap,{name},mac={mac}"),
+        }
+    }
 }
 
 pub(crate) async fn prepare_network_runtime(
     layout: &Layout,
     db: &Sqlite,
     metadata: &Machine,
-) -> Result<Network, LibVmError> {
+) -> Result<RuntimeNetwork, LibVmError> {
     reconcile_network_runtime(layout, db, metadata, false).await?;
 
     match metadata.network.clone() {
         RequestedNetwork::None => {
             remove_attached_network(layout, db, metadata.id).await?;
-            Ok(Network::None)
+            Ok(RuntimeNetwork::None)
         }
         RequestedNetwork::Private { policy } => {
             let global_config = load_global_config(&metadata.name)?;
@@ -124,7 +153,7 @@ async fn resolve_named_network(
     db: &Sqlite,
     metadata: &Machine,
     definition: &NetworkDefinition,
-) -> Result<Network, LibVmError> {
+) -> Result<RuntimeNetwork, LibVmError> {
     let global_config = load_global_config(&metadata.name)?;
     match definition.mode {
         NamedNetworkMode::Nat => {
@@ -241,22 +270,6 @@ pub(super) async fn remove_attached_network(
     Ok(())
 }
 
-pub(super) fn write_runtime_file(
-    runtime_dir: &Path,
-    attachment: &Network,
-) -> Result<(), LibVmError> {
-    let runtime = NetworkRuntimeFile {
-        version: 2,
-        attachment: attachment.clone(),
-    };
-    let bytes = serde_json::to_vec_pretty(&runtime).map_err(|err| LibVmError::NetworkRuntime {
-        reference: runtime_dir.display().to_string(),
-        message: format!("serialize network runtime: {err}"),
-    })?;
-    fs::write(runtime_dir.join("runtime.json"), bytes)?;
-    Ok(())
-}
-
 pub(crate) fn mac_from_machine_id(machine_id: MachineId) -> [u8; 6] {
     let id = machine_id.to_string();
     let bytes = id.as_bytes();
@@ -293,17 +306,17 @@ fn network_instance_is_alive(instance: &NetworkInstance) -> bool {
 pub(super) fn network_attachment_from_instance(
     instance: &NetworkInstance,
     mac: String,
-) -> Result<Network, LibVmError> {
-    let mut attachment: Network =
+) -> Result<RuntimeNetwork, LibVmError> {
+    let mut attachment: RuntimeNetwork =
         serde_json::from_str(&instance.attachment_json).map_err(|err| {
             LibVmError::NetworkRuntime {
                 reference: instance.id.clone(),
                 message: format!("parse network attachment: {err}"),
             }
         })?;
-    if let Network::UnixDatagram { mac: existing, .. }
-    | Network::UnixStream { mac: existing, .. }
-    | Network::Tap { mac: existing, .. } = &mut attachment
+    if let RuntimeNetwork::UnixDatagram { mac: existing, .. }
+    | RuntimeNetwork::UnixStream { mac: existing, .. }
+    | RuntimeNetwork::Tap { mac: existing, .. } = &mut attachment
     {
         *existing = mac;
     }
@@ -382,26 +395,4 @@ pub(super) fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::write_runtime_file;
-
-    #[test]
-    fn runtime_file_serializes_resolved_attachment() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let attachment = bento_core::Network::UnixDatagram {
-            path: dir.path().join("netd.sock"),
-            mac: "02:19:e0:00:e2:e6".to_string(),
-        };
-
-        write_runtime_file(dir.path(), &attachment).expect("write runtime file");
-
-        let raw = std::fs::read_to_string(dir.path().join("runtime.json")).expect("read runtime");
-        let value: serde_json::Value = serde_json::from_str(&raw).expect("parse runtime");
-
-        assert_eq!(value["attachment"]["kind"], "unix_datagram");
-        assert_eq!(value["attachment"]["mac"], "02:19:e0:00:e2:e6");
-    }
 }
