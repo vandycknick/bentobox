@@ -1,9 +1,7 @@
-use crate::NetworkPolicySpec;
-
 use crate::global_config::NetworkingConfig;
 use crate::models::Machine;
 use crate::store::Sqlite;
-use crate::{Layout, LibVmError};
+use crate::{Layout, LibVmError, NetworkPolicyRef};
 
 use super::RuntimeNetwork;
 
@@ -16,7 +14,7 @@ pub(super) enum NetworkScope {
 pub(super) struct NetworkRequest<'a> {
     pub(super) scope: NetworkScope,
     pub(super) definition_name: Option<&'a str>,
-    pub(super) policy: Option<&'a NetworkPolicySpec>,
+    pub(super) policy_ref: Option<&'a NetworkPolicyRef>,
 }
 
 pub(super) struct NetworkDriverContext<'a> {

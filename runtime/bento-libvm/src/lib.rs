@@ -25,7 +25,4 @@ pub use crate::models::{
 };
 pub use crate::monitor::DEFAULT_GUEST_READINESS_TIMEOUT;
 pub use crate::mount_path::resolve_mount_location;
-pub use crate::network_policy::{
-    AuditLogSpec, CidrRuleSpec, NetworkPolicyFeature, NetworkPolicySpec, NetworkProtocol,
-    PolicyAction,
-};
+pub use crate::network_policy::NetworkPolicyRef;

@@ -82,14 +82,6 @@ impl Layout {
         self.instance_dir(machine_id).join("net")
     }
 
-    pub fn network_policy_path(&self, network_id: &str) -> PathBuf {
-        self.network_instance_dir(network_id).join("policy.json")
-    }
-
-    pub fn network_audit_log_path(&self, network_id: &str) -> PathBuf {
-        self.network_instance_dir(network_id).join("audit.jsonl")
-    }
-
     pub fn network_socket_path(&self, network_id: &str) -> PathBuf {
         self.network_instance_dir(network_id).join("netd.sock")
     }
@@ -215,14 +207,6 @@ mod tests {
             PathBuf::from("/tmp/bento/instances")
                 .join(machine_id.to_string())
                 .join("net")
-        );
-        assert_eq!(
-            layout.network_policy_path(network_id),
-            PathBuf::from("/tmp/bento/net/net123/policy.json")
-        );
-        assert_eq!(
-            layout.network_audit_log_path(network_id),
-            PathBuf::from("/tmp/bento/net/net123/audit.jsonl")
         );
         assert_eq!(
             layout.network_socket_path(network_id),

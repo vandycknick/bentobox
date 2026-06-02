@@ -74,12 +74,12 @@ pub(crate) async fn prepare_network_runtime(
             remove_attached_network(layout, db, metadata.id).await?;
             Ok(RuntimeNetwork::None)
         }
-        RequestedNetwork::Private { policy } => {
+        RequestedNetwork::Private { policy_ref } => {
             let global_config = load_global_config(&metadata.name)?;
             let request = NetworkRequest {
                 scope: NetworkScope::Private,
                 definition_name: None,
-                policy: policy.as_ref(),
+                policy_ref: policy_ref.as_ref(),
             };
             prepare_with_driver(
                 selected_private_driver(global_config.networking.private_driver),
@@ -94,12 +94,12 @@ pub(crate) async fn prepare_network_runtime(
             .await
             .map(|prepared| prepared.attachment)
         }
-        RequestedNetwork::Named { name, policy } => {
-            if policy.is_some() {
+        RequestedNetwork::Named { name, policy_ref } => {
+            if policy_ref.is_some() {
                 return Err(LibVmError::NetworkRuntime {
                     reference: metadata.name.clone(),
                     message: format!(
-                        "named network {:?} does not support per-machine policy yet",
+                        "named network {:?} does not support per-machine policy_ref yet",
                         name
                     ),
                 });
@@ -166,7 +166,7 @@ async fn resolve_named_network(
             let request = NetworkRequest {
                 scope: NetworkScope::Named,
                 definition_name: Some(definition.name.as_str()),
-                policy: None,
+                policy_ref: None,
             };
             prepare_with_driver(
                 selected_private_driver(driver),

@@ -293,7 +293,7 @@ pub(crate) fn parse_profile_mount(input: &str) -> Result<ProfileMount, String> {
 
 pub(crate) fn parse_requested_network(input: &str) -> Result<RequestedNetwork, String> {
     match input {
-        "private" => Ok(RequestedNetwork::Private { policy: None }),
+        "private" => Ok(RequestedNetwork::Private { policy_ref: None }),
         "none" => Ok(RequestedNetwork::None),
         other if other.starts_with("name:") => {
             named_requested_network(other.trim_start_matches("name:"))
@@ -311,15 +311,15 @@ fn named_requested_network(name: &str) -> Result<RequestedNetwork, String> {
     }
     Ok(RequestedNetwork::Named {
         name: name.to_string(),
-        policy: None,
+        policy_ref: None,
     })
 }
 
 fn requested_network_to_profile(requested: RequestedNetwork) -> ProfileNetwork {
     match requested {
-        RequestedNetwork::Private { policy } => ProfileNetwork::Private { policy },
+        RequestedNetwork::Private { policy_ref } => ProfileNetwork::Private { policy_ref },
         RequestedNetwork::None => ProfileNetwork::None,
-        RequestedNetwork::Named { name, policy } => ProfileNetwork::Named { name, policy },
+        RequestedNetwork::Named { name, policy_ref } => ProfileNetwork::Named { name, policy_ref },
     }
 }
 

@@ -24,6 +24,8 @@ pub struct NetworkingConfig {
 pub struct NetdConfig {
     pub subnet: String,
     pub pcap: bool,
+    pub tls_ca_cert: Option<PathBuf>,
+    pub tls_ca_key: Option<PathBuf>,
 }
 
 impl GlobalConfig {
@@ -60,21 +62,25 @@ fn parse_global_config(input: &str) -> eyre::Result<GlobalConfig> {
         ));
     }
 
+    let private_driver = parsed
+        .networking
+        .as_ref()
+        .map(RawNetworkingConfig::parse_private_driver)
+        .transpose()?
+        .flatten()
+        .unwrap_or(NetworkDriverKind::Netd);
+    let netd = parsed
+        .networking
+        .and_then(|networking| networking.drivers.and_then(|drivers| drivers.netd))
+        .map(NetdConfig::from)
+        .unwrap_or_default();
+    validate_netd_config(&netd)?;
+
     Ok(GlobalConfig {
         guest_binary,
         networking: NetworkingConfig {
-            private_driver: parsed
-                .networking
-                .as_ref()
-                .map(RawNetworkingConfig::parse_private_driver)
-                .transpose()?
-                .flatten()
-                .unwrap_or(NetworkDriverKind::Netd),
-            netd: parsed
-                .networking
-                .and_then(|networking| networking.drivers.and_then(|drivers| drivers.netd))
-                .map(NetdConfig::from)
-                .unwrap_or_default(),
+            private_driver,
+            netd,
         },
     })
 }
@@ -114,6 +120,8 @@ struct RawNetworkDriversConfig {
 struct RawNetdConfig {
     subnet: Option<String>,
     pcap: Option<bool>,
+    tls_ca_cert: Option<PathBuf>,
+    tls_ca_key: Option<PathBuf>,
 }
 
 impl RawNetworkingConfig {
@@ -131,6 +139,8 @@ impl Default for NetdConfig {
         Self {
             subnet: "192.168.105.0/24".to_string(),
             pcap: false,
+            tls_ca_cert: None,
+            tls_ca_key: None,
         }
     }
 }
@@ -141,6 +151,8 @@ impl From<RawNetdConfig> for NetdConfig {
         Self {
             subnet: raw.subnet.unwrap_or(default.subnet),
             pcap: raw.pcap.unwrap_or(default.pcap),
+            tls_ca_cert: raw.tls_ca_cert,
+            tls_ca_key: raw.tls_ca_key,
         }
     }
 }
@@ -153,6 +165,28 @@ fn parse_network_driver(value: &str) -> eyre::Result<NetworkDriverKind> {
             "invalid network driver {other:?}, expected netd or vznat"
         )),
     }
+}
+
+fn validate_netd_config(config: &NetdConfig) -> eyre::Result<()> {
+    if config.tls_ca_cert.is_some() != config.tls_ca_key.is_some() {
+        return Err(eyre::eyre!(
+            "[networking.drivers.netd].tls_ca_cert and tls_ca_key must be configured together"
+        ));
+    }
+    for (field, path) in [
+        ("tls_ca_cert", config.tls_ca_cert.as_ref()),
+        ("tls_ca_key", config.tls_ca_key.as_ref()),
+    ] {
+        if let Some(path) = path {
+            if !path.is_absolute() {
+                return Err(eyre::eyre!(
+                    "[networking.drivers.netd].{field} must be an absolute path: {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn ensure_guest_binary(config: &GlobalConfig) -> eyre::Result<&Path> {
@@ -212,8 +246,68 @@ networking:
             NetdConfig {
                 subnet: "192.168.105.0/24".to_string(),
                 pcap: true,
+                tls_ca_cert: None,
+                tls_ca_key: None,
             }
         );
+    }
+
+    #[test]
+    fn parse_global_config_reads_netd_tls_ca_paths() {
+        let cfg = parse_global_config(
+            r#"
+guest:
+  binary: "/tmp/bento-agent"
+networking:
+  drivers:
+    netd:
+      tls_ca_cert: "/tmp/bento-ca.pem"
+      tls_ca_key: "/tmp/bento-ca-key.pem"
+"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(
+            cfg.networking.netd.tls_ca_cert,
+            Some(PathBuf::from("/tmp/bento-ca.pem"))
+        );
+        assert_eq!(
+            cfg.networking.netd.tls_ca_key,
+            Some(PathBuf::from("/tmp/bento-ca-key.pem"))
+        );
+    }
+
+    #[test]
+    fn parse_global_config_rejects_relative_netd_tls_ca_paths() {
+        let result = parse_global_config(
+            r#"
+guest:
+  binary: "/tmp/bento-agent"
+networking:
+  drivers:
+    netd:
+      tls_ca_cert: "ca.pem"
+      tls_ca_key: "/tmp/bento-ca-key.pem"
+"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_global_config_rejects_partial_netd_tls_ca_paths() {
+        let result = parse_global_config(
+            r#"
+guest:
+  binary: "/tmp/bento-agent"
+networking:
+  drivers:
+    netd:
+      tls_ca_cert: "/tmp/bento-ca.pem"
+"#,
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]

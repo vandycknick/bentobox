@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use bento_core::{looks_like_id_prefix, MachineId, VmSpec};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{LibVmError, NetworkPolicySpec};
+use crate::{LibVmError, NetworkPolicyRef};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Machine {
@@ -139,24 +139,66 @@ pub(crate) fn validate_machine_name(name: &str) -> Result<(), LibVmError> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RequestedNetwork {
     Private {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        policy: Option<NetworkPolicySpec>,
+        policy_ref: Option<NetworkPolicyRef>,
     },
     None,
     Named {
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        policy: Option<NetworkPolicySpec>,
+        policy_ref: Option<NetworkPolicyRef>,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawRequestedNetwork {
+    Private {
+        #[serde(default)]
+        policy_ref: Option<NetworkPolicyRef>,
+        #[serde(default)]
+        policy: Option<serde_json::Value>,
+    },
+    None,
+    Named {
+        name: String,
+        #[serde(default)]
+        policy_ref: Option<NetworkPolicyRef>,
+        #[serde(default)]
+        policy: Option<serde_json::Value>,
+    },
+}
+
+impl<'de> Deserialize<'de> for RequestedNetwork {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match RawRequestedNetwork::deserialize(deserializer)? {
+            RawRequestedNetwork::Private { policy: Some(_), .. }
+            | RawRequestedNetwork::Named { policy: Some(_), .. } => Err(
+                serde::de::Error::custom(
+                    "inline network policy is no longer supported; use network.policy_ref with a named policy or absolute .hcl path",
+                ),
+            ),
+            RawRequestedNetwork::Private { policy_ref, .. } => {
+                Ok(Self::Private { policy_ref })
+            }
+            RawRequestedNetwork::None => Ok(Self::None),
+            RawRequestedNetwork::Named {
+                name, policy_ref, ..
+            } => Ok(Self::Named { name, policy_ref }),
+        }
+    }
 }
 
 impl Default for RequestedNetwork {
     fn default() -> Self {
-        Self::Private { policy: None }
+        Self::Private { policy_ref: None }
     }
 }
 
@@ -169,9 +211,9 @@ impl RequestedNetwork {
         }
     }
 
-    pub fn policy(&self) -> Option<&NetworkPolicySpec> {
+    pub fn policy_ref(&self) -> Option<&NetworkPolicyRef> {
         match self {
-            Self::Private { policy } | Self::Named { policy, .. } => policy.as_ref(),
+            Self::Private { policy_ref } | Self::Named { policy_ref, .. } => policy_ref.as_ref(),
             Self::None => None,
         }
     }

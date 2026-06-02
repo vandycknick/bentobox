@@ -21,10 +21,10 @@ impl NetworkDriver for VzNatDriver {
                 message: "vznat only supports private and named nat networking".to_string(),
             });
         }
-        if request.policy.is_some() {
+        if request.policy_ref.is_some() {
             return Err(LibVmError::NetworkRuntime {
                 reference: reference.to_string(),
-                message: "vznat does not support network policies".to_string(),
+                message: "vznat does not support network policy_ref".to_string(),
             });
         }
         Ok(())
@@ -59,7 +59,7 @@ mod tests {
         Architecture, Boot, GuestOs, MachineId, Platform, Resources, Settings, Storage, VmSpec,
     };
 
-    use crate::{NetworkPolicySpec, PolicyAction};
+    use crate::NetworkPolicyRef;
 
     fn machine_from_path(id: MachineId, name: String, instance_dir: &Path) -> Machine {
         let config = sample_vm_spec();
@@ -115,7 +115,7 @@ mod tests {
                 &NetworkRequest {
                     scope: NetworkScope::Private,
                     definition_name: None,
-                    policy: None,
+                    policy_ref: None,
                 },
             )
             .expect("private vznat should be supported");
@@ -125,7 +125,7 @@ mod tests {
                 &NetworkRequest {
                     scope: NetworkScope::Named,
                     definition_name: Some("devnet"),
-                    policy: None,
+                    policy_ref: None,
                 },
             )
             .expect("named nat vznat should be supported");
@@ -134,18 +134,14 @@ mod tests {
     #[test]
     fn vznat_driver_rejects_network_policies() {
         let driver = VzNatDriver;
-        let policy = NetworkPolicySpec {
-            default_action: PolicyAction::Allow,
-            audit_log: None,
-            cidr_rules: Vec::new(),
-        };
+        let policy_ref = NetworkPolicyRef::new("private").expect("policy ref");
 
         let result = driver.supports(
             "devbox",
             &NetworkRequest {
                 scope: NetworkScope::Named,
                 definition_name: Some("devnet"),
-                policy: Some(&policy),
+                policy_ref: Some(&policy_ref),
             },
         );
 
@@ -180,7 +176,7 @@ mod tests {
                 &NetworkRequest {
                     scope: NetworkScope::Named,
                     definition_name: Some("devnet"),
-                    policy: None,
+                    policy_ref: None,
                 },
             )
             .await

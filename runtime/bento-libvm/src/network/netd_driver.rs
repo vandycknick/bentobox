@@ -11,9 +11,10 @@ use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
+use crate::layout::resolve_config_dir;
 use crate::models::{Machine, NetworkAttachment, NetworkInstance};
 use crate::store::{Database, Sqlite};
-use crate::{Layout, LibVmError, NetworkPolicyFeature, NetworkPolicySpec};
+use crate::{Layout, LibVmError, NetworkPolicyRef};
 
 use super::core::{NetworkDriver, NetworkDriverContext, NetworkRequest, PreparedNetwork};
 use super::{
@@ -46,7 +47,7 @@ impl NetworkDriver for NetdDriver {
     }
 
     fn supports(&self, reference: &str, request: &NetworkRequest<'_>) -> Result<(), LibVmError> {
-        validate_policy_features(reference, self.id(), request.policy)
+        validate_policy_ref(reference, self.id(), request.policy_ref)
     }
 
     async fn prepare(
@@ -95,14 +96,10 @@ async fn prepare_netd_runtime(
     let socket_path = layout.network_socket_path(&network_id);
     let log_path = layout.network_log_path(&network_id);
     let pid_path = layout.network_pid_path(&network_id);
-    let policy_path = layout.network_policy_path(&network_id);
-    let default_audit_log_path = layout.network_audit_log_path(&network_id);
     let pcap_path = config.pcap.then(|| layout.network_pcap_path(&network_id));
+    let policy_path = resolve_network_policy_path(metadata, request.policy_ref)?;
     remove_file_if_exists(&socket_path)?;
-    remove_file_if_exists(&policy_path)?;
-    remove_file_if_exists(&default_audit_log_path)?;
     remove_file_if_exists(&pid_path)?;
-    let policy_file = write_network_policy_file(request.policy, &policy_path)?;
 
     let log = File::options().create(true).append(true).open(&log_path)?;
     let mut command = Command::new(resolve_netd_binary());
@@ -116,10 +113,9 @@ async fn prepare_netd_runtime(
             pcap_path: pcap_path.as_deref(),
             machine_id: metadata.id,
             network_id: &network_id,
-            policy_path: policy_file.as_ref().map(|policy| policy.path.as_path()),
-            audit_log_path: policy_file
-                .as_ref()
-                .and_then(|policy| policy.audit_enabled.then_some(policy.audit_path.as_path())),
+            policy_path: policy_path.as_deref(),
+            tls_ca_cert_path: config.tls_ca_cert.as_deref(),
+            tls_ca_key_path: config.tls_ca_key.as_deref(),
         },
     );
     command
@@ -244,7 +240,8 @@ struct NetworkHelperCommandConfig<'a> {
     machine_id: MachineId,
     network_id: &'a str,
     policy_path: Option<&'a Path>,
-    audit_log_path: Option<&'a Path>,
+    tls_ca_cert_path: Option<&'a Path>,
+    tls_ca_key_path: Option<&'a Path>,
 }
 
 fn configure_network_helper_command(
@@ -273,75 +270,48 @@ fn configure_network_helper_command(
     if let Some(path) = config.policy_path {
         command.arg("--policy-file").arg(path);
     }
-    if let Some(path) = config.audit_log_path {
-        command.arg("--audit-log").arg(path);
+    if let Some(path) = config.tls_ca_cert_path {
+        command.arg("--tls-ca-cert").arg(path);
+    }
+    if let Some(path) = config.tls_ca_key_path {
+        command.arg("--tls-ca-key").arg(path);
     }
 }
 
-fn write_network_policy_file(
-    policy: Option<&NetworkPolicySpec>,
-    path: &Path,
-) -> Result<Option<NetworkPolicyFile>, LibVmError> {
-    let Some(policy) = policy else {
-        return Ok(None);
-    };
-    let raw = serde_json::to_string(policy).map_err(|err| LibVmError::NetworkRuntime {
-        reference: path.display().to_string(),
-        message: format!("serialize network policy: {err}"),
-    })?;
-    fs::write(path, &raw)?;
-    Ok(Some(network_policy_file(path, &raw)))
-}
-
-struct NetworkPolicyFile {
-    path: PathBuf,
-    audit_enabled: bool,
-    audit_path: PathBuf,
-}
-
-fn network_policy_file(path: &Path, policy: &str) -> NetworkPolicyFile {
-    let parsed = serde_json::from_str::<serde_json::Value>(policy).ok();
-    let audit_enabled = parsed
-        .as_ref()
-        .and_then(|value| value.get("audit_log")?.get("enabled")?.as_bool())
-        .unwrap_or(false)
-        || parsed
-            .as_ref()
-            .and_then(|value| value.get("audit_log")?.get("path")?.as_str())
-            .is_some();
-    let audit_path = parsed
-        .as_ref()
-        .and_then(|value| value.get("audit_log")?.get("path")?.as_str())
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| path.with_file_name("audit.jsonl"));
-    NetworkPolicyFile {
-        path: path.to_path_buf(),
-        audit_enabled,
-        audit_path,
-    }
-}
-
-fn validate_policy_features(
+fn validate_policy_ref(
     reference: &str,
     driver: &str,
-    policy: Option<&NetworkPolicySpec>,
+    policy_ref: Option<&NetworkPolicyRef>,
 ) -> Result<(), LibVmError> {
-    let Some(policy) = policy else {
+    let Some(policy_ref) = policy_ref else {
         return Ok(());
     };
-    for feature in policy.required_features() {
-        if !matches!(feature, NetworkPolicyFeature::CidrRules) {
-            return Err(LibVmError::NetworkRuntime {
-                reference: reference.to_string(),
-                message: format!(
-                    "resolved driver {:?} does not support requested policy feature {:?}",
-                    driver, feature
-                ),
-            });
-        }
+    if driver != DRIVER_NETD {
+        return Err(LibVmError::NetworkRuntime {
+            reference: reference.to_string(),
+            message: format!("resolved driver {driver:?} does not support network policy_ref"),
+        });
     }
-    Ok(())
+    policy_ref
+        .resolve(resolve_config_dir())
+        .map(|_| ())
+        .map_err(|message| LibVmError::NetworkRuntime {
+            reference: reference.to_string(),
+            message,
+        })
+}
+
+fn resolve_network_policy_path(
+    metadata: &Machine,
+    policy_ref: Option<&NetworkPolicyRef>,
+) -> Result<Option<PathBuf>, LibVmError> {
+    policy_ref
+        .map(|policy_ref| policy_ref.resolve(resolve_config_dir()))
+        .transpose()
+        .map_err(|message| LibVmError::NetworkRuntime {
+            reference: metadata.name.clone(),
+            message,
+        })
 }
 
 async fn wait_for_socket(path: &Path) -> Result<(), String> {
@@ -423,7 +393,8 @@ mod tests {
                 machine_id: bento_core::MachineId::new(),
                 network_id: "net123",
                 policy_path: None,
-                audit_log_path: None,
+                tls_ca_cert_path: None,
+                tls_ca_key_path: None,
             },
         );
 
@@ -449,8 +420,9 @@ mod tests {
                 pcap_path: None,
                 machine_id,
                 network_id: "net123",
-                policy_path: Some(Path::new("/tmp/bento-net/policy.json")),
-                audit_log_path: Some(Path::new("/tmp/bento-net/audit.jsonl")),
+                policy_path: Some(Path::new("/tmp/bento-net/policy.hcl")),
+                tls_ca_cert_path: Some(Path::new("/tmp/bento-net/ca.pem")),
+                tls_ca_key_path: Some(Path::new("/tmp/bento-net/ca-key.pem")),
             },
         );
 
@@ -465,8 +437,16 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|window| window[0] == "--network-id" && window[1] == "net123"));
-        assert!(args.windows(2).any(
-            |window| window[0] == "--policy-file" && window[1] == "/tmp/bento-net/policy.json"
-        ));
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "--policy-file"
+                    && window[1] == "/tmp/bento-net/policy.hcl")
+        );
+        assert!(args
+            .windows(2)
+            .any(|window| window[0] == "--tls-ca-cert" && window[1] == "/tmp/bento-net/ca.pem"));
+        assert!(args
+            .windows(2)
+            .any(|window| window[0] == "--tls-ca-key" && window[1] == "/tmp/bento-net/ca-key.pem"));
     }
 }
