@@ -13,6 +13,7 @@ import (
 	"github.com/containers/gvisor-tap-vsock/pkg/transport"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/config"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/audit"
+	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/forwarder"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/hooks"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/router"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/virtualnetwork"
@@ -50,9 +51,13 @@ func run(args []string) error {
 	}
 	defer auditLog.Close()
 
-	hook := hooks.NewStaticHook(cfg.Policy.DefaultAction, cfg.Policy.CIDRRules)
+	hook := hooks.NewPolicyHook(cfg.Policy)
 	route := router.New(hook, auditLog)
-	vn, err := virtualnetwork.New(&cfg.Stack, route, virtualnetwork.Metadata{
+	httpsProxy, err := forwarder.NewHTTPSProxy(route, cfg.TLS.CACert, cfg.TLS.CAKey)
+	if err != nil {
+		return err
+	}
+	vn, err := virtualnetwork.New(&cfg.Stack, route, httpsProxy, virtualnetwork.Metadata{
 		VMID:        cfg.Metadata.VMID,
 		NetworkID:   cfg.Metadata.NetworkID,
 		ProfileName: cfg.Metadata.ProfileName,

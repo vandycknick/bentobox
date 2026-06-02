@@ -25,7 +25,7 @@ type TCPMetadata struct {
 	ProfileName string
 }
 
-func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, ec2MetadataAccess bool, route *router.Router, metadata TCPMetadata) *tcp.Forwarder {
+func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mutex, ec2MetadataAccess bool, route *router.Router, httpsProxy *HTTPSProxy, metadata TCPMetadata) *tcp.Forwarder {
 	return tcp.NewForwarder(s, 0, 10, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
 		localAddress := id.LocalAddress
@@ -62,13 +62,6 @@ func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 			return
 		}
 
-		outbound, err := net.Dial("tcp", net.JoinHostPort(localAddress.String(), fmt.Sprint(id.LocalPort)))
-		if err != nil {
-			log.Tracef("net.Dial() = %v", err)
-			r.Complete(true)
-			return
-		}
-
 		var wq waiter.Queue
 		ep, tcpErr := r.CreateEndpoint(&wq)
 		r.Complete(false)
@@ -78,17 +71,34 @@ func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 			} else {
 				log.Errorf("r.CreateEndpoint() = %v", tcpErr)
 			}
-			_ = outbound.Close()
+			return
+		}
+		inbound := gonet.NewTCPConn(&wq, ep)
+		target := net.JoinHostPort(localAddress.String(), fmt.Sprint(id.LocalPort))
+		if httpsProxy != nil && httpsProxy.ShouldHandle(id.LocalPort) {
+			if err := httpsProxy.Handle(context.Background(), inbound, flow, target); err != nil {
+				log.WithError(err).Debug("https proxy failed")
+			}
 			return
 		}
 
-		remote := tcpproxy.DialProxy{
-			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return outbound, nil
-			},
+		outbound, err := net.Dial("tcp", target)
+		if err != nil {
+			log.Tracef("net.Dial() = %v", err)
+			_ = inbound.Close()
+			return
 		}
-		remote.HandleConn(gonet.NewTCPConn(&wq, ep))
+		proxyTCP(inbound, outbound)
 	})
+}
+
+func proxyTCP(inbound net.Conn, outbound net.Conn) {
+	remote := tcpproxy.DialProxy{
+		DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return outbound, nil
+		},
+	}
+	remote.HandleConn(inbound)
 }
 
 func linkLocal() *tcpip.Subnet {

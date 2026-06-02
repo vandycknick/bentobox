@@ -3,6 +3,7 @@ package hooks
 import (
 	"context"
 	"net"
+	"net/http"
 )
 
 type RouteAction string
@@ -23,10 +24,36 @@ type Flow struct {
 	ProfileName string
 }
 
+type HTTPRequest struct {
+	Flow   Flow
+	Host   string
+	Method string
+	Path   string
+	Header http.Header
+}
+
+type AuditEvent struct {
+	RuleName     string
+	Reason       string
+	EndpointKind string
+	EndpointName string
+	Layer        string
+}
+
+type Credential struct {
+	Kind  string
+	Name  string
+	Value string
+}
+
 type RouteDecision struct {
-	Action   RouteAction
-	Reason   string
-	RuleName string
+	Action       RouteAction
+	Reason       string
+	RuleName     string
+	EndpointKind string
+	EndpointName string
+	AuditEvents  []AuditEvent
+	Credential   *Credential
 }
 
 type Hook interface {
