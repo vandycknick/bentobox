@@ -2,6 +2,7 @@ package forwarder
 
 import (
 	"context"
+	"log/slog"
 	"net"
 	"strconv"
 	"sync"
@@ -10,7 +11,6 @@ import (
 	upstreamForwarder "github.com/containers/gvisor-tap-vsock/pkg/services/forwarder"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/hooks"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/router"
-	log "github.com/sirupsen/logrus"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -48,7 +48,7 @@ func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 		}
 		decision, err := route.Decide(context.Background(), flow)
 		if err != nil {
-			log.WithError(err).Warn("udp policy hook failed")
+			slog.Warn("udp policy hook failed", "error", err)
 			return false
 		}
 		if decision.Action == hooks.RouteDeny {
@@ -58,11 +58,7 @@ func UDP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 		var wq waiter.Queue
 		ep, tcpErr := r.CreateEndpoint(&wq)
 		if tcpErr != nil {
-			if _, ok := tcpErr.(*tcpip.ErrConnectionRefused); ok {
-				log.Debugf("r.CreateEndpoint() = %v", tcpErr)
-			} else {
-				log.Errorf("r.CreateEndpoint() = %v", tcpErr)
-			}
+			logCreateEndpointError("udp", flow, tcpErr)
 			return false
 		}
 

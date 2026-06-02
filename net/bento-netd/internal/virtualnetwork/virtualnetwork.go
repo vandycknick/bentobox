@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -18,7 +19,6 @@ import (
 	"github.com/containers/gvisor-tap-vsock/pkg/types"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/forwarder"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/router"
-	log "github.com/sirupsen/logrus"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/link/sniffer"
@@ -149,8 +149,16 @@ func dnsServer(configuration *types.Configuration, s *stack.Stack) (http.Handler
 	if err != nil {
 		return nil, err
 	}
-	go func() { log.Error(server.Serve()) }()
-	go func() { log.Error(server.ServeTCP()) }()
+	go func() {
+		if err := server.Serve(); err != nil {
+			slog.Error("dns udp server stopped", "error", err)
+		}
+	}()
+	go func() {
+		if err := server.ServeTCP(); err != nil {
+			slog.Error("dns tcp server stopped", "error", err)
+		}
+	}()
 	return server.Mux(), nil
 }
 
@@ -159,7 +167,11 @@ func dhcpServer(configuration *types.Configuration, s *stack.Stack, ipPool *tap.
 	if err != nil {
 		return nil, err
 	}
-	go func() { log.Error(server.Serve()) }()
+	go func() {
+		if err := server.Serve(); err != nil {
+			slog.Error("dhcp server stopped", "error", err)
+		}
+	}()
 	return server.Mux(), nil
 }
 

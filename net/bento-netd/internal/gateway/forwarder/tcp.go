@@ -3,13 +3,13 @@ package forwarder
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 
 	"github.com/inetaf/tcpproxy"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/hooks"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/router"
-	log "github.com/sirupsen/logrus"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -53,7 +53,7 @@ func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 		}
 		decision, err := route.Decide(context.Background(), flow)
 		if err != nil {
-			log.WithError(err).Warn("tcp policy hook failed")
+			slog.Warn("tcp policy hook failed", "error", err)
 			r.Complete(true)
 			return
 		}
@@ -66,25 +66,21 @@ func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 		ep, tcpErr := r.CreateEndpoint(&wq)
 		r.Complete(false)
 		if tcpErr != nil {
-			if _, ok := tcpErr.(*tcpip.ErrConnectionRefused); ok {
-				log.Debugf("r.CreateEndpoint() = %v", tcpErr)
-			} else {
-				log.Errorf("r.CreateEndpoint() = %v", tcpErr)
-			}
+			logCreateEndpointError("tcp", flow, tcpErr)
 			return
 		}
 		inbound := gonet.NewTCPConn(&wq, ep)
 		target := net.JoinHostPort(localAddress.String(), fmt.Sprint(id.LocalPort))
 		if httpsProxy != nil && httpsProxy.ShouldHandle(id.LocalPort) {
 			if err := httpsProxy.Handle(context.Background(), inbound, flow, target); err != nil {
-				log.WithError(err).Debug("https proxy failed")
+				slog.Debug("https proxy failed", "error", err, "target", target)
 			}
 			return
 		}
 
 		outbound, err := net.Dial("tcp", target)
 		if err != nil {
-			log.Tracef("net.Dial() = %v", err)
+			slog.Debug("tcp outbound dial failed", "error", err, "target", target)
 			_ = inbound.Close()
 			return
 		}

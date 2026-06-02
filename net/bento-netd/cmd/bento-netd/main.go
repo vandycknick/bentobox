@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -22,8 +23,13 @@ import (
 )
 
 func main() {
+	if err := configureLogging(""); err != nil {
+		fmt.Fprintf(os.Stderr, "configure logging: %v\n", err)
+		os.Exit(1)
+	}
 	if err := run(os.Args[1:]); err != nil {
-		log.Fatal(err)
+		slog.Error("netd failed", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -90,16 +96,27 @@ func run(args []string) error {
 }
 
 func configureLogging(logFile string) error {
+	var output io.Writer = os.Stderr
 	if logFile == "" {
+		configureStructuredLoggers(output)
 		return nil
 	}
 	f, err := os.Create(logFile)
 	if err != nil {
 		return fmt.Errorf("open log file %s: %w", logFile, err)
 	}
-	log.SetOutput(f)
-	slog.SetDefault(slog.New(slog.NewJSONHandler(f, nil)))
+	output = f
+	configureStructuredLoggers(output)
 	return nil
+}
+
+func configureStructuredLoggers(output io.Writer) {
+	log.SetOutput(output)
+	log.SetFormatter(&log.JSONFormatter{})
+	slog.SetDefault(slog.New(slog.NewJSONHandler(output, nil)))
+	log.SetLevel(log.InfoLevel)
+	log.SetReportCaller(false)
+	log.StandardLogger().ExitFunc = os.Exit
 }
 
 func writePIDFile(path string) error {

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nickvan/bentobox/net/bento-netd/internal/credentials"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/hooks"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/router"
 )
@@ -28,9 +29,10 @@ import (
 const httpsPort uint16 = 443
 
 type HTTPSProxy struct {
-	route           *router.Router
-	ca              *certificateAuthority
-	upstreamRootCAs *x509.CertPool
+	route             *router.Router
+	ca                *certificateAuthority
+	credentialManager *credentials.Manager
+	upstreamRootCAs   *x509.CertPool
 }
 
 func NewHTTPSProxy(route *router.Router, certPath string, keyPath string) (*HTTPSProxy, error) {
@@ -41,7 +43,7 @@ func NewHTTPSProxy(route *router.Router, certPath string, keyPath string) (*HTTP
 	if err != nil {
 		return nil, err
 	}
-	return &HTTPSProxy{route: route, ca: ca}, nil
+	return &HTTPSProxy{route: route, ca: ca, credentialManager: credentials.NewManager()}, nil
 }
 
 func (p *HTTPSProxy) ShouldHandle(port uint16) bool {
@@ -134,7 +136,10 @@ func (p *HTTPSProxy) proxyHTTP(ctx context.Context, client *tls.Conn, upstream *
 			_ = req.Body.Close()
 			return writeDeny(client, decision.Reason)
 		}
-		applyCredential(req, decision.Credential)
+		if err := p.credentialManager.Apply(ctx, req, decision.Credential); err != nil {
+			_ = req.Body.Close()
+			return err
+		}
 
 		req.RequestURI = ""
 		if req.URL.Scheme == "" {
@@ -161,15 +166,6 @@ func (p *HTTPSProxy) proxyHTTP(ctx context.Context, client *tls.Conn, upstream *
 		if closeAfterResponse {
 			return nil
 		}
-	}
-}
-
-func applyCredential(req *http.Request, credential *hooks.Credential) {
-	if credential == nil {
-		return
-	}
-	if credential.Kind == "bearer_token" {
-		req.Header.Set("Authorization", "Bearer "+credential.Value)
 	}
 }
 

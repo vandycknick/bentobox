@@ -6,6 +6,7 @@ use crate::constants::HELP_TEMPLATE;
 use eyre::Context;
 
 pub mod create;
+pub mod credentials;
 pub mod edit;
 pub mod exec;
 pub mod images;
@@ -46,6 +47,7 @@ pub enum Command {
     Start(start::Cmd),
     Stop(stop::Cmd),
     Restart(restart::Cmd),
+    Credentials(credentials::Cmd),
     #[command(name = "rm")]
     Rm(rm::Cmd),
     Shell(shell::Cmd),
@@ -73,6 +75,7 @@ impl Display for Command {
             Command::Start(cmd) => write!(f, "start {}", cmd),
             Command::Stop(cmd) => write!(f, "stop {}", cmd),
             Command::Restart(cmd) => write!(f, "restart {}", cmd),
+            Command::Credentials(cmd) => write!(f, "credentials {}", cmd),
             Command::Rm(cmd) => write!(f, "rm {}", cmd),
             Command::Shell(cmd) => write!(f, "shell {}", cmd),
             Command::Exec(cmd) => write!(f, "exec {}", cmd),
@@ -129,6 +132,7 @@ impl BentoCtlCmd {
                 let libvm = libvm().await?;
                 cmd.run(&libvm).await
             }
+            Command::Credentials(cmd) => cmd.run().await,
             Command::Rm(cmd) => {
                 let libvm = libvm().await?;
                 cmd.run(&libvm).await

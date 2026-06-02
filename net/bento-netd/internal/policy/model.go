@@ -57,6 +57,7 @@ type Credential struct {
 	Name      string
 	Endpoint  Ref
 	ValueFile string
+	TokenFile string
 	Value     string
 }
 

@@ -152,6 +152,68 @@ credential "bearer_token" "github" {
 	}
 }
 
+func TestLoadFileCompilesOpenAICodexOAuthCredential(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := filepath.Join(dir, "codex.json")
+	policyPath := filepath.Join(dir, "policy.hcl")
+	writePolicy(t, policyPath, `
+endpoint "https" "openai" {
+  hosts = ["chatgpt.com"]
+}
+
+credential "openai_codex_oauth" "codex" {
+  endpoint = https.openai
+  token_file = "`+tokenPath+`"
+}
+
+rule "codex" {
+  endpoint = https.openai
+  verdict = "allow"
+}
+`)
+
+	compiled, err := LoadFile(policyPath)
+	if err != nil {
+		t.Fatalf("LoadFile returned error: %v", err)
+	}
+	decision := compiled.EvaluateHTTP(HTTPRequest{Host: "chatgpt.com", Method: http.MethodPost, Path: "/backend-api/codex/responses"})
+	if decision.Credential == nil {
+		t.Fatal("expected credential on allow decision")
+	}
+	if decision.Credential.Kind != "openai_codex_oauth" {
+		t.Fatalf("expected openai_codex_oauth credential, got %#v", decision.Credential)
+	}
+	if decision.Credential.TokenFile != tokenPath {
+		t.Fatalf("expected token_file %q, got %q", tokenPath, decision.Credential.TokenFile)
+	}
+	if decision.Credential.Value != "" {
+		t.Fatalf("expected openai credential to avoid eager secret loading, got value %q", decision.Credential.Value)
+	}
+}
+
+func TestLoadFileRejectsRelativeOpenAICodexTokenFile(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "policy.hcl")
+	writePolicy(t, policyPath, `
+endpoint "https" "openai" {
+  hosts = ["chatgpt.com"]
+}
+
+credential "openai_codex_oauth" "codex" {
+  endpoint = https.openai
+  token_file = "codex.json"
+}
+`)
+
+	_, err := LoadFile(policyPath)
+	if err == nil {
+		t.Fatal("expected relative token_file to be rejected")
+	}
+	if !strings.Contains(err.Error(), "token_file must be absolute") {
+		t.Fatalf("expected absolute token_file error, got %v", err)
+	}
+}
+
 func TestLoadFileRejectsMultipleCredentialsForEndpoint(t *testing.T) {
 	dir := t.TempDir()
 	tokenPath := filepath.Join(dir, "github-token")
