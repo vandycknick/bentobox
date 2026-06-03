@@ -9,13 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/hooks"
+	"github.com/nickvan/bentobox/net/bento-netd/internal/secrets"
 )
 
 const (
@@ -25,12 +24,12 @@ const (
 	openAICodexClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 	openAITokenURL      = "https://auth.openai.com/oauth/token"
 
-	refreshSkew        = 60 * time.Second
-	tokenFileSizeLimit = 1 << 20
-	oauthBodyLimit     = 64 << 10
+	refreshSkew    = 60 * time.Second
+	oauthBodyLimit = 64 << 10
 )
 
 type Manager struct {
+	store          secrets.Store
 	client         *http.Client
 	now            func() time.Time
 	openAITokenURL string
@@ -39,8 +38,9 @@ type Manager struct {
 	locks map[string]*sync.Mutex
 }
 
-func NewManager() *Manager {
+func NewManager(store secrets.Store) *Manager {
 	return &Manager{
+		store: store,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -56,12 +56,28 @@ func (m *Manager) Apply(ctx context.Context, req *http.Request, credential *hook
 	}
 	switch credential.Kind {
 	case kindBearerToken:
-		return applyBearerToken(req, credential.Value)
+		return m.applyBearerToken(req, credential)
 	case kindOpenAICodexOAuth:
 		return m.applyOpenAICodexOAuth(ctx, req, credential)
 	default:
 		return fmt.Errorf("unsupported credential kind %q", credential.Kind)
 	}
+}
+
+func (m *Manager) applyBearerToken(req *http.Request, credential *hooks.Credential) error {
+	store, err := m.requireStore(credential)
+	if err != nil {
+		return err
+	}
+	secret, err := store.Get(credential.Secret)
+	if err != nil {
+		return fmt.Errorf("read bearer_token secret %q: %w", credential.Secret, err)
+	}
+	value, err := secret.PlainValue()
+	if err != nil {
+		return fmt.Errorf("read bearer_token secret %q: %w", credential.Secret, err)
+	}
+	return applyBearerToken(req, value)
 }
 
 func applyBearerToken(req *http.Request, value string) error {
@@ -74,26 +90,28 @@ func applyBearerToken(req *http.Request, value string) error {
 }
 
 func (m *Manager) applyOpenAICodexOAuth(ctx context.Context, req *http.Request, credential *hooks.Credential) error {
-	if credential.TokenFile == "" {
-		return fmt.Errorf("openai_codex_oauth credential %q is missing token_file", credential.Name)
-	}
-	lock := m.lockFor(credential.TokenFile)
-	lock.Lock()
-	defer lock.Unlock()
-
-	token, err := readOpenAICodexTokenFile(credential.TokenFile)
+	store, err := m.requireStore(credential)
 	if err != nil {
 		return err
 	}
-	if token.Kind != "" && token.Kind != kindOpenAICodexOAuth {
-		return fmt.Errorf("credential token file %s has kind %q, expected %q", credential.TokenFile, token.Kind, kindOpenAICodexOAuth)
+	lock := m.lockFor(credential.Secret)
+	lock.Lock()
+	defer lock.Unlock()
+
+	stored, err := store.Get(credential.Secret)
+	if err != nil {
+		return fmt.Errorf("read openai_codex_oauth secret %q: %w", credential.Secret, err)
+	}
+	token, err := stored.OAuth()
+	if err != nil {
+		return fmt.Errorf("read openai_codex_oauth secret %q: %w", credential.Secret, err)
 	}
 	if token.AccessToken == "" {
-		return fmt.Errorf("credential token file %s is missing access_token", credential.TokenFile)
+		return fmt.Errorf("openai_codex_oauth secret %q is missing access_token", credential.Secret)
 	}
 	if m.needsRefresh(token.ExpiresAt) {
 		if token.RefreshToken == "" {
-			return fmt.Errorf("credential token file %s is expired and missing refresh_token", credential.TokenFile)
+			return fmt.Errorf("openai_codex_oauth secret %q is expired and missing refresh_token", credential.Secret)
 		}
 		refreshed, err := m.refreshOpenAICodexToken(ctx, token)
 		if err != nil {
@@ -103,12 +121,12 @@ func (m *Manager) applyOpenAICodexOAuth(ctx context.Context, req *http.Request, 
 		if refreshed.CreatedAt == "" {
 			refreshed.CreatedAt = rfc3339(m.now())
 		}
-		refreshed.AccountID = token.AccountID
+		refreshed.AccountID = chatGPTAccountID(refreshed.AccessToken)
 		if refreshed.AccountID == "" {
-			refreshed.AccountID = chatGPTAccountID(refreshed.AccessToken)
+			refreshed.AccountID = token.AccountID
 		}
-		if err := writeOpenAICodexTokenFile(credential.TokenFile, refreshed); err != nil {
-			return err
+		if err := store.UpdateOAuth(credential.Secret, refreshed); err != nil {
+			return fmt.Errorf("update openai_codex_oauth secret %q: %w", credential.Secret, err)
 		}
 		token = refreshed
 	}
@@ -126,14 +144,23 @@ func (m *Manager) applyOpenAICodexOAuth(ctx context.Context, req *http.Request, 
 	return nil
 }
 
-func (m *Manager) lockFor(path string) *sync.Mutex {
-	path = filepath.Clean(path)
+func (m *Manager) requireStore(credential *hooks.Credential) (secrets.Store, error) {
+	if credential.Secret == "" {
+		return nil, fmt.Errorf("credential %q.%q is missing secret", credential.Kind, credential.Name)
+	}
+	if m.store == nil {
+		return nil, fmt.Errorf("credential %q.%q requires a secret store", credential.Kind, credential.Name)
+	}
+	return m.store, nil
+}
+
+func (m *Manager) lockFor(name string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	lock := m.locks[path]
+	lock := m.locks[name]
 	if lock == nil {
 		lock = &sync.Mutex{}
-		m.locks[path] = lock
+		m.locks[name] = lock
 	}
 	return lock
 }
@@ -146,25 +173,25 @@ func (m *Manager) needsRefresh(expiresAt string) bool {
 	return !m.now().Add(refreshSkew).Before(expiry)
 }
 
-func (m *Manager) refreshOpenAICodexToken(ctx context.Context, current openAICodexTokenFile) (openAICodexTokenFile, error) {
+func (m *Manager) refreshOpenAICodexToken(ctx context.Context, current secrets.OAuthSecret) (secrets.OAuthSecret, error) {
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", current.RefreshToken)
 	form.Set("client_id", openAICodexClientID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.openAITokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return openAICodexTokenFile{}, fmt.Errorf("build OpenAI Codex token refresh request: %w", err)
+		return secrets.OAuthSecret{}, fmt.Errorf("build OpenAI Codex token refresh request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return openAICodexTokenFile{}, fmt.Errorf("refresh OpenAI Codex token: %w", err)
+		return secrets.OAuthSecret{}, fmt.Errorf("refresh OpenAI Codex token: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, oauthBodyLimit))
 	if resp.StatusCode != http.StatusOK {
-		return openAICodexTokenFile{}, fmt.Errorf("refresh OpenAI Codex token returned %d: %s", resp.StatusCode, sanitizeResponseBody(body))
+		return secrets.OAuthSecret{}, fmt.Errorf("refresh OpenAI Codex token returned %d: %s", resp.StatusCode, sanitizeResponseBody(body))
 	}
 	var decoded struct {
 		AccessToken  string `json:"access_token"`
@@ -172,78 +199,25 @@ func (m *Manager) refreshOpenAICodexToken(ctx context.Context, current openAICod
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &decoded); err != nil {
-		return openAICodexTokenFile{}, fmt.Errorf("decode OpenAI Codex token refresh response: %w", err)
+		return secrets.OAuthSecret{}, fmt.Errorf("decode OpenAI Codex token refresh response: %w", err)
 	}
 	if decoded.AccessToken == "" {
-		return openAICodexTokenFile{}, fmt.Errorf("OpenAI Codex token refresh response is missing access_token")
+		return secrets.OAuthSecret{}, fmt.Errorf("OpenAI Codex token refresh response is missing access_token")
 	}
 	if decoded.RefreshToken == "" {
 		decoded.RefreshToken = current.RefreshToken
 	}
 	if decoded.ExpiresIn <= 0 {
-		return openAICodexTokenFile{}, fmt.Errorf("OpenAI Codex token refresh response is missing expires_in")
+		return secrets.OAuthSecret{}, fmt.Errorf("OpenAI Codex token refresh response is missing expires_in")
 	}
 	now := m.now()
-	return openAICodexTokenFile{
-		Version:      1,
-		Kind:         kindOpenAICodexOAuth,
+	return secrets.OAuthSecret{
 		AccessToken:  decoded.AccessToken,
 		RefreshToken: decoded.RefreshToken,
 		ExpiresAt:    rfc3339(now.Add(time.Duration(decoded.ExpiresIn) * time.Second)),
 		CreatedAt:    current.CreatedAt,
 		UpdatedAt:    rfc3339(now),
 	}, nil
-}
-
-type openAICodexTokenFile struct {
-	Version      int    `json:"version"`
-	Kind         string `json:"kind"`
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresAt    string `json:"expires_at"`
-	AccountID    string `json:"account_id,omitempty"`
-	CreatedAt    string `json:"created_at"`
-	UpdatedAt    string `json:"updated_at"`
-}
-
-func readOpenAICodexTokenFile(path string) (openAICodexTokenFile, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return openAICodexTokenFile{}, fmt.Errorf("open credential token file %s: %w", path, err)
-	}
-	defer f.Close()
-	var token openAICodexTokenFile
-	decoder := json.NewDecoder(io.LimitReader(f, tokenFileSizeLimit))
-	if err := decoder.Decode(&token); err != nil {
-		return openAICodexTokenFile{}, fmt.Errorf("decode credential token file %s: %w", path, err)
-	}
-	return token, nil
-}
-
-func writeOpenAICodexTokenFile(path string, token openAICodexTokenFile) error {
-	body, err := json.MarshalIndent(token, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode credential token file %s: %w", path, err)
-	}
-	body = append(body, '\n')
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-	tmpPath := filepath.Join(dir, fmt.Sprintf(".%s.tmp.%d", base, os.Getpid()))
-	if err := os.WriteFile(tmpPath, body, 0o600); err != nil {
-		return fmt.Errorf("write credential token file %s: %w", tmpPath, err)
-	}
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("secure credential token file %s: %w", tmpPath, err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("replace credential token file %s: %w", path, err)
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("secure credential token file %s: %w", path, err)
-	}
-	return nil
 }
 
 func chatGPTAccountID(accessToken string) string {

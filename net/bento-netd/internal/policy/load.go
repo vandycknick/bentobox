@@ -3,7 +3,6 @@ package policy
 import (
 	"fmt"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -97,11 +96,10 @@ type rawHTTPSEndpoint struct {
 }
 
 type rawCredential struct {
-	Kind      string
-	Name      string
-	Endpoint  Ref
-	ValueFile string
-	TokenFile string
+	Kind     string
+	Name     string
+	Endpoint Ref
+	Secret   string
 }
 
 type rawRule struct {
@@ -264,8 +262,7 @@ func compileHTTPSEndpoint(name string, raw rawHTTPSEndpoint) (*HTTPSEndpoint, er
 func decodeCredential(block *hcl.Block) (rawCredential, error) {
 	content, diagnostics := block.Body.Content(&hcl.BodySchema{Attributes: []hcl.AttributeSchema{
 		{Name: "endpoint"},
-		{Name: "value_file"},
-		{Name: "token_file"},
+		{Name: "secret"},
 	}})
 	if diagnostics.HasErrors() {
 		return rawCredential{}, fmt.Errorf("decode credential %q.%q: %s", block.Labels[0], block.Labels[1], diagnostics.Error())
@@ -278,23 +275,15 @@ func decodeCredential(block *hcl.Block) (rawCredential, error) {
 	if err != nil {
 		return rawCredential{}, fmt.Errorf("decode credential %q.%q endpoint: %w", block.Labels[0], block.Labels[1], err)
 	}
-	var valueFile string
-	if valueFileAttr, ok := content.Attributes["value_file"]; ok {
-		decoded, err := decodeStringAttr(valueFileAttr)
+	var secret string
+	if secretAttr, ok := content.Attributes["secret"]; ok {
+		decoded, err := decodeStringAttr(secretAttr)
 		if err != nil {
-			return rawCredential{}, fmt.Errorf("decode credential %q.%q value_file: %w", block.Labels[0], block.Labels[1], err)
+			return rawCredential{}, fmt.Errorf("decode credential %q.%q secret: %w", block.Labels[0], block.Labels[1], err)
 		}
-		valueFile = decoded
+		secret = decoded
 	}
-	var tokenFile string
-	if tokenFileAttr, ok := content.Attributes["token_file"]; ok {
-		decoded, err := decodeStringAttr(tokenFileAttr)
-		if err != nil {
-			return rawCredential{}, fmt.Errorf("decode credential %q.%q token_file: %w", block.Labels[0], block.Labels[1], err)
-		}
-		tokenFile = decoded
-	}
-	return rawCredential{Kind: block.Labels[0], Name: block.Labels[1], Endpoint: endpoint, ValueFile: valueFile, TokenFile: tokenFile}, nil
+	return rawCredential{Kind: block.Labels[0], Name: block.Labels[1], Endpoint: endpoint, Secret: secret}, nil
 }
 
 func (p *Policy) addCredential(raw rawCredential) error {
@@ -330,40 +319,34 @@ func (p *Policy) addCredential(raw rawCredential) error {
 }
 
 func compileCredential(raw rawCredential) (*Credential, error) {
+	if raw.Secret == "" {
+		return nil, fmt.Errorf("credential %q.%q requires secret", raw.Kind, raw.Name)
+	}
+	if err := validateSecretName(raw.Secret); err != nil {
+		return nil, fmt.Errorf("credential %q.%q secret: %w", raw.Kind, raw.Name, err)
+	}
 	switch raw.Kind {
-	case "bearer_token":
-		if raw.ValueFile == "" {
-			return nil, fmt.Errorf("credential %q.%q requires value_file", raw.Kind, raw.Name)
-		}
-		if raw.TokenFile != "" {
-			return nil, fmt.Errorf("credential %q.%q uses token_file, but bearer_token requires value_file", raw.Kind, raw.Name)
-		}
-		if !filepath.IsAbs(raw.ValueFile) {
-			return nil, fmt.Errorf("credential %q.%q value_file must be absolute: %s", raw.Kind, raw.Name, raw.ValueFile)
-		}
-		valueBytes, err := os.ReadFile(raw.ValueFile)
-		if err != nil {
-			return nil, fmt.Errorf("read credential %q.%q value_file %s: %w", raw.Kind, raw.Name, raw.ValueFile, err)
-		}
-		value := strings.TrimSuffix(string(valueBytes), "\n")
-		if value == "" {
-			return nil, fmt.Errorf("credential %q.%q value_file is empty", raw.Kind, raw.Name)
-		}
-		return &Credential{Kind: raw.Kind, Name: raw.Name, Endpoint: raw.Endpoint, ValueFile: raw.ValueFile, Value: value}, nil
-	case "openai_codex_oauth":
-		if raw.TokenFile == "" {
-			return nil, fmt.Errorf("credential %q.%q requires token_file", raw.Kind, raw.Name)
-		}
-		if raw.ValueFile != "" {
-			return nil, fmt.Errorf("credential %q.%q uses value_file, but openai_codex_oauth requires token_file", raw.Kind, raw.Name)
-		}
-		if !filepath.IsAbs(raw.TokenFile) {
-			return nil, fmt.Errorf("credential %q.%q token_file must be absolute: %s", raw.Kind, raw.Name, raw.TokenFile)
-		}
-		return &Credential{Kind: raw.Kind, Name: raw.Name, Endpoint: raw.Endpoint, TokenFile: raw.TokenFile}, nil
+	case "bearer_token", "openai_codex_oauth":
+		return &Credential{Kind: raw.Kind, Name: raw.Name, Endpoint: raw.Endpoint, Secret: raw.Secret}, nil
 	default:
 		return nil, fmt.Errorf("unsupported credential kind %q", raw.Kind)
 	}
+}
+
+func validateSecretName(name string) error {
+	if name == "" {
+		return fmt.Errorf("cannot be empty")
+	}
+	if name == "." || name == ".." || strings.HasPrefix(name, ".") {
+		return fmt.Errorf("name %q is not allowed", name)
+	}
+	for _, ch := range name {
+		if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-' || ch == '_' || ch == '.' {
+			continue
+		}
+		return fmt.Errorf("name %q may only contain ASCII letters, numbers, dots, underscores, and dashes", name)
+	}
+	return nil
 }
 
 func decodeRule(block *hcl.Block, order int) (rawRule, error) {

@@ -41,11 +41,9 @@ type AuditEvent struct {
 }
 
 type Credential struct {
-	Kind      string
-	Name      string
-	ValueFile string
-	TokenFile string
-	Value     string
+	Kind   string
+	Name   string
+	Secret string
 }
 
 type RouteDecision struct {

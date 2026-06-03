@@ -109,6 +109,10 @@ impl Layout {
     pub fn keys_dir(&self) -> PathBuf {
         self.data_dir.join("keys")
     }
+
+    pub fn secret_store_path(&self) -> PathBuf {
+        self.data_dir.join("secrets.json")
+    }
 }
 
 pub fn resolve_config_dir() -> Option<PathBuf> {
@@ -169,6 +173,10 @@ mod tests {
         );
         assert_eq!(layout.images_dir(), PathBuf::from("/tmp/bento/images"));
         assert_eq!(layout.keys_dir(), PathBuf::from("/tmp/bento/keys"));
+        assert_eq!(
+            layout.secret_store_path(),
+            PathBuf::from("/tmp/bento/secrets.json")
+        );
         assert_eq!(
             layout.instance_dir(machine_id),
             PathBuf::from("/tmp/bento/instances").join(machine_id.to_string())

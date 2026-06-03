@@ -24,6 +24,7 @@ import (
 	"github.com/nickvan/bentobox/net/bento-netd/internal/credentials"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/hooks"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/router"
+	"github.com/nickvan/bentobox/net/bento-netd/internal/secrets"
 )
 
 const httpsPort uint16 = 443
@@ -35,7 +36,7 @@ type HTTPSProxy struct {
 	upstreamRootCAs   *x509.CertPool
 }
 
-func NewHTTPSProxy(route *router.Router, certPath string, keyPath string) (*HTTPSProxy, error) {
+func NewHTTPSProxy(route *router.Router, certPath string, keyPath string, store secrets.Store) (*HTTPSProxy, error) {
 	if route == nil || !route.HasHTTPS() {
 		return nil, nil
 	}
@@ -43,7 +44,7 @@ func NewHTTPSProxy(route *router.Router, certPath string, keyPath string) (*HTTP
 	if err != nil {
 		return nil, err
 	}
-	return &HTTPSProxy{route: route, ca: ca, credentialManager: credentials.NewManager()}, nil
+	return &HTTPSProxy{route: route, ca: ca, credentialManager: credentials.NewManager(store)}, nil
 }
 
 func (p *HTTPSProxy) ShouldHandle(port uint16) bool {

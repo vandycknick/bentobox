@@ -73,11 +73,9 @@ func routeDecisionFromPolicy(decision policy.Decision, layer string) RouteDecisi
 	}
 	if decision.Credential != nil {
 		converted.Credential = &Credential{
-			Kind:      decision.Credential.Kind,
-			Name:      decision.Credential.Name,
-			ValueFile: decision.Credential.ValueFile,
-			TokenFile: decision.Credential.TokenFile,
-			Value:     decision.Credential.Value,
+			Kind:   decision.Credential.Kind,
+			Name:   decision.Credential.Name,
+			Secret: decision.Credential.Secret,
 		}
 	}
 	return converted

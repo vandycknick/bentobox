@@ -17,6 +17,7 @@ import (
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/forwarder"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/hooks"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/router"
+	"github.com/nickvan/bentobox/net/bento-netd/internal/secrets"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/virtualnetwork"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
@@ -59,7 +60,11 @@ func run(args []string) error {
 
 	hook := hooks.NewPolicyHook(cfg.Policy)
 	route := router.New(hook, auditLog)
-	httpsProxy, err := forwarder.NewHTTPSProxy(route, cfg.TLS.CACert, cfg.TLS.CAKey)
+	var secretStore secrets.Store
+	if cfg.SecretStore != "" {
+		secretStore = secrets.NewFileStore(cfg.SecretStore)
+	}
+	httpsProxy, err := forwarder.NewHTTPSProxy(route, cfg.TLS.CACert, cfg.TLS.CAKey, secretStore)
 	if err != nil {
 		return err
 	}

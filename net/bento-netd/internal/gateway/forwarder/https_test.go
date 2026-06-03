@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -22,15 +23,13 @@ import (
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/hooks"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/router"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/policy"
+	"github.com/nickvan/bentobox/net/bento-netd/internal/secrets"
 )
 
 func TestHTTPSProxyInterceptsAndInjectsBearerToken(t *testing.T) {
 	dir := t.TempDir()
 	caCert, caKey, caPool := writeTestCA(t, dir)
-	tokenPath := filepath.Join(dir, "token")
-	if err := os.WriteFile(tokenPath, []byte("replacement-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	secretStore := writeHTTPSSecretStore(t, dir, "local-token", "replacement-token")
 	policyPath := filepath.Join(dir, "policy.hcl")
 	if err := os.WriteFile(policyPath, []byte(`
 endpoint "https" "local" {
@@ -39,7 +38,7 @@ endpoint "https" "local" {
 
 credential "bearer_token" "local" {
   endpoint = https.local
-  value_file = "`+tokenPath+`"
+  secret = "local-token"
 }
 
 rule "local-reads" {
@@ -55,7 +54,7 @@ rule "local-reads" {
 		t.Fatalf("LoadFile returned error: %v", err)
 	}
 	route := router.New(hooks.NewPolicyHook(compiled), nil)
-	proxy, err := NewHTTPSProxy(route, caCert, caKey)
+	proxy, err := NewHTTPSProxy(route, caCert, caKey, secretStore)
 	if err != nil {
 		t.Fatalf("NewHTTPSProxy returned error: %v", err)
 	}
@@ -119,6 +118,20 @@ rule "local-reads" {
 	default:
 		t.Fatal("upstream did not receive request")
 	}
+}
+
+func writeHTTPSSecretStore(t *testing.T, dir string, name string, value string) *secrets.FileStore {
+	t.Helper()
+	path := filepath.Join(dir, "secrets.json")
+	body, err := json.MarshalIndent(map[string]secrets.Secret{name: secrets.Plain(value)}, "", "  ")
+	if err != nil {
+		t.Fatalf("encode secret store: %v", err)
+	}
+	body = append(body, '\n')
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("write secret store: %v", err)
+	}
+	return secrets.NewFileStore(path)
 }
 
 func startTLSUpstream(t *testing.T, caCertPath string, caKeyPath string, authorizationCh chan<- string) (string, func()) {

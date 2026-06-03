@@ -53,12 +53,10 @@ type HTTPSEndpoint struct {
 }
 
 type Credential struct {
-	Kind      string
-	Name      string
-	Endpoint  Ref
-	ValueFile string
-	TokenFile string
-	Value     string
+	Kind     string
+	Name     string
+	Endpoint Ref
+	Secret   string
 }
 
 type Rule struct {
@@ -125,6 +123,10 @@ func (p *Policy) AuditLogPath() string {
 
 func (p *Policy) HasHTTPS() bool {
 	return p != nil && len(p.httpsEndpoints) > 0
+}
+
+func (p *Policy) HasCredentials() bool {
+	return p != nil && len(p.credentials) > 0
 }
 
 func (p *Policy) MatchHTTPSHost(host string) bool {

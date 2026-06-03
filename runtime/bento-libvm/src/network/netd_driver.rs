@@ -100,6 +100,7 @@ async fn prepare_netd_runtime(
     let pid_path = layout.network_pid_path(&network_id);
     let pcap_path = config.pcap.then(|| layout.network_pcap_path(&network_id));
     let policy_path = resolve_network_policy_path(metadata, request.policy_ref)?;
+    let secret_store_path = layout.secret_store_path();
     let (tls_ca_cert_path, tls_ca_key_path) =
         resolve_certificate_authority_paths(layout, &config, &metadata.name)?;
     remove_file_if_exists(&socket_path)?;
@@ -118,6 +119,7 @@ async fn prepare_netd_runtime(
             machine_id: metadata.id,
             network_id: &network_id,
             policy_path: policy_path.as_deref(),
+            secret_store_path: secret_store_path.as_path(),
             tls_ca_cert_path: Some(tls_ca_cert_path.as_path()),
             tls_ca_key_path: Some(tls_ca_key_path.as_path()),
         },
@@ -244,6 +246,7 @@ struct NetworkHelperCommandConfig<'a> {
     machine_id: MachineId,
     network_id: &'a str,
     policy_path: Option<&'a Path>,
+    secret_store_path: &'a Path,
     tls_ca_cert_path: Option<&'a Path>,
     tls_ca_key_path: Option<&'a Path>,
 }
@@ -274,6 +277,9 @@ fn configure_network_helper_command(
     if let Some(path) = config.policy_path {
         command.arg("--policy-file").arg(path);
     }
+    command
+        .arg("--secret-store-file")
+        .arg(config.secret_store_path);
     if let Some(path) = config.tls_ca_cert_path {
         command.arg("--tls-ca-cert").arg(path);
     }
@@ -429,6 +435,7 @@ mod tests {
                 machine_id: bento_core::MachineId::new(),
                 network_id: "net123",
                 policy_path: None,
+                secret_store_path: Path::new("/tmp/bento/secrets.json"),
                 tls_ca_cert_path: None,
                 tls_ca_key_path: None,
             },
@@ -457,6 +464,7 @@ mod tests {
                 machine_id,
                 network_id: "net123",
                 policy_path: Some(Path::new("/tmp/bento-net/policy.hcl")),
+                secret_store_path: Path::new("/tmp/bento/secrets.json"),
                 tls_ca_cert_path: Some(Path::new("/tmp/bento-net/ca.pem")),
                 tls_ca_key_path: Some(Path::new("/tmp/bento-net/ca-key.pem")),
             },
@@ -478,6 +486,10 @@ mod tests {
                 .any(|window| window[0] == "--policy-file"
                     && window[1] == "/tmp/bento-net/policy.hcl")
         );
+        assert!(args
+            .windows(2)
+            .any(|window| window[0] == "--secret-store-file"
+                && window[1] == "/tmp/bento/secrets.json"));
         assert!(args
             .windows(2)
             .any(|window| window[0] == "--tls-ca-cert" && window[1] == "/tmp/bento-net/ca.pem"));

@@ -59,6 +59,36 @@ rule "audit-github" {
 	}
 }
 
+func TestParseRequiresSecretStoreForCredentials(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "policy.hcl")
+	writeConfigPolicy(t, policyPath, `
+endpoint "https" "github" {
+  hosts = ["api.github.com"]
+}
+
+credential "bearer_token" "github" {
+  endpoint = https.github
+  secret = "github-token"
+}
+
+rule "allow-github" {
+  endpoint = https.github
+  verdict = "allow"
+}
+`)
+
+	_, err := Parse([]string{
+		"--listen-vfkit", "unixgram://" + filepath.Join(dir, "net.sock"),
+		"--policy-file", policyPath,
+		"--tls-ca-cert", filepath.Join(dir, "ca.pem"),
+		"--tls-ca-key", filepath.Join(dir, "ca-key.pem"),
+	})
+	if err == nil {
+		t.Fatal("expected missing secret store to be rejected")
+	}
+}
+
 func writeConfigPolicy(t *testing.T, path string, text string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {

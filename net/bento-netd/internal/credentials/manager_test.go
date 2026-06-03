@@ -14,17 +14,21 @@ import (
 	"time"
 
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/hooks"
+	"github.com/nickvan/bentobox/net/bento-netd/internal/secrets"
 )
 
 func TestManagerInjectsBearerToken(t *testing.T) {
+	store := writeSecretStoreForTest(t, map[string]secrets.Secret{
+		"api-token": secrets.Plain("host-token"),
+	})
 	req := httptest.NewRequest(http.MethodGet, "https://api.example.test", nil)
 	req.Header.Set("Authorization", "Bearer guest-token")
-	manager := NewManager()
+	manager := NewManager(store)
 
 	err := manager.Apply(context.Background(), req, &hooks.Credential{
-		Kind:  kindBearerToken,
-		Name:  "api",
-		Value: "host-token",
+		Kind:   kindBearerToken,
+		Name:   "api",
+		Secret: "api-token",
 	})
 	if err != nil {
 		t.Fatalf("Apply returned error: %v", err)
@@ -34,28 +38,47 @@ func TestManagerInjectsBearerToken(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsWrongBearerSecretType(t *testing.T) {
+	store := writeSecretStoreForTest(t, map[string]secrets.Secret{
+		"codex": secrets.OAuth(secrets.OAuthSecret{
+			AccessToken:  "access-token",
+			RefreshToken: "refresh-token",
+			ExpiresAt:    rfc3339(time.Now().Add(time.Hour)),
+		}),
+	})
+	manager := NewManager(store)
+	req := httptest.NewRequest(http.MethodGet, "https://api.example.test", nil)
+
+	err := manager.Apply(context.Background(), req, &hooks.Credential{
+		Kind:   kindBearerToken,
+		Name:   "api",
+		Secret: "codex",
+	})
+	if err == nil {
+		t.Fatal("expected wrong secret type to be rejected")
+	}
+}
+
 func TestManagerInjectsOpenAICodexOAuthHeaders(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "codex.json")
 	accessToken := fakeJWT(t, map[string]any{"chatgpt_account_id": "acct_123"})
-	writeTokenFileForTest(t, path, openAICodexTokenFile{
-		Version:      1,
-		Kind:         kindOpenAICodexOAuth,
-		AccessToken:  accessToken,
-		RefreshToken: "refresh-token",
-		ExpiresAt:    rfc3339(time.Now().Add(time.Hour)),
-		CreatedAt:    rfc3339(time.Now()),
-		UpdatedAt:    rfc3339(time.Now()),
+	store := writeSecretStoreForTest(t, map[string]secrets.Secret{
+		"codex": secrets.OAuth(secrets.OAuthSecret{
+			AccessToken:  accessToken,
+			RefreshToken: "refresh-token",
+			ExpiresAt:    rfc3339(time.Now().Add(time.Hour)),
+			CreatedAt:    rfc3339(time.Now()),
+			UpdatedAt:    rfc3339(time.Now()),
+		}),
 	})
 	req := httptest.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
 	req.Header.Set("Authorization", "Bearer guest-token")
 	req.Header.Set("ChatGPT-Account-Id", "guest-account")
 
-	manager := NewManager()
+	manager := NewManager(store)
 	err := manager.Apply(context.Background(), req, &hooks.Credential{
-		Kind:      kindOpenAICodexOAuth,
-		Name:      "codex",
-		TokenFile: path,
+		Kind:   kindOpenAICodexOAuth,
+		Name:   "codex",
+		Secret: "codex",
 	})
 	if err != nil {
 		t.Fatalf("Apply returned error: %v", err)
@@ -68,22 +91,20 @@ func TestManagerInjectsOpenAICodexOAuthHeaders(t *testing.T) {
 	}
 }
 
-func TestManagerRefreshesOpenAICodexOAuthTokenFile(t *testing.T) {
+func TestManagerRefreshesOpenAICodexOAuthSecret(t *testing.T) {
 	fixedNow := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "codex.json")
 	oldAccessToken := fakeJWT(t, map[string]any{"chatgpt_account_id": "old_account"})
 	newAccessToken := fakeJWT(t, map[string]any{
 		"https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "new_account"},
 	})
-	writeTokenFileForTest(t, path, openAICodexTokenFile{
-		Version:      1,
-		Kind:         kindOpenAICodexOAuth,
-		AccessToken:  oldAccessToken,
-		RefreshToken: "old-refresh-token",
-		ExpiresAt:    rfc3339(fixedNow.Add(-time.Hour)),
-		CreatedAt:    rfc3339(fixedNow.Add(-24 * time.Hour)),
-		UpdatedAt:    rfc3339(fixedNow.Add(-24 * time.Hour)),
+	store := writeSecretStoreForTest(t, map[string]secrets.Secret{
+		"codex": secrets.OAuth(secrets.OAuthSecret{
+			AccessToken:  oldAccessToken,
+			RefreshToken: "old-refresh-token",
+			ExpiresAt:    rfc3339(fixedNow.Add(-time.Hour)),
+			CreatedAt:    rfc3339(fixedNow.Add(-24 * time.Hour)),
+			UpdatedAt:    rfc3339(fixedNow.Add(-24 * time.Hour)),
+		}),
 	})
 	var refreshRequests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -113,16 +134,16 @@ func TestManagerRefreshesOpenAICodexOAuthTokenFile(t *testing.T) {
 	}))
 	defer server.Close()
 
-	manager := NewManager()
+	manager := NewManager(store)
 	manager.client = server.Client()
 	manager.openAITokenURL = server.URL
 	manager.now = func() time.Time { return fixedNow }
 	req := httptest.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/responses", nil)
 
 	err := manager.Apply(context.Background(), req, &hooks.Credential{
-		Kind:      kindOpenAICodexOAuth,
-		Name:      "codex",
-		TokenFile: path,
+		Kind:   kindOpenAICodexOAuth,
+		Name:   "codex",
+		Secret: "codex",
 	})
 	if err != nil {
 		t.Fatalf("Apply returned error: %v", err)
@@ -136,7 +157,7 @@ func TestManagerRefreshesOpenAICodexOAuthTokenFile(t *testing.T) {
 	if got := req.Header.Get("ChatGPT-Account-Id"); got != "new_account" {
 		t.Fatalf("expected refreshed ChatGPT account id injection, got %q", got)
 	}
-	refreshed := readTokenFileForTest(t, path)
+	refreshed := readOAuthSecretForTest(t, store, "codex")
 	if refreshed.AccessToken != newAccessToken {
 		t.Fatalf("expected refreshed access token persisted, got %q", refreshed.AccessToken)
 	}
@@ -160,24 +181,31 @@ func TestChatGPTAccountIDReadsNestedClaim(t *testing.T) {
 	}
 }
 
-func writeTokenFileForTest(t *testing.T, path string, token openAICodexTokenFile) {
+func writeSecretStoreForTest(t *testing.T, data map[string]secrets.Secret) *secrets.FileStore {
 	t.Helper()
-	if err := writeOpenAICodexTokenFile(path, token); err != nil {
-		t.Fatalf("write token file: %v", err)
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	body, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		t.Fatalf("encode secret store: %v", err)
 	}
+	body = append(body, '\n')
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatalf("write secret store: %v", err)
+	}
+	return secrets.NewFileStore(path)
 }
 
-func readTokenFileForTest(t *testing.T, path string) openAICodexTokenFile {
+func readOAuthSecretForTest(t *testing.T, store secrets.Store, name string) secrets.OAuthSecret {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	secret, err := store.Get(name)
 	if err != nil {
-		t.Fatalf("read token file: %v", err)
+		t.Fatalf("read secret: %v", err)
 	}
-	var token openAICodexTokenFile
-	if err := json.Unmarshal(raw, &token); err != nil {
-		t.Fatalf("decode token file: %v", err)
+	oauth, err := secret.OAuth()
+	if err != nil {
+		t.Fatalf("read oauth secret: %v", err)
 	}
-	return token
+	return oauth
 }
 
 func fakeJWT(t *testing.T, claims map[string]any) string {

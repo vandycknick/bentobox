@@ -11,10 +11,6 @@ import (
 
 func TestLoadFileCompilesCIDRHTTPSAuditAndCredentials(t *testing.T) {
 	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "github-token")
-	if err := os.WriteFile(tokenPath, []byte("secret-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	policyPath := filepath.Join(dir, "policy.hcl")
 	writePolicy(t, policyPath, `
 settings {
@@ -34,7 +30,7 @@ endpoint "https" "github" {
 
 credential "bearer_token" "github" {
   endpoint = https.github
-  value_file = "`+tokenPath+`"
+  secret = "github-token"
 }
 
 rule "audit-private" {
@@ -115,8 +111,8 @@ rule "github-reads" {
 	if len(readDecision.Audits) != 1 || readDecision.Audits[0].RuleName != "audit-github" {
 		t.Fatalf("expected https audit before allow, got %#v", readDecision.Audits)
 	}
-	if readDecision.Credential == nil || readDecision.Credential.Value != "secret-token" {
-		t.Fatalf("expected trimmed bearer token credential, got %#v", readDecision.Credential)
+	if readDecision.Credential == nil || readDecision.Credential.Secret != "github-token" {
+		t.Fatalf("expected bearer token credential secret, got %#v", readDecision.Credential)
 	}
 
 	writeDecision := compiled.EvaluateHTTP(HTTPRequest{
@@ -133,7 +129,7 @@ rule "github-reads" {
 	}
 }
 
-func TestLoadFileRejectsRelativeCredentialValueFile(t *testing.T) {
+func TestLoadFileRejectsMissingCredentialSecret(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.hcl")
 	writePolicy(t, policyPath, `
@@ -143,18 +139,16 @@ endpoint "https" "github" {
 
 credential "bearer_token" "github" {
   endpoint = https.github
-  value_file = "github-token"
 }
 `)
 
 	if _, err := LoadFile(policyPath); err == nil {
-		t.Fatal("expected relative value_file to be rejected")
+		t.Fatal("expected missing secret to be rejected")
 	}
 }
 
 func TestLoadFileCompilesOpenAICodexOAuthCredential(t *testing.T) {
 	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "codex.json")
 	policyPath := filepath.Join(dir, "policy.hcl")
 	writePolicy(t, policyPath, `
 endpoint "https" "openai" {
@@ -163,7 +157,7 @@ endpoint "https" "openai" {
 
 credential "openai_codex_oauth" "codex" {
   endpoint = https.openai
-  token_file = "`+tokenPath+`"
+  secret = "codex-personal"
 }
 
 rule "codex" {
@@ -183,15 +177,12 @@ rule "codex" {
 	if decision.Credential.Kind != "openai_codex_oauth" {
 		t.Fatalf("expected openai_codex_oauth credential, got %#v", decision.Credential)
 	}
-	if decision.Credential.TokenFile != tokenPath {
-		t.Fatalf("expected token_file %q, got %q", tokenPath, decision.Credential.TokenFile)
-	}
-	if decision.Credential.Value != "" {
-		t.Fatalf("expected openai credential to avoid eager secret loading, got value %q", decision.Credential.Value)
+	if decision.Credential.Secret != "codex-personal" {
+		t.Fatalf("expected secret %q, got %q", "codex-personal", decision.Credential.Secret)
 	}
 }
 
-func TestLoadFileRejectsRelativeOpenAICodexTokenFile(t *testing.T) {
+func TestLoadFileRejectsInvalidSecretName(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.hcl")
 	writePolicy(t, policyPath, `
@@ -201,29 +192,21 @@ endpoint "https" "openai" {
 
 credential "openai_codex_oauth" "codex" {
   endpoint = https.openai
-  token_file = "codex.json"
+  secret = "../codex"
 }
 `)
 
 	_, err := LoadFile(policyPath)
 	if err == nil {
-		t.Fatal("expected relative token_file to be rejected")
+		t.Fatal("expected invalid secret name to be rejected")
 	}
-	if !strings.Contains(err.Error(), "token_file must be absolute") {
-		t.Fatalf("expected absolute token_file error, got %v", err)
+	if !strings.Contains(err.Error(), "secret") {
+		t.Fatalf("expected secret name error, got %v", err)
 	}
 }
 
 func TestLoadFileRejectsMultipleCredentialsForEndpoint(t *testing.T) {
 	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "github-token")
-	if err := os.WriteFile(tokenPath, []byte("secret-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	backupTokenPath := filepath.Join(dir, "github-backup-token")
-	if err := os.WriteFile(backupTokenPath, []byte("backup-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	policyPath := filepath.Join(dir, "policy.hcl")
 	writePolicy(t, policyPath, `
 endpoint "https" "github" {
@@ -232,12 +215,12 @@ endpoint "https" "github" {
 
 credential "bearer_token" "github" {
   endpoint = https.github
-  value_file = "`+tokenPath+`"
+  secret = "github-token"
 }
 
 credential "bearer_token" "github_backup" {
   endpoint = https.github
-  value_file = "`+backupTokenPath+`"
+  secret = "github-backup-token"
 }
 `)
 
@@ -252,10 +235,6 @@ credential "bearer_token" "github_backup" {
 
 func TestLoadFileRejectsRuleCredential(t *testing.T) {
 	dir := t.TempDir()
-	tokenPath := filepath.Join(dir, "github-token")
-	if err := os.WriteFile(tokenPath, []byte("secret-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	policyPath := filepath.Join(dir, "policy.hcl")
 	writePolicy(t, policyPath, `
 endpoint "https" "github" {
@@ -264,7 +243,7 @@ endpoint "https" "github" {
 
 credential "bearer_token" "github" {
   endpoint = https.github
-  value_file = "`+tokenPath+`"
+  secret = "github-token"
 }
 
 rule "github-reads" {
