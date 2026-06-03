@@ -8,7 +8,6 @@ use eyre::Context;
 pub mod create;
 pub mod edit;
 pub mod exec;
-pub mod images;
 pub mod inspect;
 pub mod list;
 pub mod logs;
@@ -60,8 +59,6 @@ pub enum Command {
     Logs(logs::Cmd),
     Network(network::Cmd),
     Profile(profile::Cmd),
-    #[command(name = "images", alias = "image")]
-    Images(images::Cmd),
     #[command(hide = true)]
     ShellProxy(shell_proxy::Cmd),
 }
@@ -86,7 +83,6 @@ impl Display for Command {
             Command::Logs(cmd) => write!(f, "logs {}", cmd),
             Command::Network(cmd) => write!(f, "network {}", cmd),
             Command::Profile(cmd) => write!(f, "profile {}", cmd),
-            Command::Images(cmd) => write!(f, "images {}", cmd),
             Command::ShellProxy(cmd) => write!(f, "shell-proxy {}", cmd),
         }
     }
@@ -170,8 +166,6 @@ impl BentoCtlCmd {
                 cmd.run(&libvm).await
             }
             Command::Profile(cmd) => cmd.run().await,
-
-            Command::Images(cmd) => cmd.run().await,
             Command::ShellProxy(cmd) => {
                 let libvm = libvm().await?;
                 cmd.run(&libvm).await
@@ -189,4 +183,16 @@ fn apply_help_template(command: clap::Command) -> clap::Command {
 
 async fn libvm() -> eyre::Result<LibVm> {
     LibVm::from_env().await.context("initialize bento-libvm")
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::commands::BentoCtlCmd;
+
+    #[test]
+    fn images_command_is_not_available() {
+        assert!(BentoCtlCmd::try_parse_from(["bento", "images", "list"]).is_err());
+    }
 }

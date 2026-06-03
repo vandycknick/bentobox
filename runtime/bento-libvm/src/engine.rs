@@ -33,6 +33,8 @@ use crate::vm_lock::VmLock;
 use crate::{Layout, LibVmError};
 
 const BYTES_PER_GB: u64 = 1_000_000_000;
+const DEFAULT_IMAGE_CPUS: u8 = 1;
+const DEFAULT_IMAGE_MEMORY_MIB: u32 = 512;
 const ENV_VM_STARTPIPE: &str = "_VM_STARTPIPE";
 const ENV_VM_SYNCPIPE: &str = "_VM_SYNCPIPE";
 
@@ -164,48 +166,38 @@ impl LibVm {
             });
         }
 
-        let mut image_store = ImageStore::open()?;
+        let image_store = ImageStore::open(self.layout.images_dir())?;
         let kernel_path = canonicalize_optional_existing_path(request.kernel.as_deref(), "kernel")?;
         let initramfs_path =
             canonicalize_optional_existing_path(request.initramfs.as_deref(), "initramfs")?;
         let userdata_path =
             canonicalize_optional_existing_path(request.userdata.as_deref(), "userdata")?;
         let disk_paths = canonicalize_existing_paths(&request.disks, "disk")?;
-
-        let selected_image = match image_store.resolve(&request.image_ref)? {
-            Some(image) => image,
-            None => image_store.pull(&request.image_ref, None)?,
-        };
+        let selected_image = image_store.resolve(&request.image_ref)?;
 
         let bootstrap = (userdata_path.is_some() || request.rosetta).then(|| Bootstrap {
             cloud_init: userdata_path.clone(),
         });
         let guest = guest_spec_from_request(request.agent);
 
-        let resolved_kernel =
-            kernel_path.or_else(|| image_store.image_kernel_path(&selected_image));
-        let resolved_initramfs =
-            initramfs_path.or_else(|| image_store.image_initramfs_path(&selected_image));
-        let resolved_cpus = request.cpus.unwrap_or(selected_image.metadata.defaults.cpu);
-        let resolved_memory = request
-            .memory_mib
-            .unwrap_or(selected_image.metadata.defaults.memory_mib);
+        let resolved_cpus = request.cpus.unwrap_or(DEFAULT_IMAGE_CPUS);
+        let resolved_memory = request.memory_mib.unwrap_or(DEFAULT_IMAGE_MEMORY_MIB);
 
         let mounts = assign_mount_tags(request.mounts);
 
         let spec = VmSpec {
             version: 1,
             platform: Platform {
-                guest_os: guest_os_from_image(&selected_image.metadata.os)?,
-                architecture: architecture_from_image(&selected_image.metadata.arch)?,
+                guest_os: GuestOs::Linux,
+                architecture: host_architecture()?,
             },
             resources: Resources {
                 cpus: resolved_cpus,
                 memory_mib: resolved_memory,
             },
             boot: Boot {
-                kernel: resolved_kernel,
-                initramfs: resolved_initramfs,
+                kernel: kernel_path,
+                initramfs: initramfs_path,
                 kernel_cmdline: guest_kernel_cmdline(&guest),
                 bootstrap,
             },
@@ -852,20 +844,12 @@ fn guest_kernel_cmdline(guest: &Option<GuestSpec>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn guest_os_from_image(os: &str) -> Result<GuestOs, LibVmError> {
-    match os {
-        "linux" => Ok(GuestOs::Linux),
-        other => Err(LibVmError::UnsupportedImageGuestOs {
-            os: other.to_string(),
-        }),
-    }
-}
-
-fn architecture_from_image(arch: &str) -> Result<Architecture, LibVmError> {
+fn host_architecture() -> Result<Architecture, LibVmError> {
+    let arch = std::env::consts::ARCH;
     match arch {
         "arm64" | "aarch64" => Ok(Architecture::Aarch64),
         "amd64" | "x86_64" => Ok(Architecture::X86_64),
-        other => Err(LibVmError::UnsupportedImageArchitecture {
+        other => Err(LibVmError::UnsupportedHostArchitecture {
             arch: other.to_string(),
         }),
     }
@@ -1237,7 +1221,9 @@ mod tests {
         assign_mount_tags, guest_kernel_cmdline, guest_spec_from_request, read_syncpipe,
         release_startpipe, LibVm, StartupResult,
     };
-    use crate::{Layout, LibVmError, MachineRef, MachineRuntimeState};
+    use crate::{
+        CreateMachineRequest, InstanceFile, Layout, LibVmError, MachineRef, MachineRuntimeState,
+    };
     use bento_core::{
         Architecture, Boot, GuestOs, GuestSpec, Mount, Platform, Resources, Settings, Storage,
         VmSpec,
@@ -1288,6 +1274,58 @@ mod tests {
                 crate::RequestedNetwork::default(),
             )
             .await
+    }
+
+    #[tokio::test]
+    async fn create_from_image_clones_registry_rootfs() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let data_dir = temp.path().join("bento");
+        let image_dir = data_dir.join("images/sha256-test");
+        std::fs::create_dir_all(&image_dir).expect("image dir should be created");
+        std::fs::write(image_dir.join("rootfs.img"), b"disk").expect("rootfs should be written");
+        std::fs::write(
+            data_dir.join("images/registry.json"),
+            r#"{
+                "version": 1,
+                "images": {
+                    "ghcr.io/vandycknick/archlinuxarm:latest": "sha256-test/rootfs.img"
+                }
+            }"#,
+        )
+        .expect("registry should be written");
+
+        let libvm = LibVm::new(Layout::new(data_dir))
+            .await
+            .expect("create libvm");
+        let machine = libvm
+            .create_from_image(CreateMachineRequest {
+                image_ref: "ghcr.io/vandycknick/archlinuxarm:latest".to_string(),
+                name: "devbox".to_string(),
+                labels: std::collections::BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
+                cpus: None,
+                memory_mib: None,
+                kernel: None,
+                initramfs: None,
+                disk_size_gb: None,
+                nested_virtualization: false,
+                agent: false,
+                rosetta: false,
+                userdata: None,
+                disks: Vec::new(),
+                mounts: Vec::new(),
+                network: None,
+            })
+            .await
+            .expect("create from image");
+
+        let root_disk = machine.dir.join(InstanceFile::RootDisk.as_str());
+        assert_eq!(
+            std::fs::read(root_disk).expect("root disk should exist"),
+            b"disk"
+        );
+        assert_eq!(machine.spec.resources.cpus, 1);
+        assert_eq!(machine.spec.resources.memory_mib, 512);
     }
 
     #[test]

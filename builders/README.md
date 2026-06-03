@@ -69,10 +69,20 @@ Cleanup
 umount -R /mnt
 ```
 
-Package
+Register the resulting root disk
 
 ```sh
-./target/release/bentoctl images pack archboot ghcr.io/vandycknick/archlinux:latest
+mkdir -p ~/.local/share/bento/images/sha256-abc123
+cp ~/.local/share/bento/instances/<archboot-id>/rootfs.img ~/.local/share/bento/images/sha256-abc123/rootfs.img
+
+cat > ~/.local/share/bento/images/registry.json <<'JSON'
+{
+  "version": 1,
+  "images": {
+    "ghcr.io/vandycknick/archlinux:latest": "sha256-abc123/rootfs.img"
+  }
+}
+JSON
 ```
 
 # DNS management on Linux distros

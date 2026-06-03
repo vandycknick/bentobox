@@ -9,9 +9,6 @@ export OPENCODE_AUTH_CONTENT='{
     "expires": 4102444800000
   }
 }'
-```
-
-```sh
 export OPENCODE_CONFIG_CONTENT='{"$schema":"https://opencode.ai/config.json","permission":{"read":"allow","glob":"allow","grep":"allow","list":"allow","bash":"allow"}}'
 
 ```

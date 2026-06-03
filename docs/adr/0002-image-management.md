@@ -4,7 +4,7 @@ Date: 2026-02-20
 
 ## Status
 
-Implemented
+Abandoned
 
 ## Context
 

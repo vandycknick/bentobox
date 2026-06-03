@@ -1,6 +1,6 @@
 # BentoBox 🍱
 
-BentoBox is a microVM manager that boots a full Linux environment in seconds. It is built around reusable profiles, a local image store, and a small `bento` CLI for creating, running, inspecting, and packaging VMs. Use it as a WSL-like development environment on macOS, a lightweight Docker Desktop alternative, or an isolated throwaway VM for agentic workflows.
+BentoBox is a microVM manager that boots a full Linux environment in seconds. It is built around reusable profiles, a local raw image registry, and a small `bento` CLI for creating, running, and inspecting VMs. Use it as a WSL-like development environment on macOS, a lightweight Docker Desktop alternative, or an isolated throwaway VM for agentic workflows.
 
 ## Runtime Backends
 
@@ -57,7 +57,6 @@ Commands:
   inspect  Show full VM details
   logs     Show VM logs
   profile  Manage reusable VM profiles
-  images   Manage local VM images
 
 Options:
   -v, --verbose...  Increase diagnostic output. Repeat for full error chains
@@ -188,28 +187,18 @@ bento ls --json
 
 ## Images
 
-BentoBox has a local image store managed by `bento images`. Images can be pulled, imported from OCI archives, or packed from stopped VMs.
+BentoBox creates VMs from raw disk images registered in `~/.local/share/bento/images/registry.json`. The registry is intentionally small and manually editable:
 
-```bash
-# Pull an image into the local store, optionally assigning a local name.
-bento images pull ghcr.io/vandycknick/archlinux:latest --name arch-dev
-
-# List local images.
-bento images list
-
-# Import an OCI archive.
-bento images import ./arch-dev.oci.tar
-
-# Pack a stopped VM into an image tag.
-bento stop dev
-bento images pack dev ghcr.io/me/dev:latest
-
-# Write the packed OCI archive instead of importing it.
-bento images pack dev ghcr.io/me/dev:latest --outfile ./dev.oci.tar
-
-# Remove a local image tag.
-bento images rm arch-dev
+```json
+{
+  "version": 1,
+  "images": {
+    "ghcr.io/vandycknick/archlinuxarm:latest": "sha256-abc123/rootfs.img"
+  }
+}
 ```
+
+Registry paths are relative to `~/.local/share/bento/images` and must point to a `rootfs.img` file. For the example above, BentoBox clones or copies `~/.local/share/bento/images/sha256-abc123/rootfs.img` into the VM when creating from `ghcr.io/vandycknick/archlinuxarm:latest`.
 
 ## Introspection
 

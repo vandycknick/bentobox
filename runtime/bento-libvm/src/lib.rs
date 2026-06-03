@@ -3,7 +3,7 @@ mod engine;
 mod error;
 pub mod global_config;
 pub mod host_user;
-pub mod images;
+mod images;
 mod instance_file;
 mod launch;
 mod layout;

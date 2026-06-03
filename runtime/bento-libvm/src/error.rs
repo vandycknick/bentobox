@@ -49,11 +49,8 @@ pub enum LibVmError {
     #[error("invalid create request for machine {name:?}: {reason}")]
     InvalidCreateRequest { name: String, reason: String },
 
-    #[error("unsupported image architecture {arch:?}")]
-    UnsupportedImageArchitecture { arch: String },
-
-    #[error("unsupported image guest OS {os:?}")]
-    UnsupportedImageGuestOs { os: String },
+    #[error("unsupported host architecture {arch:?}")]
+    UnsupportedHostArchitecture { arch: String },
 
     #[error("machine {id} metadata is missing required field {field}")]
     CorruptState { id: MachineId, field: &'static str },
