@@ -74,7 +74,7 @@ bento profile create rust-dev \
   --image ghcr.io/vandycknick/archlinux:latest \
   --description "Rust development box" \
   --mount .:/workspace:rw \
-  --network isolated \
+  --network private \
   --label stack=rust \
   --ssh
 
@@ -91,17 +91,17 @@ A profile created by the CLI looks like this:
 version: "1"
 description: Rust development box
 image:
-  ref: ghcr.io/vandycknick/archlinux:latest
+    ref: ghcr.io/vandycknick/archlinux:latest
 mounts:
-  - source: .
-    target: /workspace
-    mode: rw
+    - source: .
+      target: /workspace
+      mode: rw
 network:
-  mode: isolated
+    kind: private
 ssh:
-  enabled: true
+    enabled: true
 labels:
-  stack: rust
+    stack: rust
 ```
 
 ## Ephemeral VMs
@@ -136,7 +136,7 @@ bento run rust-dev \
   --memory 8192 \
   --disk-size 80 \
   --mount ~/src:/src:rw \
-  --network isolated \
+  --network private \
   --label purpose=ci \
   -- cargo test
 ```
@@ -191,10 +191,10 @@ BentoBox creates VMs from raw disk images registered in `~/.local/share/bento/im
 
 ```json
 {
-  "version": 1,
-  "images": {
-    "ghcr.io/vandycknick/archlinuxarm:latest": "sha256-abc123/rootfs.img"
-  }
+    "version": 1,
+    "images": {
+        "ghcr.io/vandycknick/archlinuxarm:latest": "sha256-abc123/rootfs.img"
+    }
 }
 ```
 

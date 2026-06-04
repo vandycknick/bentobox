@@ -288,7 +288,7 @@ mod tests {
                 kernel: None,
                 initramfs: None,
                 kernel_cmdline: Vec::new(),
-                bootstrap: bootstrap.then_some(bento_core::Bootstrap { cloud_init: None }),
+                bootstrap: bootstrap.then_some(bento_core::Bootstrap { userdata: None }),
             },
             storage: Storage { disks: Vec::new() },
             mounts: Vec::new(),

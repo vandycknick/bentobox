@@ -1,5 +1,6 @@
 # Directory I use to store stuff I don't want to commit.
 .tmp
+.dist
 .opencode
 .direnv
 .codegraph

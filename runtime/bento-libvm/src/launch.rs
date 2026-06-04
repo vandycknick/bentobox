@@ -158,8 +158,9 @@ mod tests {
         resolve_guest_runtime_config,
     };
     use bento_core::{
-        Architecture, Boot, Disk, DiskKind, GuestOs, GuestSpec, LifecycleSpec, Mount, Platform,
-        PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
+        Architecture, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec, LifecycleSpec, Mount,
+        Platform, PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode,
+        VsockEndpointSpec,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -371,6 +372,57 @@ mod tests {
         assert!(user_data.contains("permissions: '0644'"));
         assert!(user_data.contains("update-ca-certificates"));
         assert!(user_data.contains("trust anchor --store"));
+    }
+
+    #[test]
+    fn user_data_includes_inline_userdata_script() {
+        let host_user = HostUser {
+            name: "bento".to_string(),
+            uid: 1000,
+            gecos: "Bento User".to_string(),
+        };
+        let mut spec = sample_spec(Vec::new(), false);
+        spec.boot.bootstrap = Some(Bootstrap {
+            userdata: Some("#!/bin/sh\necho profile\n".to_string()),
+        });
+
+        let user_data = render_user_data(
+            &spec,
+            &host_user,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBento",
+            "-----BEGIN CERTIFICATE-----\nMIIBENTO\n-----END CERTIFICATE-----\n",
+        )
+        .expect("render user-data");
+
+        assert!(user_data.contains("multipart/mixed"));
+        assert!(user_data.contains("Content-Type: text/x-shellscript"));
+        assert!(user_data.contains("#!/bin/sh"));
+        assert!(user_data.contains("echo profile"));
+    }
+
+    #[test]
+    fn user_data_detects_cloud_config_userdata() {
+        let host_user = HostUser {
+            name: "bento".to_string(),
+            uid: 1000,
+            gecos: "Bento User".to_string(),
+        };
+        let mut spec = sample_spec(Vec::new(), false);
+        spec.boot.bootstrap = Some(Bootstrap {
+            userdata: Some("#cloud-config\nruncmd:\n  - echo external\n".to_string()),
+        });
+
+        let user_data = render_user_data(
+            &spec,
+            &host_user,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBento",
+            "-----BEGIN CERTIFICATE-----\nMIIBENTO\n-----END CERTIFICATE-----\n",
+        )
+        .expect("render user-data");
+
+        assert!(user_data.contains("echo external"));
+        assert!(!user_data.contains("Content-Type: text/x-shellscript"));
+        assert!(user_data.matches("Content-Type: text/cloud-config").count() >= 2);
     }
 
     #[test]
@@ -751,6 +803,11 @@ struct WriteFile {
     content: String,
 }
 
+struct UserDataPart {
+    content_type: &'static str,
+    content: String,
+}
+
 #[derive(Serialize)]
 struct MetaData {
     #[serde(rename = "instance-id")]
@@ -822,15 +879,18 @@ fn render_user_data(
         &serde_yaml_ng::to_string(&cloud_config).context("serialize cloud-init user-data")?,
     );
 
-    if let Some(userdata_path) = spec
-        .boot
-        .bootstrap
-        .as_ref()
-        .and_then(|bootstrap| bootstrap.cloud_init.as_deref())
-    {
-        let user_data = std::fs::read_to_string(userdata_path)
-            .with_context(|| format!("read userdata {}", userdata_path.display()))?;
-        return Ok(render_multipart_user_data(&bento_yaml, &user_data));
+    let mut user_parts = Vec::new();
+    if let Some(bootstrap) = &spec.boot.bootstrap {
+        if let Some(user_data) = bootstrap.userdata.as_deref() {
+            user_parts.push(UserDataPart {
+                content_type: detect_userdata_content_type(user_data),
+                content: user_data.to_string(),
+            });
+        }
+    }
+
+    if !user_parts.is_empty() {
+        return Ok(render_multipart_user_data(&bento_yaml, &user_parts));
     }
 
     Ok(bento_yaml)
@@ -863,15 +923,28 @@ fn pem_with_trailing_newline(pem: &str) -> String {
     normalized
 }
 
-fn render_multipart_user_data(bento_user_data: &str, user_data: &str) -> String {
+fn render_multipart_user_data(bento_user_data: &str, user_parts: &[UserDataPart]) -> String {
     let boundary = "===============bento-userdata==";
-    format!(
-        "MIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=\"{boundary}\"\n\n--{boundary}\nContent-Type: text/cloud-config; charset=\"us-ascii\"\n\n{bento_user_data}\n--{boundary}\nContent-Type: {user_content_type}; charset=\"us-ascii\"\n\n{user_data}\n--{boundary}--\n",
+    let mut rendered = format!(
+        "MIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=\"{boundary}\"\n\n--{boundary}\nContent-Type: text/cloud-config; charset=\"us-ascii\"\n\n{bento_user_data}\n",
         boundary = boundary,
         bento_user_data = bento_user_data.trim_end(),
-        user_content_type = detect_userdata_content_type(user_data),
-        user_data = user_data.trim_end(),
-    )
+    );
+
+    for part in user_parts {
+        rendered.push_str("--");
+        rendered.push_str(boundary);
+        rendered.push_str("\nContent-Type: ");
+        rendered.push_str(part.content_type);
+        rendered.push_str("; charset=\"us-ascii\"\n\n");
+        rendered.push_str(part.content.trim_end());
+        rendered.push('\n');
+    }
+
+    rendered.push_str("--");
+    rendered.push_str(boundary);
+    rendered.push_str("--\n");
+    rendered
 }
 
 fn detect_userdata_content_type(user_data: &str) -> &'static str {

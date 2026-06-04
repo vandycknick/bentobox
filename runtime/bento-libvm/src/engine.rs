@@ -52,7 +52,7 @@ pub struct CreateMachineRequest {
     pub nested_virtualization: bool,
     pub agent: bool,
     pub rosetta: bool,
-    pub userdata: Option<PathBuf>,
+    pub userdata: Option<String>,
     pub disks: Vec<PathBuf>,
     pub mounts: Vec<Mount>,
     pub network: Option<RequestedNetwork>,
@@ -170,14 +170,19 @@ impl LibVm {
         let kernel_path = canonicalize_optional_existing_path(request.kernel.as_deref(), "kernel")?;
         let initramfs_path =
             canonicalize_optional_existing_path(request.initramfs.as_deref(), "initramfs")?;
-        let userdata_path =
-            canonicalize_optional_existing_path(request.userdata.as_deref(), "userdata")?;
+        if let Some(userdata) = request.userdata.as_deref() {
+            if userdata.trim().is_empty() {
+                return Err(LibVmError::InvalidCreateRequest {
+                    name: request.name.clone(),
+                    reason: "userdata cannot be empty".to_string(),
+                });
+            }
+        }
+        let userdata = request.userdata;
         let disk_paths = canonicalize_existing_paths(&request.disks, "disk")?;
         let selected_image = image_store.resolve(&request.image_ref)?;
 
-        let bootstrap = (userdata_path.is_some() || request.rosetta).then(|| Bootstrap {
-            cloud_init: userdata_path.clone(),
-        });
+        let bootstrap = (userdata.is_some() || request.rosetta).then_some(Bootstrap { userdata });
         let guest = guest_spec_from_request(request.agent);
 
         let resolved_cpus = request.cpus.unwrap_or(DEFAULT_IMAGE_CPUS);
@@ -1311,7 +1316,7 @@ mod tests {
                 nested_virtualization: false,
                 agent: false,
                 rosetta: false,
-                userdata: None,
+                userdata: Some("#!/bin/sh\necho profile\n".to_string()),
                 disks: Vec::new(),
                 mounts: Vec::new(),
                 network: None,
@@ -1326,6 +1331,15 @@ mod tests {
         );
         assert_eq!(machine.spec.resources.cpus, 1);
         assert_eq!(machine.spec.resources.memory_mib, 512);
+        let bootstrap = machine
+            .spec
+            .boot
+            .bootstrap
+            .expect("inline userdata should enable bootstrap");
+        assert_eq!(
+            bootstrap.userdata.as_deref(),
+            Some("#!/bin/sh\necho profile\n")
+        );
     }
 
     #[test]

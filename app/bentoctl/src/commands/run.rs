@@ -5,7 +5,7 @@ use bento_core::Mount;
 use bento_libvm::{CreateMachineRequest, LibVm, MachineRef, RequestedNetwork};
 use clap::Args;
 
-use crate::commands::create::{profile_mount_to_mount, VmOverrideArgs};
+use crate::commands::create::{profile_mount_to_mount, read_userdata_path, VmOverrideArgs};
 use crate::constants::{DEFAULT_PROFILE_NAME, PROFILE_METADATA_KEY};
 use crate::profile::ProfileStore;
 use crate::ssh;
@@ -113,6 +113,7 @@ impl Cmd {
         let mut mounts = Vec::<Mount>::new();
         let mut network = RequestedNetwork::default();
         let mut ssh_enabled = true;
+        let mut userdata = None;
         let image_ref;
         let prefix;
 
@@ -135,6 +136,7 @@ impl Cmd {
                 .as_ref()
                 .map(|ssh| ssh.enabled)
                 .unwrap_or(true);
+            userdata = named.profile.userdata.clone();
             labels = named.profile.labels.clone();
             metadata.insert(PROFILE_METADATA_KEY.to_string(), named.name.clone());
             mounts = named.profile.resolved_mounts()?;
@@ -150,6 +152,9 @@ impl Cmd {
         if let Some(network_override) = self.overrides.network.clone() {
             network = network_override;
         }
+        if let Some(userdata_path) = self.overrides.userdata.as_deref() {
+            userdata = Some(read_userdata_path(userdata_path)?);
+        }
 
         let name = libvm.allocate_ephemeral_name(&prefix).await?;
         Ok(ResolvedRun {
@@ -160,6 +165,7 @@ impl Cmd {
             mounts,
             network,
             ssh_enabled: ssh_enabled || self.overrides.agent,
+            userdata,
             cpus: self.overrides.cpus,
             memory_mib: self.overrides.memory,
             kernel: self.overrides.kernel.clone(),
@@ -167,7 +173,6 @@ impl Cmd {
             disk_size_gb: self.overrides.disk_size,
             nested_virtualization: self.overrides.nested_virtualization,
             rosetta: self.overrides.rosetta,
-            userdata: self.overrides.userdata.clone(),
             disks: self.overrides.disks.clone(),
         })
     }
@@ -181,6 +186,7 @@ struct ResolvedRun {
     mounts: Vec<Mount>,
     network: RequestedNetwork,
     ssh_enabled: bool,
+    userdata: Option<String>,
     cpus: Option<u8>,
     memory_mib: Option<u32>,
     kernel: Option<std::path::PathBuf>,
@@ -188,7 +194,6 @@ struct ResolvedRun {
     disk_size_gb: Option<u64>,
     nested_virtualization: bool,
     rosetta: bool,
-    userdata: Option<std::path::PathBuf>,
     disks: Vec<std::path::PathBuf>,
 }
 

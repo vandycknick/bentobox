@@ -197,6 +197,7 @@ fn create_profile(store: &ProfileStore, cmd: &CreateCmd) -> eyre::Result<()> {
         image: ProfileImage {
             reference: cmd.image.clone(),
         },
+        userdata: None,
         mounts: cmd.mounts.clone(),
         network: Some(requested_network_to_profile(cmd.network.clone())),
         ssh: Some(ProfileSsh {

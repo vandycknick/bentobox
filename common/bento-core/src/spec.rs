@@ -166,7 +166,8 @@ pub struct Boot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bootstrap {
-    pub cloud_init: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userdata: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,7 +243,7 @@ mod tests {
                 initramfs: Some(PathBuf::from("/initramfs")),
                 kernel_cmdline: vec!["console=hvc0".to_string(), "panic=-1".to_string()],
                 bootstrap: Some(Bootstrap {
-                    cloud_init: Some(PathBuf::from("/cloud-init/user-data")),
+                    userdata: Some("#!/bin/sh\necho booted\n".to_string()),
                 }),
             },
             storage: Storage {
@@ -314,6 +315,7 @@ mod tests {
         assert!(yaml.contains("vsock_endpoints:"));
         assert!(yaml.contains("guest:"));
         assert!(yaml.contains("control_port: 1027"));
+        assert!(yaml.contains("userdata:"));
         assert!(!yaml.contains("network:"));
         assert!(!yaml.contains("name: dev"));
         assert!(yaml.contains("mode: connect"));
@@ -335,7 +337,9 @@ boot:
   initramfs: /initramfs
   kernel_cmdline: []
   bootstrap:
-    cloud_init: /cloud-init/user-data
+    userdata: |
+      #!/bin/sh
+      echo booted
 storage:
   disks: []
 mounts: []

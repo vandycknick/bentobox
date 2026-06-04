@@ -49,6 +49,9 @@ RUN systemctl enable \
     systemd-timesyncd.service \
     systemd-resolved.service
 
+ RUN userdel -r builder \
+    && rm -f /etc/sudoers.d/builder
+
 RUN ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf \
  && passwd -d root \
  && rm -f /etc/machine-id \

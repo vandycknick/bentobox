@@ -1,6 +1,7 @@
 use bento_core::Mount;
 use bento_libvm::{CreateMachineRequest, LibVm, MachineRef, RequestedNetwork};
 use clap::Args;
+use eyre::Context;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
@@ -130,6 +131,7 @@ impl Cmd {
         let image_ref;
         let mut network = RequestedNetwork::default();
         let mut ssh_enabled = true;
+        let mut userdata = None;
 
         if let Some(profile_name) = profile_name {
             let store = ProfileStore::from_env()?;
@@ -142,6 +144,7 @@ impl Cmd {
                 .as_ref()
                 .map(|ssh| ssh.enabled)
                 .unwrap_or(true);
+            userdata = named.profile.userdata.clone();
             labels = named.profile.labels.clone();
             metadata.insert(PROFILE_METADATA_KEY.to_string(), named.name.clone());
             mounts = named.profile.resolved_mounts()?;
@@ -151,44 +154,43 @@ impl Cmd {
             for mount in &self.overrides.mounts {
                 mounts.push(profile_mount_to_mount(mount)?);
             }
-            if let Some(network_override) = self.overrides.network.clone() {
-                network = network_override;
+        } else {
+            let Some(image) = &self.image else {
+                eyre::bail!("either a profile or image is required\n\nexamples:\n  bento create dev rust-dev\n  bento create dev --profile rust-dev\n  bento create dev --image ubuntu:24.04");
+            };
+
+            image_ref = image.clone();
+            for (key, value) in &self.overrides.labels {
+                labels.insert(key.clone(), value.clone());
             }
-            return Ok(ResolvedCreate::new(
-                image_ref,
-                labels,
-                metadata,
-                mounts,
-                network,
-                ssh_enabled,
-                &self.overrides,
-            ));
-        }
-
-        let Some(image) = &self.image else {
-            eyre::bail!("either a profile or image is required\n\nexamples:\n  bento create dev rust-dev\n  bento create dev --profile rust-dev\n  bento create dev --image ubuntu:24.04");
-        };
-
-        image_ref = image.clone();
-        for (key, value) in &self.overrides.labels {
-            labels.insert(key.clone(), value.clone());
-        }
-        for mount in &self.overrides.mounts {
-            mounts.push(profile_mount_to_mount(mount)?);
+            for mount in &self.overrides.mounts {
+                mounts.push(profile_mount_to_mount(mount)?);
+            }
         }
         if let Some(network_override) = self.overrides.network.clone() {
             network = network_override;
         }
+        if let Some(userdata_path) = self.overrides.userdata.as_deref() {
+            userdata = Some(read_userdata_path(userdata_path)?);
+        }
 
-        Ok(ResolvedCreate::new(
+        Ok(ResolvedCreate {
             image_ref,
             labels,
             metadata,
             mounts,
             network,
-            ssh_enabled,
-            &self.overrides,
-        ))
+            ssh_enabled: ssh_enabled || self.overrides.agent,
+            userdata,
+            cpus: self.overrides.cpus,
+            memory_mib: self.overrides.memory,
+            kernel: self.overrides.kernel.clone(),
+            initramfs: self.overrides.initramfs.clone(),
+            disk_size_gb: self.overrides.disk_size,
+            nested_virtualization: self.overrides.nested_virtualization,
+            rosetta: self.overrides.rosetta,
+            disks: self.overrides.disks.clone(),
+        })
     }
 }
 
@@ -199,6 +201,7 @@ struct ResolvedCreate {
     mounts: Vec<Mount>,
     network: RequestedNetwork,
     ssh_enabled: bool,
+    userdata: Option<String>,
     cpus: Option<u8>,
     memory_mib: Option<u32>,
     kernel: Option<PathBuf>,
@@ -206,38 +209,7 @@ struct ResolvedCreate {
     disk_size_gb: Option<u64>,
     nested_virtualization: bool,
     rosetta: bool,
-    userdata: Option<PathBuf>,
     disks: Vec<PathBuf>,
-}
-
-impl ResolvedCreate {
-    fn new(
-        image_ref: String,
-        labels: BTreeMap<String, String>,
-        metadata: BTreeMap<String, String>,
-        mounts: Vec<Mount>,
-        network: RequestedNetwork,
-        ssh_enabled: bool,
-        overrides: &VmOverrideArgs,
-    ) -> Self {
-        Self {
-            image_ref,
-            labels,
-            metadata,
-            mounts,
-            network,
-            ssh_enabled: ssh_enabled || overrides.agent,
-            cpus: overrides.cpus,
-            memory_mib: overrides.memory,
-            kernel: overrides.kernel.clone(),
-            initramfs: overrides.initramfs.clone(),
-            disk_size_gb: overrides.disk_size,
-            nested_virtualization: overrides.nested_virtualization,
-            rosetta: overrides.rosetta,
-            userdata: overrides.userdata.clone(),
-            disks: overrides.disks.clone(),
-        }
-    }
 }
 
 pub(crate) fn profile_mount_to_mount(mount: &crate::profile::ProfileMount) -> eyre::Result<Mount> {
@@ -246,6 +218,10 @@ pub(crate) fn profile_mount_to_mount(mount: &crate::profile::ProfileMount) -> ey
         tag: mount.target.clone(),
         read_only: mount.mode == MountMode::Ro,
     })
+}
+
+pub(crate) fn read_userdata_path(path: &std::path::Path) -> eyre::Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("read userdata {}", path.display()))
 }
 
 #[cfg(test)]

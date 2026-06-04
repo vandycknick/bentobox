@@ -22,6 +22,8 @@ pub(crate) struct Profile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub image: ProfileImage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub userdata: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mounts: Vec<ProfileMount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,6 +316,14 @@ pub(crate) fn validate_profile(profile: &Profile) -> eyre::Result<()> {
     if profile.image.reference.trim().is_empty() {
         bail!("profile image.ref cannot be empty");
     }
+    if let Some(userdata) = &profile.userdata {
+        if userdata.trim().is_empty() {
+            bail!("profile userdata cannot be empty");
+        }
+        if !userdata.starts_with("#!") {
+            bail!("profile userdata must start with a shebang (`#!`)");
+        }
+    }
     for mount in &profile.mounts {
         if mount.source.as_os_str().is_empty() {
             bail!("mount source cannot be empty");
@@ -356,6 +366,7 @@ fn built_in_default_profile() -> NamedProfile {
             image: ProfileImage {
                 reference: DEFAULT_PROFILE_IMAGE.to_string(),
             },
+            userdata: None,
             mounts: Vec::new(),
             network: Some(ProfileNetwork::Private { policy_ref: None }),
             ssh: Some(ProfileSsh {
@@ -441,9 +452,9 @@ network:
             .network
             .as_ref()
             .and_then(|network| match network {
-                super::ProfileNetwork::Private { policy_ref }
-                | super::ProfileNetwork::Named { policy_ref, .. } => policy_ref.as_ref(),
-                super::ProfileNetwork::None => None,
+                crate::profile::ProfileNetwork::Private { policy_ref }
+                | crate::profile::ProfileNetwork::Named { policy_ref, .. } => policy_ref.as_ref(),
+                crate::profile::ProfileNetwork::None => None,
             })
             .expect("network policy ref");
         assert_eq!(policy_ref.as_str(), "github");
@@ -520,7 +531,63 @@ network:
 
         assert!(matches!(
             profile.network,
-            Some(super::ProfileNetwork::Named { ref name, .. }) if name == "dev"
+            Some(crate::profile::ProfileNetwork::Named { ref name, .. }) if name == "dev"
         ));
+    }
+
+    #[test]
+    fn parses_userdata_script() {
+        let profile = parse_profile(
+            r#"
+version: "1"
+image:
+  ref: "ubuntu:24.04"
+userdata: |
+  #!/bin/sh
+  set -eu
+  echo hello
+"#,
+        )
+        .expect("profile with userdata should parse");
+
+        let userdata = profile.userdata.expect("profile userdata");
+        assert!(userdata.starts_with("#!/bin/sh"));
+        assert!(userdata.contains("echo hello"));
+    }
+
+    #[test]
+    fn rejects_empty_userdata_script() {
+        let err = parse_profile(
+            r#"
+version: "1"
+image:
+  ref: "ubuntu:24.04"
+userdata: ""
+"#,
+        )
+        .expect_err("empty userdata should fail");
+
+        assert!(err
+            .chain()
+            .any(|cause| cause.to_string().contains("userdata cannot be empty")));
+    }
+
+    #[test]
+    fn rejects_userdata_without_shebang() {
+        let err = parse_profile(
+            r#"
+version: "1"
+image:
+  ref: "ubuntu:24.04"
+userdata: |
+  set -eu
+  echo hello
+"#,
+        )
+        .expect_err("userdata without shebang should fail");
+
+        assert!(err
+            .chain()
+            .any(|cause| cause.to_string().contains("must start with a shebang")));
     }
 }
