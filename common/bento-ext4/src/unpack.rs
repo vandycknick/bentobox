@@ -35,14 +35,13 @@ impl Formatter {
             let basename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
             // ── OCI whiteouts ──
-            if basename.starts_with(".wh.") {
+            if let Some(target_name) = basename.strip_prefix(".wh.") {
                 if basename == ".wh..wh..opq" {
                     // Opaque whiteout: delete all children of the parent dir.
                     let parent = parent_str(&path_str);
                     self.unlink(parent, true)?;
                 } else {
                     // Single-file whiteout: `.wh.<name>` deletes `<name>`.
-                    let target_name = &basename[".wh.".len()..];
                     let parent = parent_str(&path_str);
                     let target = if parent == "/" {
                         format!("/{target_name}")
@@ -60,7 +59,7 @@ impl Formatter {
             // in the entry-type dispatch below.
             if entry.header().entry_type() == tar::EntryType::Link {
                 if let Some(link_target) = entry.link_name().map_err(io_to_format)? {
-                    let target_str = preprocess_path(&link_target.into_owned());
+                    let target_str = preprocess_path(link_target.as_ref());
                     hardlinks.insert(PathBuf::from(&path_str), PathBuf::from(target_str));
                     continue;
                 }
@@ -126,7 +125,7 @@ impl Formatter {
             return Err(FormatError::CircularLinks);
         }
 
-        for (link_path, _) in &hardlinks {
+        for link_path in hardlinks.keys() {
             if let Some(resolved) = resolve_hardlink(link_path, &hardlinks) {
                 let link_str = link_path.to_string_lossy();
                 let target_str = resolved.to_string_lossy();

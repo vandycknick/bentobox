@@ -635,7 +635,7 @@ mod tests {
         // Actually ext4 sorts by index numerically: 1 < 6.
         // So user (index=1) entries first, then security (index=6).
         let first_entry_index = buf[32 + 1]; // name_index of first entry
-        let second_entry_index = buf[32 + 1 + align_up(16 + 3, 4) as usize]; // "aaa" is 3 bytes
+        let second_entry_index = buf[32 + 1 + align_up(16 + 3, 4)]; // "aaa" is 3 bytes
         assert!(
             first_entry_index <= second_entry_index,
             "entries should be sorted by name_index: {} vs {}",

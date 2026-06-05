@@ -22,6 +22,14 @@ use crate::xattr::{ExtendedAttribute, XattrState};
 
 /// Maximum bytes that fit in the ext4 superblock's `volume_name` field.
 const VOLUME_NAME_LEN: usize = 16;
+/// Reserved inode number used by ext2/3/4 for online-resize metadata.
+const RESIZE_INODE_NUMBER: u32 = 7;
+/// `i_block[13]` is the double-indirect block pointer in legacy inode layout.
+const EXT2_DIND_BLOCK: usize = 13;
+/// Number of direct block pointers before indirect pointers in legacy layout.
+const EXT2_NDIR_BLOCKS: u64 = 12;
+/// Match e2fsprogs' default online-resize headroom of roughly 1024x growth.
+const RESERVED_GDT_MULTIPLIER: u32 = 32;
 
 // ---------------------------------------------------------------------------
 // FormatOptions
@@ -76,10 +84,10 @@ impl FormatOptions {
 }
 
 fn validate_label(label: &str) -> FormatResult<()> {
-    if label.as_bytes().len() > VOLUME_NAME_LEN {
+    if label.len() > VOLUME_NAME_LEN {
         return Err(FormatError::InvalidLabel(format!(
             "label {label:?} is {} bytes, ext4 limit is {VOLUME_NAME_LEN}",
-            label.as_bytes().len()
+            label.len()
         )));
     }
     if label.contains('\0') {
@@ -178,8 +186,27 @@ impl Formatter {
     }
 
     #[inline]
+    fn descriptor_blocks_for_groups(&self, groups: u32) -> u32 {
+        (groups - 1) / self.groups_per_descriptor_block() + 1
+    }
+
+    #[inline]
+    fn reserved_gdt_blocks_for_descriptor_blocks(&self, descriptor_blocks: u32) -> u32 {
+        let addr_per_block = self.block_size / 4;
+        descriptor_blocks
+            .saturating_mul(RESERVED_GDT_MULTIPLIER - 1)
+            .min(addr_per_block.saturating_sub(descriptor_blocks))
+    }
+
+    #[inline]
+    fn group_descriptor_area_blocks_for_groups(&self, groups: u32) -> u32 {
+        let descriptor_blocks = self.descriptor_blocks_for_groups(groups);
+        descriptor_blocks + self.reserved_gdt_blocks_for_descriptor_blocks(descriptor_blocks)
+    }
+
+    #[inline]
     fn group_descriptor_blocks(&self) -> u32 {
-        ((self.group_count() - 1) / self.groups_per_descriptor_block() + 1) * 32
+        self.group_descriptor_area_blocks_for_groups(self.group_count())
     }
 
     #[inline]
@@ -206,6 +233,144 @@ impl Formatter {
             self.seek_to_block(blk)?;
         }
         Ok(())
+    }
+
+    #[inline]
+    fn is_power_of(mut n: u32, base: u32) -> bool {
+        if n < base {
+            return false;
+        }
+        while n % base == 0 {
+            n /= base;
+        }
+        n == 1
+    }
+
+    #[inline]
+    fn has_sparse_super(group: u32) -> bool {
+        group == 0
+            || group == 1
+            || Self::is_power_of(group, 3)
+            || Self::is_power_of(group, 5)
+            || Self::is_power_of(group, 7)
+    }
+
+    #[inline]
+    fn has_sparse_super_backup(group: u32) -> bool {
+        group != 0 && Self::has_sparse_super(group)
+    }
+
+    #[inline]
+    fn static_metadata_blocks_in_group(&self, group: u32) -> u32 {
+        if Self::has_sparse_super(group) {
+            1 + self.group_descriptor_blocks()
+        } else {
+            0
+        }
+    }
+
+    fn reserved_metadata_end_for_block(&self, block: u32) -> u32 {
+        let group = block / self.blocks_per_group();
+        let group_start = group * self.blocks_per_group();
+        let metadata_blocks = self.static_metadata_blocks_in_group(group);
+        let metadata_end = group_start + metadata_blocks;
+
+        if block >= group_start && block < metadata_end {
+            metadata_end
+        } else {
+            block
+        }
+    }
+
+    fn skip_reserved_metadata_blocks(&mut self) -> io::Result<()> {
+        if self.pos() % self.block_size as u64 != 0 {
+            return Ok(());
+        }
+
+        loop {
+            let block = self.current_block();
+            let next = self.reserved_metadata_end_for_block(block);
+            if next == block {
+                return Ok(());
+            }
+            self.seek_to_block(next)?;
+        }
+    }
+
+    fn record_block_range(ranges: &mut Vec<BlockRange>, block: u32) {
+        if let Some(last) = ranges.last_mut() {
+            if block >= last.start && block < last.end {
+                return;
+            }
+            if last.end == block {
+                last.end += 1;
+                return;
+            }
+        }
+
+        ranges.push(BlockRange {
+            start: block,
+            end: block + 1,
+        });
+    }
+
+    fn write_payload_bytes(
+        &mut self,
+        bytes: &[u8],
+        ranges: &mut Vec<BlockRange>,
+    ) -> io::Result<()> {
+        let mut offset = 0usize;
+        let block_size = self.block_size as usize;
+
+        while offset < bytes.len() {
+            self.skip_reserved_metadata_blocks()?;
+
+            let block = self.current_block();
+            let block_offset = (self.pos() % self.block_size as u64) as usize;
+            let writable = (block_size - block_offset).min(bytes.len() - offset);
+            self.file.write_all(&bytes[offset..offset + writable])?;
+            Self::record_block_range(ranges, block);
+            offset += writable;
+        }
+
+        Ok(())
+    }
+
+    fn write_payload_from_reader(
+        &mut self,
+        reader: &mut dyn Read,
+        ranges: &mut Vec<BlockRange>,
+    ) -> FormatResult<u64> {
+        let mut size = 0u64;
+        let mut buf = vec![0u8; self.block_size as usize];
+
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            size += n as u64;
+            if size > MAX_FILE_SIZE {
+                return Err(FormatError::FileTooBig(size));
+            }
+            self.write_payload_bytes(&buf[..n], ranges)?;
+        }
+
+        Ok(size)
+    }
+
+    fn write_aligned_payload_bytes(&mut self, bytes: &[u8]) -> FormatResult<Vec<BlockRange>> {
+        self.align_to_block()?;
+        self.skip_reserved_metadata_blocks()?;
+        let mut ranges = Vec::new();
+        self.write_payload_bytes(bytes, &mut ranges)?;
+        self.align_to_block()?;
+        Ok(ranges)
+    }
+
+    fn assign_node_ranges(node: &mut FileTreeNode, ranges: &[BlockRange]) {
+        node.blocks = ranges.first().copied();
+        node.additional_blocks = ranges.iter().skip(1).copied().collect();
     }
 
     // -- Constructor -------------------------------------------------------
@@ -392,8 +557,11 @@ impl Formatter {
         }
 
         // ------- Build the child inode -------
-        let mut child_inode = Inode::default();
-        child_inode.mode = mode;
+        let mut child_inode = Inode {
+            mode,
+            flags: inode_flags::HUGE_FILE,
+            ..Default::default()
+        };
 
         // uid / gid -- inherit from parent when not specified.
         if let Some(u) = uid {
@@ -425,15 +593,16 @@ impl Formatter {
                 }
                 if state.has_block() {
                     let block_buf = state.write_block()?;
-                    self.align_to_block()?;
-                    child_inode.xattr_block_lo = self.current_block();
-                    self.file.write_all(&block_buf)?;
+                    let ranges = self.write_aligned_payload_bytes(&block_buf)?;
+                    if let Some(range) = ranges.first() {
+                        child_inode.xattr_block_lo = range.start;
+                    }
                     // Account for the xattr block.  When HUGE_FILE is set,
                     // blocks_lo is in filesystem-block units; otherwise sectors.
                     if child_inode.flags & inode_flags::HUGE_FILE != 0 {
                         child_inode.blocks_lo += 1;
                     } else {
-                        child_inode.blocks_lo += (self.block_size / 512) as u32;
+                        child_inode.blocks_lo += self.block_size / 512;
                     }
                 }
             }
@@ -451,13 +620,8 @@ impl Formatter {
         child_inode.crtime_extra = ts.creation_hi;
         child_inode.links_count = 1;
         child_inode.extra_isize = EXTRA_ISIZE;
-        child_inode.flags = inode_flags::HUGE_FILE;
 
-        // Align to block boundary before writing data.
-        self.align_to_block()?;
-
-        let mut start_block: u32 = 0;
-        let mut end_block: u32 = 0;
+        let mut ranges: Vec<BlockRange> = Vec::new();
 
         // ------- Handle by file type -------
         if is_dir(mode) {
@@ -467,7 +631,6 @@ impl Formatter {
             self.inodes[(parent_inode_num - 1) as usize].links_count += 1;
         } else if let Some(link_target) = link {
             // Symbolic link.
-            start_block = self.current_block();
             let link_bytes = link_target.as_bytes();
 
             let size = if link_bytes.len() < 60 {
@@ -476,12 +639,9 @@ impl Formatter {
                 link_bytes.len() as u64
             } else {
                 // Long symlink: write to data blocks.
-                self.file.write_all(link_bytes)?;
+                ranges = self.write_aligned_payload_bytes(link_bytes)?;
                 link_bytes.len() as u64
             };
-
-            self.align_to_block()?;
-            end_block = self.current_block();
 
             child_inode.set_file_size(size);
             child_inode.mode |= 0o777;
@@ -490,14 +650,11 @@ impl Formatter {
             if link_bytes.len() < 60 {
                 child_inode.blocks_lo = 0;
             } else {
-                let blocks = BlockRange {
-                    start: start_block,
-                    end: end_block,
-                };
+                self.skip_reserved_metadata_blocks()?;
                 let mut cur = self.current_block();
                 extent::write_extents(
                     &mut child_inode,
-                    blocks,
+                    &ranges,
                     self.block_size,
                     &mut self.file,
                     &mut cur,
@@ -505,37 +662,22 @@ impl Formatter {
             }
         } else if is_reg(mode) {
             // Regular file.
-            start_block = self.current_block();
             let mut size = 0u64;
 
             if let Some(reader) = data {
-                let mut buf = vec![0u8; self.block_size as usize];
-                loop {
-                    let n = reader.read(&mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    size += n as u64;
-                    if size > MAX_FILE_SIZE {
-                        return Err(FormatError::FileTooBig(size));
-                    }
-                    self.file.write_all(&buf[..n])?;
-                }
+                self.align_to_block()?;
+                self.skip_reserved_metadata_blocks()?;
+                size = self.write_payload_from_reader(reader, &mut ranges)?;
+                self.align_to_block()?;
             }
-
-            self.align_to_block()?;
-            end_block = self.current_block();
 
             child_inode.set_file_size(size);
 
-            let blocks = BlockRange {
-                start: start_block,
-                end: end_block,
-            };
+            self.skip_reserved_metadata_blocks()?;
             let mut cur = self.current_block();
             extent::write_extents(
                 &mut child_inode,
-                blocks,
+                &ranges,
                 self.block_size,
                 &mut self.file,
                 &mut cur,
@@ -548,22 +690,16 @@ impl Formatter {
         self.inodes.push(child_inode);
         let child_inode_num = self.inodes.len() as InodeNumber;
 
-        let child_node = FileTreeNode {
+        let mut child_node = FileTreeNode {
             inode: child_inode_num,
             name: basename(path).to_string(),
             children: Vec::new(),
             parent: None,
-            blocks: if start_block != end_block {
-                Some(BlockRange {
-                    start: start_block,
-                    end: end_block,
-                })
-            } else {
-                None
-            },
+            blocks: None,
             additional_blocks: Vec::new(),
             link: None,
         };
+        Self::assign_node_ranges(&mut child_node, &ranges);
         self.tree.add_child(parent_idx, child_node);
 
         Ok(())
@@ -608,7 +744,7 @@ impl Formatter {
         let idx = self
             .tree
             .lookup(&path_buf)
-            .ok_or_else(|| FormatError::NotFound(path_buf))?;
+            .ok_or(FormatError::NotFound(path_buf))?;
         let ino = self.tree.node(idx).inode;
         let inode = &mut self.inodes[(ino - 1) as usize];
         // Preserve the file-type bits, replace the permission bits.
@@ -622,7 +758,7 @@ impl Formatter {
         let idx = self
             .tree
             .lookup(&path_buf)
-            .ok_or_else(|| FormatError::NotFound(path_buf))?;
+            .ok_or(FormatError::NotFound(path_buf))?;
         let ino = self.tree.node(idx).inode;
         let inode = &mut self.inodes[(ino - 1) as usize];
         inode.set_uid(uid);
@@ -802,19 +938,21 @@ impl Formatter {
         // -- Step 1: BFS-commit directory entries --
         self.commit_directories()?;
 
-        // -- Step 2: Optimize block group layout --
+        // -- Step 2: Allocate the resize inode's double-indirect block --
+        let allocated_descriptor_area_blocks = self.group_descriptor_blocks();
+        let resize_dind_block = self.allocate_resize_inode_dind_block()?;
+
+        // -- Step 3: Optimize block group layout --
         let current_blk = self.current_block();
         let inode_count = self.inodes.len() as u32;
         let (block_groups, inodes_per_group) =
             self.optimize_block_group_layout(current_blk, inode_count);
 
-        // -- Step 3: Write inode table --
-        let inode_table_offset = self.commit_inode_table(block_groups, inodes_per_group)?;
-
         self.align_to_block()?;
-
-        // -- Step 4: Write bitmaps and build group descriptors --
-        let bitmap_offset = self.current_block();
+        let inode_table_offset = self.current_block() as u64;
+        let inode_table_size_per_group = inodes_per_group * INODE_SIZE / self.block_size;
+        let inode_table_blocks = block_groups * inode_table_size_per_group;
+        let bitmap_offset = inode_table_offset as u32 + inode_table_blocks;
         let bitmap_size = block_groups * 2; // block bitmap + inode bitmap per group
         let data_size = bitmap_offset + bitmap_size;
 
@@ -827,18 +965,14 @@ impl Formatter {
 
         if self.size < minimum_disk_size as u64 * self.block_size as u64 {
             self.size = minimum_disk_size as u64 * self.block_size as u64;
+            self.file.set_len(self.size)?;
         }
 
-        let inode_table_size_per_group = inodes_per_group * INODE_SIZE / self.block_size;
-
         // Check if we need more groups for the full disk size.
-        let min_groups =
-            ((self.pos() / self.block_size as u64) - 1) / self.blocks_per_group() as u64 + 1;
+        let min_groups = (data_size as u64 - 1) / self.blocks_per_group() as u64 + 1;
         if self.size < min_groups * self.blocks_per_group() as u64 * self.block_size as u64 {
             self.size = min_groups * self.blocks_per_group() as u64 * self.block_size as u64;
-            let saved_pos = self.pos();
             self.file.set_len(self.size)?;
-            self.file.seek(SeekFrom::Start(saved_pos))?;
         }
 
         let total_groups =
@@ -855,10 +989,31 @@ impl Formatter {
         let total_groups_u32 = total_groups as u32;
 
         // Verify group descriptor space.
-        let gd_block_count = (total_groups_u32 - 1) / self.groups_per_descriptor_block() + 1;
-        if gd_block_count > self.group_descriptor_blocks() {
+        let gd_block_count = self.descriptor_blocks_for_groups(total_groups_u32);
+        let gd_area_blocks = self.group_descriptor_area_blocks_for_groups(total_groups_u32);
+        if gd_area_blocks > allocated_descriptor_area_blocks {
             return Err(FormatError::InsufficientSpaceForGroupDescriptorBlocks);
         }
+        let reserved_gdt_blocks = gd_area_blocks - gd_block_count;
+        let backup_groups = self.backup_groups(total_groups_u32);
+        self.configure_resize_inode(
+            resize_dind_block,
+            reserved_gdt_blocks,
+            backup_groups.len() as u32,
+        );
+        self.write_resize_inode_blocks(
+            resize_dind_block,
+            gd_block_count,
+            reserved_gdt_blocks,
+            &backup_groups,
+        )?;
+
+        // -- Step 4: Write inode table --
+        self.seek_to_block(inode_table_offset as u32)?;
+        let inode_table_offset = self.commit_inode_table(block_groups, inodes_per_group)?;
+
+        self.align_to_block()?;
+        let bitmap_offset = self.current_block();
 
         let mut total_used_blocks: u32 = 0;
         let mut total_used_inodes: u32 = 0;
@@ -893,22 +1048,14 @@ impl Formatter {
                 }
             }
 
-            // Group 0: adjust for unused group descriptor blocks.
-            if group == 0 {
-                let used_gd_blocks =
-                    (total_groups_u32 - 1) / self.groups_per_descriptor_block() + 1;
-                // Mark used GD blocks (block 0 = superblock, 1..=used_gd_blocks).
-                for i in 0..=used_gd_blocks {
-                    bitmap[(i / 8) as usize] |= 1 << (i % 8);
-                }
-                // Free the reserved-but-unused GD blocks.
-                let gd_reserved = self.group_descriptor_blocks();
-                for i in (used_gd_blocks + 1)..=gd_reserved {
-                    let was_set = (bitmap[(i / 8) as usize] >> (i % 8)) & 1;
-                    bitmap[(i / 8) as usize] &= !(1 << (i % 8));
-                    if was_set != 0 {
-                        used_blocks -= 1;
-                    }
+            // Classic sparse-super groups reserve the group-start block for a
+            // superblock copy and the following descriptor/reserved-GDT area.
+            let metadata_blocks = self.static_metadata_blocks_in_group(group);
+            for i in 0..metadata_blocks.min(self.blocks_per_group()) {
+                let was_set = (bitmap[(i / 8) as usize] >> (i % 8)) & 1;
+                bitmap[(i / 8) as usize] |= 1 << (i % 8);
+                if was_set == 0 {
+                    used_blocks += 1;
                 }
             }
 
@@ -959,7 +1106,7 @@ impl Formatter {
                 0
             };
             let free_inodes = inodes_per_group - used_inodes;
-            let block_bitmap_lo = (bitmap_offset + 2 * group) as u32;
+            let block_bitmap_lo = bitmap_offset + 2 * group;
             let inode_bitmap_lo = block_bitmap_lo + 1;
             let inode_table_lo = (inode_table_offset as u32) + group * inode_table_size_per_group;
 
@@ -983,14 +1130,6 @@ impl Formatter {
         }
 
         // -- Step 5: Extra (empty) block groups beyond data --
-        let empty_block_bitmap = {
-            let mut bm = vec![0u8; self.blocks_per_group() as usize / 8];
-            // Mark inode-table blocks + 2 bitmap blocks as used.
-            for i in 0..(inode_table_size_per_group + 2) {
-                bm[(i / 8) as usize] |= 1 << (i % 8);
-            }
-            bm
-        };
         let empty_inode_bitmap = {
             let mut bm = vec![0xFFu8; self.blocks_per_group() as usize / 8];
             for i in 0..inodes_per_group as u16 {
@@ -1011,10 +1150,15 @@ impl Formatter {
                 self.blocks_per_group()
             };
 
-            let bb_offset = group * self.blocks_per_group() + inode_table_size_per_group;
+            let group_start = group * self.blocks_per_group();
+            let metadata_blocks = self
+                .static_metadata_blocks_in_group(group)
+                .min(blocks_in_group);
+            let used_empty_blocks = metadata_blocks + inode_table_size_per_group + 2;
+            let it_offset = group_start + metadata_blocks;
+            let bb_offset = it_offset + inode_table_size_per_group;
             let ib_offset = bb_offset + 1;
-            let it_offset = group as u64 * self.blocks_per_group() as u64;
-            let free_blocks_count = blocks_in_group.saturating_sub(inode_table_size_per_group + 2);
+            let free_blocks_count = blocks_in_group.saturating_sub(used_empty_blocks);
             let free_inodes_count = inodes_per_group;
 
             // BLOCK_UNINIT lets the bitmap be reconstructed on demand;
@@ -1022,14 +1166,19 @@ impl Formatter {
             // inode table be treated as uninitialized.  Together they let
             // resize2fs extend the filesystem without fallocating the new
             // inode tables -- a ~2 MiB-per-added-group cost on btrfs.
+            let mut flags = bg_flags::INODE_UNINIT;
+            if group != total_groups_u32 - 1 {
+                flags |= bg_flags::BLOCK_UNINIT;
+            }
+
             group_descriptors.push(GroupDescriptor {
                 block_bitmap_lo: bb_offset,
                 inode_bitmap_lo: ib_offset,
-                inode_table_lo: it_offset as u32,
+                inode_table_lo: it_offset,
                 free_blocks_count_lo: free_blocks_count as u16,
                 free_inodes_count_lo: free_inodes_count as u16,
                 used_dirs_count_lo: 0,
-                flags: bg_flags::BLOCK_UNINIT | bg_flags::INODE_UNINIT,
+                flags,
                 exclude_bitmap_lo: 0,
                 block_bitmap_csum_lo: 0,
                 inode_bitmap_csum_lo: 0,
@@ -1037,26 +1186,23 @@ impl Formatter {
                 checksum: 0,
             });
 
-            total_used_blocks += inode_table_size_per_group + 2;
+            total_used_blocks += used_empty_blocks.min(blocks_in_group);
 
             // Write block bitmap + inode bitmap at the right offset.
             self.seek_to_block(bb_offset)?;
 
+            let mut block_bitmap = vec![0u8; self.blocks_per_group() as usize / 8];
+            for i in 0..used_empty_blocks.min(blocks_in_group) {
+                block_bitmap[(i / 8) as usize] |= 1 << (i % 8);
+            }
             if group == total_groups_u32 - 1 && blocks_in_group < self.blocks_per_group() {
                 // Last partial group: mark out-of-range blocks as used.
-                let mut partial_bb = vec![0u8; self.blocks_per_group() as usize / 8];
                 for i in blocks_in_group..self.blocks_per_group() {
-                    partial_bb[(i / 8) as usize] |= 1 << (i % 8);
+                    block_bitmap[(i / 8) as usize] |= 1 << (i % 8);
                 }
-                for i in 0..(inode_table_size_per_group + 2) {
-                    partial_bb[(i / 8) as usize] |= 1 << (i % 8);
-                }
-                self.file.write_all(&partial_bb)?;
-                self.file.write_all(&empty_inode_bitmap)?;
-            } else {
-                self.file.write_all(&empty_block_bitmap)?;
-                self.file.write_all(&empty_inode_bitmap)?;
             }
+            self.file.write_all(&block_bitmap)?;
+            self.file.write_all(&empty_inode_bitmap)?;
         }
 
         // Settle the UUID now so the group descriptor checksums and the
@@ -1064,16 +1210,18 @@ impl Formatter {
         let uuid = self.uuid.unwrap_or_else(Uuid::new_v4);
         let uuid_bytes = *uuid.as_bytes();
 
-        // -- Step 6: Write group descriptors at block 1 --
+        // -- Step 6: Build group descriptor table --
         // With `gdt_csum`, each descriptor carries a CRC-16 over the
         // filesystem UUID, its group number, and the descriptor body.
-        self.seek_to_block(1)?;
-        let mut gd_buf = vec![0u8; GroupDescriptor::SIZE];
+        let mut gd_table_buf = vec![0u8; gd_block_count as usize * self.block_size as usize];
         for (group_nr, gd) in group_descriptors.iter_mut().enumerate() {
             gd.checksum = checksum::group_descriptor(&uuid_bytes, group_nr as u32, gd);
-            gd.write_to(&mut gd_buf);
-            self.file.write_all(&gd_buf)?;
+            let offset = group_nr * GroupDescriptor::SIZE;
+            gd.write_to(&mut gd_table_buf[offset..offset + GroupDescriptor::SIZE]);
         }
+
+        self.seek_to_block(1)?;
+        self.file.write_all(&gd_table_buf)?;
 
         // -- Step 7: Write superblock --
         let computed_inodes = total_groups_u32 as u64 * inodes_per_group as u64;
@@ -1084,14 +1232,16 @@ impl Formatter {
         let total_free_blocks = blocks_count.saturating_sub(total_used_blocks as u64);
         let free_inodes = computed_inodes as u32 - total_used_inodes;
 
-        let mut sb = SuperBlock::default();
-        sb.inodes_count = computed_inodes as u32;
-        sb.blocks_count_lo = blocks_count as u32;
-        sb.blocks_count_hi = (blocks_count >> 32) as u32;
-        sb.free_blocks_count_lo = total_free_blocks as u32;
-        sb.free_blocks_count_hi = (total_free_blocks >> 32) as u32;
-        sb.free_inodes_count = free_inodes;
-        sb.first_data_block = 0;
+        let mut sb = SuperBlock {
+            inodes_count: computed_inodes as u32,
+            blocks_count_lo: blocks_count as u32,
+            blocks_count_hi: (blocks_count >> 32) as u32,
+            free_blocks_count_lo: total_free_blocks as u32,
+            free_blocks_count_hi: (total_free_blocks >> 32) as u32,
+            free_inodes_count: free_inodes,
+            first_data_block: 0,
+            ..Default::default()
+        };
         // log_block_size = log2(block_size / 1024).  E.g. 1024->0, 2048->1, 4096->2.
         let log_bs = (self.block_size / 1024).trailing_zeros();
         sb.log_block_size = log_bs;
@@ -1107,16 +1257,18 @@ impl Formatter {
         sb.first_ino = FIRST_INODE;
         sb.lpf_ino = LOST_AND_FOUND_INODE;
         sb.inode_size = INODE_SIZE as u16;
-        sb.feature_compat = compat::SPARSE_SUPER2 | compat::EXT_ATTR;
+        sb.feature_compat = compat::EXT_ATTR | compat::RESIZE_INODE;
         sb.feature_incompat = incompat::FILETYPE | incompat::EXTENTS | incompat::FLEX_BG;
         sb.feature_ro_compat = ro_compat::LARGE_FILE
             | ro_compat::HUGE_FILE
+            | ro_compat::SPARSE_SUPER
             | ro_compat::EXTRA_ISIZE
             // `gdt_csum` (group-descriptor CRC-16) is what makes resize2fs
             // honour BG_*_UNINIT flags on the new groups it creates -- and
             // therefore skip the per-group fallocate that otherwise burns
             // ~2 MiB per added block group on btrfs.
             | ro_compat::GDT_CSUM;
+        sb.reserved_gdt_blocks = reserved_gdt_blocks as u16;
         sb.min_extra_isize = EXTRA_ISIZE;
         sb.want_extra_isize = EXTRA_ISIZE;
         sb.log_groups_per_flex = 31;
@@ -1133,6 +1285,23 @@ impl Formatter {
         sb.write_to(&mut sb_buf);
         self.file.write_all(&sb_buf)?;
         self.file.write_all(&[0u8; 2048])?;
+
+        // Classic sparse-super groups carry backup superblocks and descriptor
+        // tables. The reserved-GDT blocks after each backup table stay sparse,
+        // but are marked allocated and referenced by inode 7 for online grow.
+        for group in &backup_groups {
+            let group_start = group * self.blocks_per_group();
+
+            let mut backup_sb = sb.clone();
+            backup_sb.block_group_nr = *group as u16;
+            backup_sb.write_to(&mut sb_buf);
+
+            self.seek_to_block(group_start)?;
+            self.file.write_all(&sb_buf)?;
+
+            self.seek_to_block(group_start + 1)?;
+            self.file.write_all(&gd_table_buf)?;
+        }
 
         self.file.flush()?;
         Ok(())
@@ -1178,14 +1347,12 @@ impl Formatter {
                 continue;
             }
 
-            self.align_to_block()?;
-            let start_block = self.current_block();
-
+            let mut dir_buf = Vec::new();
             let mut left = self.block_size as i32;
 
             // Write "." entry.
             dir::write_dir_entry(
-                &mut self.file,
+                &mut dir_buf,
                 ".",
                 inode_num,
                 self.inodes[(inode_num - 1) as usize].mode,
@@ -1201,7 +1368,7 @@ impl Formatter {
                 None => inode_num, // root's ".." points to itself
             };
             dir::write_dir_entry(
-                &mut self.file,
+                &mut dir_buf,
                 "..",
                 parent_ino,
                 self.inodes[(parent_ino - 1) as usize].mode,
@@ -1243,7 +1410,7 @@ impl Formatter {
                 };
 
                 dir::write_dir_entry(
-                    &mut self.file,
+                    &mut dir_buf,
                     &child_name,
                     child_ino,
                     self.inodes[(child_ino.max(1) - 1) as usize].mode,
@@ -1254,28 +1421,21 @@ impl Formatter {
                 )?;
             }
 
-            dir::finish_dir_entry_block(&mut self.file, &mut left, self.block_size)?;
+            dir::finish_dir_entry_block(&mut dir_buf, &mut left, self.block_size)?;
 
-            let end_block = self.current_block();
-            let size = (end_block - start_block) as u64 * self.block_size as u64;
+            let ranges = self.write_aligned_payload_bytes(&dir_buf)?;
+            let size = dir_buf.len() as u64;
             self.inodes[(inode_num - 1) as usize].set_file_size(size);
 
             // Store block range in the tree node.
-            self.tree.node_mut(node_idx).blocks = Some(BlockRange {
-                start: start_block,
-                end: end_block,
-            });
+            Self::assign_node_ranges(self.tree.node_mut(node_idx), &ranges);
 
             // Write extent tree for this directory.
-            self.align_to_block()?;
-            let blocks = BlockRange {
-                start: start_block,
-                end: end_block,
-            };
+            self.skip_reserved_metadata_blocks()?;
             let mut cur = self.current_block();
             extent::write_extents(
                 &mut self.inodes[(inode_num - 1) as usize],
-                blocks,
+                &ranges,
                 self.block_size,
                 &mut self.file,
                 &mut cur,
@@ -1321,6 +1481,88 @@ impl Formatter {
         Ok(inode_table_offset)
     }
 
+    fn allocate_resize_inode_dind_block(&mut self) -> FormatResult<u32> {
+        let zero_block = vec![0u8; self.block_size as usize];
+        let ranges = self.write_aligned_payload_bytes(&zero_block)?;
+        let range = ranges
+            .first()
+            .ok_or(FormatError::InsufficientSpaceForGroupDescriptorBlocks)?;
+        Ok(range.start)
+    }
+
+    fn configure_resize_inode(
+        &mut self,
+        dind_block: u32,
+        reserved_gdt_blocks: u32,
+        backup_group_count: u32,
+    ) {
+        let (time_lo, time_extra) = timestamp_now();
+        let addr_per_block = (self.block_size / 4) as u64;
+        let inode_size = (addr_per_block * addr_per_block + addr_per_block + EXT2_NDIR_BLOCKS)
+            * self.block_size as u64;
+        let owned_blocks = 1 + reserved_gdt_blocks * (1 + backup_group_count);
+
+        let mut inode = Inode {
+            mode: file_mode::S_IFREG | 0o600,
+            links_count: 1,
+            extra_isize: EXTRA_ISIZE,
+            atime: time_lo,
+            ctime: time_lo,
+            mtime: time_lo,
+            crtime: time_lo,
+            atime_extra: time_extra,
+            ctime_extra: time_extra,
+            mtime_extra: time_extra,
+            crtime_extra: time_extra,
+            ..Inode::default()
+        };
+        inode.set_file_size(inode_size);
+        inode.blocks_lo = owned_blocks * (self.block_size / 512);
+        let offset = EXT2_DIND_BLOCK * 4;
+        inode.block[offset..offset + 4].copy_from_slice(&dind_block.to_le_bytes());
+
+        self.inodes[(RESIZE_INODE_NUMBER - 1) as usize] = inode;
+    }
+
+    fn backup_groups(&self, total_groups: u32) -> Vec<u32> {
+        (1..total_groups)
+            .filter(|group| Self::has_sparse_super_backup(*group))
+            .collect()
+    }
+
+    fn write_resize_inode_blocks(
+        &mut self,
+        dind_block: u32,
+        descriptor_blocks: u32,
+        reserved_gdt_blocks: u32,
+        backup_groups: &[u32],
+    ) -> FormatResult<()> {
+        let mut dind_buf = vec![0u8; self.block_size as usize];
+        let blocks_per_group = self.blocks_per_group();
+
+        for rsv_off in 0..reserved_gdt_blocks {
+            let gdt_blk = 1 + descriptor_blocks + rsv_off;
+            let dind_index = descriptor_blocks + rsv_off;
+            let dind_offset = dind_index as usize * 4;
+            dind_buf[dind_offset..dind_offset + 4].copy_from_slice(&gdt_blk.to_le_bytes());
+
+            let mut gdt_buf = vec![0u8; self.block_size as usize];
+            for (idx, group) in backup_groups.iter().enumerate() {
+                let backup_gdt_block = gdt_blk + group * blocks_per_group;
+                let offset = idx * 4;
+                gdt_buf[offset..offset + 4].copy_from_slice(&backup_gdt_block.to_le_bytes());
+            }
+
+            self.seek_to_block(gdt_blk)?;
+            self.file.write_all(&gdt_buf)?;
+        }
+
+        self.seek_to_block(dind_block)?;
+        self.file.write_all(&dind_buf)?;
+        self.seek_to_block(dind_block + 1)?;
+        Ok(())
+    }
+
     /// Find the (block_groups, inodes_per_group) pair that minimizes the
     /// number of block groups needed to hold all inodes and all data blocks.
     fn optimize_block_group_layout(&self, blocks: u32, inodes: u32) -> (u32, u32) {
@@ -1331,7 +1573,7 @@ impl Formatter {
             // Ensure enough groups for all the inodes.
             let min_blocks = (inodes.saturating_sub(1)) / ipg * data_blocks_per_group + 1;
             let effective_blocks = blocks.max(min_blocks);
-            (effective_blocks + data_blocks_per_group - 1) / data_blocks_per_group
+            effective_blocks.div_ceil(data_blocks_per_group)
         };
 
         let inc = (self.block_size * 512 / INODE_SIZE) as usize;

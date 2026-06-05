@@ -83,8 +83,8 @@ fn put_bytes(buf: &mut [u8], off: usize, src: &[u8]) {
 /// Return `(seconds_lo, extra)` for the current wall-clock time in ext4 format.
 ///
 /// * `seconds_lo` -- lower 32 bits of seconds since the Unix epoch.
-/// * `extra`      -- upper 2 bits of seconds (epoch bits) in bits 0..1, plus
-///                   nanoseconds in bits 2..31.
+/// * `extra` -- upper 2 bits of seconds (epoch bits) in bits 0..1, plus
+///   nanoseconds in bits 2..31.
 pub fn timestamp_now() -> (u32, u32) {
     let dur = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -344,13 +344,13 @@ impl SuperBlock {
         debug_assert!(buf.len() >= Self::SIZE);
 
         let mut hash_seed = [0u32; 4];
-        for i in 0..4 {
-            hash_seed[i] = get_u32(buf, 0xEC + i * 4);
+        for (i, item) in hash_seed.iter_mut().enumerate() {
+            *item = get_u32(buf, 0xEC + i * 4);
         }
 
         let mut journal_blocks = [0u32; 17];
-        for i in 0..17 {
-            journal_blocks[i] = get_u32(buf, 0x10C + i * 4);
+        for (i, item) in journal_blocks.iter_mut().enumerate() {
+            *item = get_u32(buf, 0x10C + i * 4);
         }
 
         let mut backup_bgs = [0u32; 2];
@@ -358,8 +358,8 @@ impl SuperBlock {
         backup_bgs[1] = get_u32(buf, 0x250);
 
         let mut reserved = [0u32; 96];
-        for i in 0..96 {
-            reserved[i] = get_u32(buf, 0x27C + i * 4);
+        for (i, item) in reserved.iter_mut().enumerate() {
+            *item = get_u32(buf, 0x27C + i * 4);
         }
 
         Self {
@@ -1207,11 +1207,13 @@ mod tests {
 
     #[test]
     fn superblock_roundtrip() {
-        let mut sb = SuperBlock::default();
-        sb.magic = SUPERBLOCK_MAGIC;
-        sb.inodes_count = 1024;
-        sb.blocks_count_lo = 4096;
-        sb.log_block_size = 2; // 4 KiB blocks
+        let mut sb = SuperBlock {
+            magic: SUPERBLOCK_MAGIC,
+            inodes_count: 1024,
+            blocks_count_lo: 4096,
+            log_block_size: 2, // 4 KiB blocks
+            ..Default::default()
+        };
         sb.uuid[0] = 0xDE;
         sb.uuid[15] = 0xAD;
         sb.checksum = 0xCAFE_BABE;
@@ -1258,8 +1260,10 @@ mod tests {
 
     #[test]
     fn inode_roundtrip() {
-        let mut inode = Inode::default();
-        inode.mode = file_mode::S_IFREG | 0o644;
+        let mut inode = Inode {
+            mode: file_mode::S_IFREG | 0o644,
+            ..Default::default()
+        };
         inode.set_file_size(0x1_DEAD_BEEF);
         inode.set_uid(100_000);
         inode.set_gid(200_000);

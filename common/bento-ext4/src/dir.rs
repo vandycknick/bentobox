@@ -37,6 +37,7 @@ fn dir_file_type(mode: u16) -> u8 {
 /// When `link_inode` is `Some`, the entry's inode number is taken from
 /// `link_inode` and the file type is derived from `link_mode` (the target
 /// inode's mode).  Otherwise, `inode` and `mode` are used directly.
+#[allow(clippy::too_many_arguments)]
 pub fn write_dir_entry<W: Write>(
     writer: &mut W,
     name: &str,

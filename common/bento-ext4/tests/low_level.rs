@@ -5,6 +5,7 @@
 // descriptors, inodes, bitmaps) match expected values.
 
 use bento_ext4::constants::*;
+use bento_ext4::types::{GroupDescriptor, SuperBlock};
 use bento_ext4::{Formatter, Reader};
 use std::io::{Read, Seek, SeekFrom};
 use tempfile::NamedTempFile;
@@ -100,6 +101,19 @@ fn build_standard_fs() -> (Reader, NamedTempFile) {
     (reader, tmp)
 }
 
+fn read_block(file: &mut std::fs::File, block: u32, block_size: u64) -> Vec<u8> {
+    let mut buf = vec![0u8; block_size as usize];
+    file.seek(SeekFrom::Start(block as u64 * block_size))
+        .unwrap();
+    file.read_exact(&mut buf).unwrap();
+    buf
+}
+
+fn read_le_u32(buf: &[u8], index: usize) -> u32 {
+    let offset = index * 4;
+    u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
+}
+
 // ===========================================================================
 // Test: superblock fields
 // ===========================================================================
@@ -137,9 +151,14 @@ fn test_superblock_fields() {
         "EXT_ATTR compat flag not set"
     );
     assert_ne!(
+        sb.feature_compat & compat::RESIZE_INODE,
+        0,
+        "RESIZE_INODE compat flag not set"
+    );
+    assert_eq!(
         sb.feature_compat & compat::SPARSE_SUPER2,
         0,
-        "SPARSE_SUPER2 compat flag not set"
+        "SPARSE_SUPER2 prevents mounted online resize"
     );
 
     // Incompatible feature flags.
@@ -171,9 +190,23 @@ fn test_superblock_fields() {
         "HUGE_FILE ro_compat flag not set"
     );
     assert_ne!(
+        sb.feature_ro_compat & ro_compat::SPARSE_SUPER,
+        0,
+        "SPARSE_SUPER ro_compat flag not set"
+    );
+    assert_ne!(
         sb.feature_ro_compat & ro_compat::EXTRA_ISIZE,
         0,
         "EXTRA_ISIZE ro_compat flag not set"
+    );
+    assert_ne!(
+        sb.feature_ro_compat & ro_compat::GDT_CSUM,
+        0,
+        "GDT_CSUM ro_compat flag not set"
+    );
+    assert_ne!(
+        sb.reserved_gdt_blocks, 0,
+        "online-growable filesystems reserve GDT blocks"
     );
 
     // Filesystem state: 1 = cleanly unmounted.
@@ -198,6 +231,81 @@ fn test_superblock_fields() {
         sb.uuid.iter().any(|&b| b != 0),
         "uuid must not be all zeros"
     );
+}
+
+#[test]
+fn test_resize_inode_and_backup_sparse_super_layout() {
+    let tmp = NamedTempFile::new().unwrap();
+    let fmt = Formatter::new(tmp.path(), 4096, 512 * 1024 * 1024).unwrap();
+    fmt.close().unwrap();
+
+    let mut reader = Reader::new(tmp.path()).unwrap();
+    let sb = reader.superblock().clone();
+    let block_size = 1024u64 * (1 << sb.log_block_size);
+    let group_count = (sb.blocks_count_lo - 1) / sb.blocks_per_group + 1;
+    let groups_per_descriptor_block = block_size as u32 / GroupDescriptor::SIZE as u32;
+    let descriptor_blocks = (group_count - 1) / groups_per_descriptor_block + 1;
+    let first_reserved_gdt_block = 1 + descriptor_blocks;
+
+    assert!(group_count > 3, "test image must include backup groups");
+    assert_ne!(sb.feature_compat & compat::RESIZE_INODE, 0);
+    assert_ne!(sb.feature_ro_compat & ro_compat::SPARSE_SUPER, 0);
+    assert_eq!(sb.feature_compat & compat::SPARSE_SUPER2, 0);
+    assert!(sb.reserved_gdt_blocks > 0);
+
+    let resize_inode = reader.get_inode(7).unwrap();
+    assert_eq!(resize_inode.mode & file_mode::TYPE_MASK, file_mode::S_IFREG);
+    assert_eq!(resize_inode.mode & 0o777, 0o600);
+    assert_eq!(resize_inode.links_count, 1);
+
+    let dind_offset = 13 * 4;
+    let dind_block = u32::from_le_bytes(
+        resize_inode.block[dind_offset..dind_offset + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_ne!(
+        dind_block, 0,
+        "resize inode must own a double-indirect block"
+    );
+
+    let mut file = std::fs::File::open(tmp.path()).unwrap();
+    let dind = read_block(&mut file, dind_block, block_size);
+    assert_eq!(
+        read_le_u32(&dind, descriptor_blocks as usize),
+        first_reserved_gdt_block,
+        "resize inode must reference the first reserved primary GDT block"
+    );
+
+    let primary_reserved = read_block(&mut file, first_reserved_gdt_block, block_size);
+    assert_eq!(
+        read_le_u32(&primary_reserved, 0),
+        sb.blocks_per_group + first_reserved_gdt_block,
+        "first backup pointer should target group 1"
+    );
+    assert_eq!(
+        read_le_u32(&primary_reserved, 1),
+        3 * sb.blocks_per_group + first_reserved_gdt_block,
+        "second backup pointer should target group 3"
+    );
+
+    let mut backup_sb_buf = [0u8; SuperBlock::SIZE];
+    file.seek(SeekFrom::Start(sb.blocks_per_group as u64 * block_size))
+        .unwrap();
+    file.read_exact(&mut backup_sb_buf).unwrap();
+    let backup_sb = SuperBlock::read_from(&backup_sb_buf);
+    assert_eq!(backup_sb.magic, SUPERBLOCK_MAGIC);
+    assert_eq!(backup_sb.block_group_nr, 1);
+    assert_eq!(backup_sb.feature_compat, sb.feature_compat);
+    assert_eq!(backup_sb.feature_ro_compat, sb.feature_ro_compat);
+
+    let primary_gd0 = reader.get_group_descriptor(0).unwrap();
+    let backup_gdt = read_block(&mut file, sb.blocks_per_group + 1, block_size);
+    let backup_gd0 = GroupDescriptor::read_from(&backup_gdt[..GroupDescriptor::SIZE]);
+    assert_eq!(backup_gd0.block_bitmap_lo, primary_gd0.block_bitmap_lo);
+    assert_eq!(backup_gd0.inode_bitmap_lo, primary_gd0.inode_bitmap_lo);
+    assert_eq!(backup_gd0.inode_table_lo, primary_gd0.inode_table_lo);
+    assert_eq!(backup_gd0.checksum, primary_gd0.checksum);
 }
 
 // ===========================================================================

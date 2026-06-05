@@ -18,18 +18,15 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 /// Round `n` up to the next multiple of `align`.
 #[inline]
 fn div_ceil(n: u32, d: u32) -> u32 {
-    (n + d - 1) / d
+    n.div_ceil(d)
 }
 
 /// Build extent leaves that cover `num_blocks` starting at physical block
 /// `start`, using at most `MAX_BLOCKS_PER_EXTENT` blocks per extent.
 /// `offset` is the starting logical block number.
-fn fill_extent_leaves(
-    start: u32,
-    num_blocks: u32,
-    num_extents: u32,
-    offset: u32,
-) -> Vec<ExtentLeaf> {
+#[cfg(test)]
+fn fill_extent_leaves(start: u32, num_blocks: u32, offset: u32) -> Vec<ExtentLeaf> {
+    let num_extents = div_ceil(num_blocks, MAX_BLOCKS_PER_EXTENT);
     let mut leaves = Vec::with_capacity(num_extents as usize);
     let mut remaining = num_blocks;
     let mut phys = start;
@@ -51,6 +48,37 @@ fn fill_extent_leaves(
     leaves
 }
 
+/// Build extent leaves for one logical file whose physical storage may be
+/// split across non-contiguous ranges.
+fn fill_extent_leaves_from_ranges(blocks: &[BlockRange]) -> Vec<ExtentLeaf> {
+    let total_extents: u32 = blocks
+        .iter()
+        .map(|range| div_ceil(range.end - range.start, MAX_BLOCKS_PER_EXTENT))
+        .sum();
+    let mut leaves = Vec::with_capacity(total_extents as usize);
+    let mut logical = 0u32;
+
+    for range in blocks {
+        let mut remaining = range.end - range.start;
+        let mut phys = range.start;
+
+        while remaining > 0 {
+            let len = remaining.min(MAX_BLOCKS_PER_EXTENT);
+            leaves.push(ExtentLeaf {
+                block: logical,
+                len: len as u16,
+                start_hi: 0,
+                start_lo: phys,
+            });
+            phys += len;
+            logical += len;
+            remaining -= len;
+        }
+    }
+
+    leaves
+}
+
 // ---------------------------------------------------------------------------
 // Write path (Formatter)
 // ---------------------------------------------------------------------------
@@ -65,17 +93,18 @@ fn fill_extent_leaves(
 /// Updates `inode.block`, `inode.blocks_lo`, and `inode.flags` in place.
 pub fn write_extents<W: Write + Seek>(
     inode: &mut Inode,
-    blocks: BlockRange,
+    blocks: &[BlockRange],
     block_size: u32,
     writer: &mut W,
     current_block: &mut u32,
 ) -> io::Result<()> {
-    let data_blocks = blocks.end - blocks.start;
+    let data_blocks: u32 = blocks.iter().map(|range| range.end - range.start).sum();
     if data_blocks == 0 {
         return Ok(());
     }
 
-    let num_extents = div_ceil(data_blocks, MAX_BLOCKS_PER_EXTENT);
+    let leaves = fill_extent_leaves_from_ranges(blocks);
+    let num_extents = leaves.len() as u32;
 
     // The inode's block field is 60 bytes = header(12) + 4 * entry(12).
     // So we can fit up to 4 extents inline.
@@ -83,15 +112,14 @@ pub fn write_extents<W: Write + Seek>(
 
     if num_extents <= max_inline {
         // Case: 1-4 extents -- everything fits in the inode's block field.
-        write_inline_extents(inode, blocks.start, data_blocks, num_extents, block_size);
+        write_inline_extents(inode, data_blocks, &leaves, block_size);
     } else {
         // Case: 5+ extents -- depth-1 tree with index entries in the inode
         // and leaf blocks written to the output.
         write_indexed_extents(
             inode,
-            blocks.start,
             data_blocks,
-            num_extents,
+            &leaves,
             block_size,
             writer,
             current_block,
@@ -104,19 +132,16 @@ pub fn write_extents<W: Write + Seek>(
 /// Write extent tree inline (depth 0): header + leaves directly in inode.block.
 fn write_inline_extents(
     inode: &mut Inode,
-    start: u32,
     data_blocks: u32,
-    num_extents: u32,
+    leaves: &[ExtentLeaf],
     block_size: u32,
 ) {
-    let leaves = fill_extent_leaves(start, data_blocks, num_extents, 0);
-
     let mut buf = [0u8; INODE_BLOCK_SIZE];
 
     // Write extent header.
     let header = ExtentHeader {
         magic: EXTENT_HEADER_MAGIC,
-        entries: num_extents as u16,
+        entries: leaves.len() as u16,
         max: 4,
         depth: 0,
         generation: 0,
@@ -147,9 +172,8 @@ fn write_inline_extents(
 /// written to the output stream.
 fn write_indexed_extents<W: Write + Seek>(
     inode: &mut Inode,
-    start: u32,
     data_blocks: u32,
-    num_extents: u32,
+    all_leaves: &[ExtentLeaf],
     block_size: u32,
     writer: &mut W,
     current_block: &mut u32,
@@ -161,15 +185,13 @@ fn write_indexed_extents<W: Write + Seek>(
         (block_size as usize - ExtentHeader::SIZE - ExtentTail::SIZE) / ExtentLeaf::SIZE;
 
     // How many index blocks do we need?
-    let num_index_blocks = div_ceil(num_extents, leaves_per_block as u32);
+    let num_index_blocks = div_ceil(all_leaves.len() as u32, leaves_per_block as u32);
 
     // The inode can hold up to 4 index entries (same 60-byte limit).
     debug_assert!(
         num_index_blocks <= 4,
         "files requiring >4 index blocks (depth>1) are not supported"
     );
-
-    let all_leaves = fill_extent_leaves(start, data_blocks, num_extents, 0);
 
     // Allocate block numbers for the index (leaf-block) nodes.
     // They are written sequentially starting at *current_block.
@@ -324,7 +346,7 @@ fn parse_depth1<R: Read + Seek>(
         let index = ExtentIndex::read_from(&block_field[off..]);
 
         // Read the leaf block from disk.
-        let phys_block = index.leaf() as u64;
+        let phys_block = index.leaf();
         let byte_offset = phys_block * block_size;
 
         reader
@@ -363,7 +385,7 @@ mod tests {
 
     #[test]
     fn test_fill_extent_leaves_single() {
-        let leaves = fill_extent_leaves(100, 10, 1, 0);
+        let leaves = fill_extent_leaves(100, 10, 0);
         assert_eq!(leaves.len(), 1);
         assert_eq!(leaves[0].block, 0);
         assert_eq!(leaves[0].start_lo, 100);
@@ -374,7 +396,7 @@ mod tests {
     fn test_fill_extent_leaves_multiple() {
         // 0x8000 * 2 + 5 = 65541 blocks requiring 3 extents.
         let num_blocks = MAX_BLOCKS_PER_EXTENT * 2 + 5;
-        let leaves = fill_extent_leaves(0, num_blocks, 3, 0);
+        let leaves = fill_extent_leaves(0, num_blocks, 0);
         assert_eq!(leaves.len(), 3);
         assert_eq!(leaves[0].len, MAX_BLOCKS_PER_EXTENT as u16);
         assert_eq!(leaves[1].len, MAX_BLOCKS_PER_EXTENT as u16);
@@ -394,7 +416,7 @@ mod tests {
 
         write_extents(
             &mut inode,
-            blocks,
+            &[blocks],
             block_size,
             &mut cursor,
             &mut current_block,
@@ -411,13 +433,41 @@ mod tests {
     }
 
     #[test]
+    fn test_inline_extents_non_contiguous_ranges() {
+        let block_size = 4096u32;
+        let mut inode = Inode::default();
+        let blocks = [
+            BlockRange { start: 50, end: 52 },
+            BlockRange {
+                start: 100,
+                end: 103,
+            },
+        ];
+
+        let mut cursor = Cursor::new(Vec::new());
+        let mut current_block = 200u32;
+
+        write_extents(
+            &mut inode,
+            &blocks,
+            block_size,
+            &mut cursor,
+            &mut current_block,
+        )
+        .unwrap();
+
+        let ranges = parse_extents(&inode, block_size as u64, &mut cursor).unwrap();
+        assert_eq!(ranges, vec![(50, 52), (100, 103)]);
+    }
+
+    #[test]
     fn test_zero_blocks_is_noop() {
         let mut inode = Inode::default();
         let blocks = BlockRange { start: 0, end: 0 };
         let mut cursor = Cursor::new(Vec::new());
         let mut current_block = 0u32;
 
-        write_extents(&mut inode, blocks, 4096, &mut cursor, &mut current_block).unwrap();
+        write_extents(&mut inode, &[blocks], 4096, &mut cursor, &mut current_block).unwrap();
         assert_eq!(inode.flags & inode_flags::EXTENTS, 0);
     }
 
@@ -448,7 +498,7 @@ mod tests {
 
         write_extents(
             &mut inode,
-            blocks,
+            &[blocks],
             block_size,
             &mut cursor,
             &mut current_block,
@@ -506,7 +556,7 @@ mod tests {
 
         write_extents(
             &mut inode,
-            blocks,
+            &[blocks],
             block_size,
             &mut cursor,
             &mut current_block,
@@ -517,9 +567,9 @@ mod tests {
         assert_eq!(ranges.len(), 6);
 
         // First 5 extents should be full-size.
-        for i in 0..5 {
+        for (i, range) in ranges.iter().enumerate().take(5) {
             assert_eq!(
-                ranges[i].1 - ranges[i].0,
+                range.1 - range.0,
                 MAX_BLOCKS_PER_EXTENT,
                 "extent {} should be full",
                 i
