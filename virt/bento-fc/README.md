@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             is_read_only: Some(false),
             is_root_device: true,
             partuuid: None,
-            path_on_host: Some("/path/to/rootfs.ext4".to_string()),
+            path_on_host: Some("/path/to/rootfs.img".to_string()),
             rate_limiter: None,
             socket: None,
         })

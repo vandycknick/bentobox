@@ -16,6 +16,7 @@ path = "src/bin/bentoctl.rs"
 [dependencies]
 bento-core = { path = "../../common/bento-core" }
 bento-libvm = { path = "../../runtime/bento-libvm" }
+bento-ocidisk = { path = "../../runtime/bento-ocidisk" }
 bento-utils = { path = "../../common/bento-utils" }
 anyhow = "1.0.102"
 bento-protocol = { path = "../../wire/bento-protocol" }

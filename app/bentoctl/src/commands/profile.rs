@@ -9,8 +9,8 @@ use clap::{Args, Subcommand};
 use tabwriter::TabWriter;
 
 use crate::profile::{
-    parse_profile, MountMode, Profile, ProfileImage, ProfileMount, ProfileNetwork,
-    ProfileResources, ProfileSsh, ProfileStore,
+    parse_profile, MountMode, Profile, ProfileMount, ProfileNetwork, ProfileResources, ProfileSsh,
+    ProfileStore,
 };
 
 #[derive(Args, Debug)]
@@ -168,7 +168,7 @@ fn list_profiles(store: &ProfileStore, cmd: &ListCmd) -> eyre::Result<()> {
             &mut out,
             "{}\t{}\t{}\t{}",
             named.name,
-            named.profile.image.reference,
+            named.profile.image,
             named.profile.network_name(),
             named.profile.description.unwrap_or_default(),
         )?;
@@ -204,9 +204,7 @@ fn create_profile(store: &ProfileStore, cmd: &CreateCmd) -> eyre::Result<()> {
     let profile = Profile {
         version: "1".to_string(),
         description: cmd.description.clone(),
-        image: ProfileImage {
-            reference: cmd.image.clone(),
-        },
+        image: cmd.image.clone(),
         resources: (cmd.cpus.is_some() || cmd.memory.is_some()).then(|| ProfileResources {
             cpus: cmd.cpus,
             memory: cmd.memory.map(|memory| memory.to_string()),

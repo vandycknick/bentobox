@@ -15,6 +15,7 @@ pub mod network;
 pub mod profile;
 pub mod restart;
 pub mod rm;
+mod rootfs_image;
 pub mod run;
 pub mod secret;
 pub mod shell;

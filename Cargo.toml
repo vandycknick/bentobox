@@ -4,6 +4,7 @@ members = [
     "common/bento-core",
     "common/bento-utils",
     "guest/bento-agent",
+    "runtime/bento-ocidisk",
     "runtime/bento-libvm",
     "runtime/bento-plugins",
     "runtime/bento-vmmon",
@@ -16,3 +17,6 @@ members = [
 ]
 default-members = ["app/bentoctl", "runtime/bento-vmmon"]
 resolver = "2"
+
+[profile.dev.package.sha2]
+opt-level = 3

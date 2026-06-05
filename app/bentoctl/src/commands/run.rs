@@ -6,6 +6,7 @@ use bento_libvm::{CreateMachineRequest, LibVm, MachineRef, RequestedNetwork};
 use clap::Args;
 
 use crate::commands::create::{profile_mount_to_mount, read_userdata_path, VmOverrideArgs};
+use crate::commands::rootfs_image::{get_base_rootfs_image, record_base_rootfs_metadata};
 use crate::constants::{DEFAULT_PROFILE_NAME, PROFILE_METADATA_KEY};
 use crate::profile::ProfileStore;
 use crate::ssh;
@@ -13,7 +14,7 @@ use crate::ssh;
 #[derive(Args, Debug)]
 #[command(
     about = "Run an ephemeral VM from a profile or image",
-    after_help = "Examples:\n  bento run\n  bento run dev\n  bento run dev -- cargo test\n  bento run dev --keep-on-failure -- cargo test\n"
+    after_help = "Examples:\n  bento run\n  bento run dev\n  bento run dev -- cargo test\n  bento run dev --image disk:./target/rootfs.img -- cargo test\n  bento run dev --keep-on-failure -- cargo test\n"
 )]
 pub struct Cmd {
     /// Profile to run. Defaults to the default profile when omitted.
@@ -22,7 +23,7 @@ pub struct Cmd {
     /// Profile name. Alternative to the positional profile argument.
     #[arg(long = "profile")]
     pub profile_name: Option<String>,
-    /// Image reference to run without using a profile.
+    /// Image reference to run. Overrides the profile image when both are set.
     #[arg(long)]
     pub image: Option<String>,
     /// Keep the ephemeral VM after the shell or command exits.
@@ -50,12 +51,15 @@ impl Cmd {
             eyre::bail!("--keep-on-failure requires a command");
         }
 
-        let resolved = self.resolve(libvm).await?;
+        let mut resolved = self.resolve(libvm).await?;
         if !resolved.ssh_enabled {
             eyre::bail!("profile ssh.enabled is false; bento run needs SSH to open a shell or execute a command");
         }
+        let base_rootfs = get_base_rootfs_image(libvm, &resolved.image_ref).await?;
+        record_base_rootfs_metadata(&mut resolved.metadata, &base_rootfs);
         let request = CreateMachineRequest {
             image_ref: resolved.image_ref.clone(),
+            base_rootfs_path: base_rootfs.path,
             name: resolved.name.clone(),
             labels: resolved.labels,
             metadata: resolved.metadata,
@@ -73,7 +77,7 @@ impl Cmd {
             network: Some(resolved.network),
         };
 
-        let machine = libvm.create_from_image(request).await?;
+        let machine = libvm.create_from_base_image(request).await?;
         let machine_ref = MachineRef::Id(machine.id);
         let machine = libvm.start(&machine_ref).await?;
         if machine.spec.guest_agent().is_some() {
@@ -104,9 +108,6 @@ impl Cmd {
         if self.profile.is_some() && self.profile_name.is_some() {
             eyre::bail!("profile specified twice; use either positional profile or --profile");
         }
-        if (self.profile.is_some() || self.profile_name.is_some()) && self.image.is_some() {
-            eyre::bail!("use either a profile or --image, not both");
-        }
 
         let mut labels = BTreeMap::new();
         let mut metadata = BTreeMap::new();
@@ -117,21 +118,15 @@ impl Cmd {
         let mut cpus = None;
         let mut memory_mib = None;
         let mut disk_size_bytes = None;
-        let image_ref;
+        let mut image_ref;
         let prefix;
 
-        if let Some(image) = &self.image {
-            image_ref = image.clone();
-            prefix = "run".to_string();
-        } else {
-            let selected = self
-                .profile
-                .clone()
-                .or_else(|| self.profile_name.clone())
-                .unwrap_or_else(|| DEFAULT_PROFILE_NAME.to_string());
+        let selected_profile = self.profile.clone().or_else(|| self.profile_name.clone());
+        if selected_profile.is_some() || self.image.is_none() {
+            let selected = selected_profile.unwrap_or_else(|| DEFAULT_PROFILE_NAME.to_string());
             let store = ProfileStore::from_env()?;
             let named = store.resolve(&selected)?;
-            image_ref = named.profile.image.reference.clone();
+            image_ref = named.profile.image.clone();
             network = named.profile.requested_network();
             ssh_enabled = named
                 .profile
@@ -147,6 +142,16 @@ impl Cmd {
             metadata.insert(PROFILE_METADATA_KEY.to_string(), named.name.clone());
             mounts = named.profile.resolved_mounts()?;
             prefix = named.name.clone();
+        } else {
+            let Some(image) = &self.image else {
+                eyre::bail!("either a profile or image is required");
+            };
+            image_ref = image.clone();
+            prefix = "run".to_string();
+        }
+
+        if let Some(image) = &self.image {
+            image_ref = image.clone();
         }
 
         for (key, value) in &self.overrides.labels {
@@ -272,6 +277,27 @@ mod tests {
             run.overrides.labels,
             vec![("env".to_string(), "dev".to_string())]
         );
+    }
+
+    #[test]
+    fn run_command_accepts_image_override_with_profile() {
+        let cmd = BentoCtlCmd::try_parse_from([
+            "bento",
+            "run",
+            "dev",
+            "--image",
+            "tar:./target/rootfs.tar",
+            "--",
+            "true",
+        ])
+        .expect("run command should parse");
+        let run = match cmd.cmd {
+            Command::Run(cmd) => cmd,
+            other => panic!("expected run command, got {other:?}"),
+        };
+
+        assert_eq!(run.profile.as_deref(), Some("dev"));
+        assert_eq!(run.image.as_deref(), Some("tar:./target/rootfs.tar"));
     }
 
     #[test]

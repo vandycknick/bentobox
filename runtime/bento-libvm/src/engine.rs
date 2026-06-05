@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::images::store::ImageStore;
 use crate::launch::prepare_instance_runtime;
+use crate::root_disk::{clone_or_copy_root_disk, resize_raw_disk};
 use crate::InstanceFile;
 use bento_core::{
     Architecture, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec, MachineId, Mount, Platform,
@@ -40,6 +40,7 @@ const ENV_VM_SYNCPIPE: &str = "_VM_SYNCPIPE";
 #[derive(Debug, Clone)]
 pub struct CreateMachineRequest {
     pub image_ref: String,
+    pub base_rootfs_path: PathBuf,
     pub name: String,
     pub labels: BTreeMap<String, String>,
     pub metadata: BTreeMap<String, String>,
@@ -154,7 +155,7 @@ impl LibVm {
         &self.layout
     }
 
-    pub async fn create_from_image(
+    pub async fn create_from_base_image(
         &self,
         request: CreateMachineRequest,
     ) -> Result<MachineRecord, LibVmError> {
@@ -165,7 +166,8 @@ impl LibVm {
             });
         }
 
-        let image_store = ImageStore::open(self.layout.images_dir())?;
+        let base_rootfs_path =
+            canonicalize_existing_path(&request.base_rootfs_path, "base rootfs")?;
         let kernel_path = canonicalize_optional_existing_path(request.kernel.as_deref(), "kernel")?;
         let initramfs_path =
             canonicalize_optional_existing_path(request.initramfs.as_deref(), "initramfs")?;
@@ -179,7 +181,6 @@ impl LibVm {
         }
         let userdata = request.userdata;
         let disk_paths = canonicalize_existing_paths(&request.disks, "disk")?;
-        let selected_image = image_store.resolve(&request.image_ref)?;
 
         let bootstrap = (userdata.is_some() || request.rosetta).then_some(Bootstrap { userdata });
         let guest = guest_spec_from_request(request.agent);
@@ -241,10 +242,10 @@ impl LibVm {
             )
             .await?;
         let rootfs_path = pending.dir().join(InstanceFile::RootDisk.as_str());
-        image_store.clone_base_image(&selected_image, &rootfs_path)?;
+        clone_or_copy_root_disk(&base_rootfs_path, &rootfs_path)?;
 
         if let Some(size_bytes) = request.disk_size_bytes {
-            ImageStore::resize_raw_disk(&rootfs_path, size_bytes)?;
+            resize_raw_disk(&rootfs_path, size_bytes)?;
         }
 
         pending.commit(self).await
@@ -1273,29 +1274,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_from_image_clones_registry_rootfs() {
+    async fn create_from_base_image_clones_rootfs() {
         let temp = tempfile::tempdir().expect("create temp dir");
         let data_dir = temp.path().join("bento");
-        let image_dir = data_dir.join("images/sha256-test");
+        let image_dir = data_dir.join("images/sha256-test/linux-arm64");
         std::fs::create_dir_all(&image_dir).expect("image dir should be created");
-        std::fs::write(image_dir.join("rootfs.img"), b"disk").expect("rootfs should be written");
-        std::fs::write(
-            data_dir.join("images/registry.json"),
-            r#"{
-                "version": 1,
-                "images": {
-                    "ghcr.io/vandycknick/archlinuxarm:latest": "sha256-test/rootfs.img"
-                }
-            }"#,
-        )
-        .expect("registry should be written");
+        let base_rootfs_path = image_dir.join("rootfs.img");
+        std::fs::write(&base_rootfs_path, b"disk").expect("rootfs should be written");
 
         let libvm = LibVm::new(Layout::new(data_dir))
             .await
             .expect("create libvm");
         let machine = libvm
-            .create_from_image(CreateMachineRequest {
+            .create_from_base_image(CreateMachineRequest {
                 image_ref: "ghcr.io/vandycknick/archlinuxarm:latest".to_string(),
+                base_rootfs_path,
                 name: "devbox".to_string(),
                 labels: std::collections::BTreeMap::new(),
                 metadata: std::collections::BTreeMap::new(),

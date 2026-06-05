@@ -8,13 +8,14 @@ use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 
 use crate::commands::profile::{parse_label, parse_profile_mount, parse_requested_network};
+use crate::commands::rootfs_image::{get_base_rootfs_image, record_base_rootfs_metadata};
 use crate::constants::PROFILE_METADATA_KEY;
 use crate::profile::{resolve_host_path, MountMode, ProfileStore};
 
 #[derive(Args, Debug)]
 #[command(
     about = "Create a persistent VM from a profile or image",
-    after_help = "Examples:\n  bento create dev rust-dev\n  bento create dev rust-dev --start\n  bento create dev --profile rust-dev\n  bento create ubuntu --image ubuntu:24.04\n"
+    after_help = "Examples:\n  bento create dev rust-dev\n  bento create dev rust-dev --start\n  bento create dev --profile rust-dev\n  bento create ubuntu --image ubuntu:24.04\n  bento create dev rust-dev --image disk:./target/rootfs.img\n"
 )]
 pub struct Cmd {
     /// Name of the persistent VM to create.
@@ -26,7 +27,7 @@ pub struct Cmd {
     /// Profile name. Alternative to the positional profile argument.
     #[arg(long = "profile")]
     pub profile_name: Option<String>,
-    /// Image reference to create from without using a profile.
+    /// Image reference to create from. Overrides the profile image when both are set.
     #[arg(long)]
     pub image: Option<String>,
     /// Start the VM immediately after it is created.
@@ -103,9 +104,12 @@ impl Display for Cmd {
 
 impl Cmd {
     pub async fn run(&self, libvm: &LibVm) -> eyre::Result<()> {
-        let resolved = self.resolve()?;
+        let mut resolved = self.resolve()?;
+        let base_rootfs = get_base_rootfs_image(libvm, &resolved.image_ref).await?;
+        record_base_rootfs_metadata(&mut resolved.metadata, &base_rootfs);
         let request = CreateMachineRequest {
             image_ref: resolved.image_ref.clone(),
+            base_rootfs_path: base_rootfs.path,
             name: self.name.clone(),
             labels: resolved.labels,
             metadata: resolved.metadata,
@@ -123,7 +127,7 @@ impl Cmd {
             network: Some(resolved.network),
         };
 
-        libvm.create_from_image(request).await?;
+        libvm.create_from_base_image(request).await?;
         println!("created {}", self.name);
 
         if self.start {
@@ -138,14 +142,11 @@ impl Cmd {
             eyre::bail!("profile specified twice; use either positional profile or --profile");
         }
         let profile_name = self.profile.clone().or_else(|| self.profile_name.clone());
-        if profile_name.is_some() && self.image.is_some() {
-            eyre::bail!("use either a profile or --image, not both");
-        }
 
         let mut labels = BTreeMap::new();
         let mut metadata = BTreeMap::new();
         let mut mounts = Vec::new();
-        let image_ref;
+        let mut image_ref;
         let mut network = RequestedNetwork::default();
         let mut ssh_enabled = true;
         let mut userdata = None;
@@ -156,7 +157,7 @@ impl Cmd {
         if let Some(profile_name) = profile_name {
             let store = ProfileStore::from_env()?;
             let named = store.resolve(&profile_name)?;
-            image_ref = named.profile.image.reference.clone();
+            image_ref = named.profile.image.clone();
             network = named.profile.requested_network();
             ssh_enabled = named
                 .profile
@@ -189,6 +190,9 @@ impl Cmd {
             for mount in &self.overrides.mounts {
                 mounts.push(profile_mount_to_mount(mount)?);
             }
+        }
+        if let Some(image) = &self.image {
+            image_ref = image.clone();
         }
         if let Some(network_override) = self.overrides.network.clone() {
             network = network_override;
@@ -264,6 +268,27 @@ mod tests {
         assert_eq!(create.name, "dev");
         assert_eq!(create.profile.as_deref(), Some("rust-dev"));
         assert!(!create.overrides.agent);
+    }
+
+    #[test]
+    fn create_image_override_takes_precedence_over_profile_image() {
+        let cmd = BentoCtlCmd::try_parse_from([
+            "bento",
+            "create",
+            "dev",
+            "default",
+            "--image",
+            "disk:./target/rootfs.img",
+        ])
+        .expect("create command should parse");
+        let create = match cmd.cmd {
+            Command::Create(cmd) => cmd,
+            other => panic!("expected create command, got {other:?}"),
+        };
+
+        let resolved = create.resolve().expect("resolve create command");
+
+        assert_eq!(resolved.image_ref, "disk:./target/rootfs.img");
     }
 
     #[test]

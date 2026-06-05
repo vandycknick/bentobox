@@ -88,6 +88,14 @@ pub enum LibVmError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    #[error(transparent)]
-    ImageStore(#[from] crate::images::store::ImageStoreError),
+    #[error("root disk operation failed: {message}")]
+    RootDisk { message: String },
+}
+
+impl From<crate::root_disk::RootDiskError> for LibVmError {
+    fn from(source: crate::root_disk::RootDiskError) -> Self {
+        Self::RootDisk {
+            message: source.to_string(),
+        }
+    }
 }

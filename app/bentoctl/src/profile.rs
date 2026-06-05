@@ -22,7 +22,7 @@ pub(crate) struct Profile {
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub image: ProfileImage,
+    pub image: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ProfileResources>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -37,13 +37,6 @@ pub(crate) struct Profile {
     pub ssh: Option<ProfileSsh>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ProfileImage {
-    #[serde(rename = "ref")]
-    pub reference: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,8 +354,8 @@ pub(crate) fn validate_profile(profile: &Profile) -> eyre::Result<()> {
             profile.version
         );
     }
-    if profile.image.reference.trim().is_empty() {
-        bail!("profile image.ref cannot be empty");
+    if profile.image.trim().is_empty() {
+        bail!("profile image cannot be empty");
     }
     let _ = profile.memory_mib()?;
     if let Some(disk_size_bytes) = profile.disk_size_bytes()? {
@@ -417,9 +410,7 @@ fn built_in_default_profile() -> NamedProfile {
         profile: Profile {
             version: "1".to_string(),
             description: Some("Built-in default BentoBox profile".to_string()),
-            image: ProfileImage {
-                reference: DEFAULT_PROFILE_IMAGE.to_string(),
-            },
+            image: DEFAULT_PROFILE_IMAGE.to_string(),
             resources: None,
             disk_size: None,
             userdata: None,
@@ -495,8 +486,7 @@ mod tests {
         let profile = parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 network:
   kind: private
   policy_ref: github
@@ -521,8 +511,7 @@ network:
         let err = parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 network:
   kind: private
   policy:
@@ -541,8 +530,7 @@ network:
         let err = parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 network:
   kind: isolated
 "#,
@@ -559,8 +547,7 @@ network:
         let err = parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 network:
   name: private
 "#,
@@ -577,8 +564,7 @@ network:
         let profile = parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 network:
   name: dev
 "#,
@@ -596,8 +582,7 @@ network:
         let profile = parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 resources:
   cpus: 4
   memory: 1gb
@@ -619,8 +604,7 @@ disk_size: 40gb
         assert!(parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 resources:
   memory: 4096
 "#,
@@ -629,8 +613,7 @@ resources:
         assert!(parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 disk_size: 40
 "#,
         )
@@ -642,8 +625,7 @@ disk_size: 40
         let err = parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 resources:
   memory: "4096"
 "#,
@@ -660,8 +642,7 @@ resources:
         let profile = parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 userdata: |
   #!/bin/sh
   set -eu
@@ -680,8 +661,7 @@ userdata: |
         let err = parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 userdata: ""
 "#,
         )
@@ -697,8 +677,7 @@ userdata: ""
         let err = parse_profile(
             r#"
 version: "1"
-image:
-  ref: "ubuntu:24.04"
+image: "ubuntu:24.04"
 userdata: |
   set -eu
   echo hello

@@ -93,8 +93,7 @@ A profile created by the CLI looks like this:
 ```yaml
 version: "1"
 description: Rust development box
-image:
-    ref: ghcr.io/vandycknick/archlinux:latest
+image: ghcr.io/vandycknick/archlinux:latest
 resources:
     cpus: 4
     memory: 4gb
@@ -110,6 +109,17 @@ ssh:
 labels:
     stack: rust
 ```
+
+Image values can point at a remote OCI image, a local disk image, a plain rootfs tarball, or a local OCI archive:
+
+```yaml
+image: ghcr.io/vandycknick/archlinux:latest
+image: disk:./target/rootfs.img
+image: tar:./target/rootfs.tar
+image: oci:./target/image.tar
+```
+
+`disk:` uses the local disk directly as the immutable base and Bento COW-clones it into each instance. `tar:` currently supports plain uncompressed rootfs tar files only and converts them into cached ext4 base images. `oci:` expects a local OCI archive with `index.json`; remote registry images stay scheme-less.
 
 Size values must include a unit suffix. Accepted units are `mb`, `gb`, `mib`, and `gib`, case-insensitive with optional whitespace, such as `512mb`, `4gb`, or `1 GiB`; bare numbers like `4096` are rejected.
 
@@ -135,6 +145,12 @@ Run directly from an image when you do not need a profile:
 
 ```bash
 bento run --image ubuntu:24.04 -- uname -a
+```
+
+When `--image` is supplied with a profile, it overrides only the profile image. The rest of the profile settings still apply:
+
+```bash
+bento run rust-dev --image disk:./target/rootfs.img -- cargo test
 ```
 
 Override VM shape and profile settings at launch:
