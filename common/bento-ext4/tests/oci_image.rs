@@ -2,12 +2,6 @@
 //
 // Builds tar archives in memory that mimic realistic Alpine Linux rootfs
 // layers, unpacks them onto an ext4 filesystem, and verifies the result.
-//
-// NOTE: The current `unpack_tar` implementation treats tar Symlink entries
-// as hard links (because `entry.link_name()` is checked before the
-// entry-type dispatch). As a workaround, symlinks are created directly
-// via `Formatter::create()` after tar unpacking. This matches how a
-// real container runtime would layer symlinks that point to directories.
 
 use std::io::Cursor;
 
@@ -162,8 +156,7 @@ fn test_oci_two_layer_rootfs() {
     fmt.unpack_tar(layer1).unwrap();
     fmt.unpack_tar(layer2).unwrap();
 
-    // Symlinks are created directly via the formatter because unpack_tar
-    // currently treats tar Symlink entries as hard links.
+    // Add symlinks that are normally present in the final rootfs.
     // /usr/bin/env -> /bin/sh (absolute symlink)
     fmt.create(
         "/usr/bin/env",

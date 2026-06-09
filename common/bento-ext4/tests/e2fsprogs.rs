@@ -1,21 +1,59 @@
-use bento_ext4::Formatter;
-use bento_ext4::constants::{file_mode, make_mode};
+#![cfg(target_os = "linux")]
+
+use std::collections::HashMap;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn workspace_tempdir() -> tempfile::TempDir {
-    let target_tmp = std::env::current_dir()
-        .unwrap()
-        .join("target/bento-ext4-tests");
-    std::fs::create_dir_all(&target_tmp).unwrap();
-    tempfile::Builder::new()
-        .prefix("e2fsprogs-")
-        .tempdir_in(target_tmp)
-        .unwrap()
+use bento_ext4::constants::{LOST_AND_FOUND_INODE, file_mode, make_mode};
+use bento_ext4::error::FormatError;
+use bento_ext4::{Formatter, Reader};
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crate should live under the workspace root")
+        .to_path_buf()
 }
 
-fn create_test_image(dir: &Path) {
+fn outside_workspace_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("e2fsprogs-")
+        .tempdir_in(std::env::temp_dir())
+        .expect("create temp dir outside workspace");
+    let workspace = workspace_root().canonicalize().expect("workspace root");
+    let temp_path = dir.path().canonicalize().expect("temp dir path");
+    assert!(
+        !temp_path.starts_with(&workspace),
+        "test artifacts must be outside the workspace: {} is under {}",
+        temp_path.display(),
+        workspace.display(),
+    );
+    dir
+}
+
+fn run(program: &str, args: &[&str]) -> String {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run {program}: {err}"));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "{program} {} failed with status {}\nstdout:\n{}\nstderr:\n{}",
+        args.join(" "),
+        output.status,
+        stdout,
+        stderr,
+    );
+
+    stdout.into_owned()
+}
+
+fn create_test_image(dir: &Path) -> std::path::PathBuf {
     let image = dir.join("rootfs.img");
 
     let mut formatter = Formatter::new(&image, 4096, 512 * 1024 * 1024).unwrap();
@@ -47,107 +85,240 @@ fn create_test_image(dir: &Path) {
         )
         .unwrap();
     formatter.close().unwrap();
+
+    image
 }
 
 #[test]
-#[ignore = "requires Docker and network access for Fedora e2fsprogs"]
 fn e2fsprogs_validates_and_resizes_generated_image() {
-    let dir = workspace_tempdir();
-    create_test_image(dir.path());
+    let dir = outside_workspace_tempdir();
+    let image = create_test_image(dir.path());
+    let image_str = image.to_string_lossy();
 
-    let mount = format!("{}:/work", dir.path().display());
-    let script = r#"
-set -eu
-dnf -y install e2fsprogs >/dev/null
-features=$(tune2fs -l /work/rootfs.img | awk -F: '/Filesystem features/ { print $2 }')
-case "$features" in
-  *resize_inode*) ;;
-  *) echo "missing resize_inode in: $features" >&2; exit 1 ;;
-esac
-case "$features" in
-  *sparse_super2*) echo "unexpected sparse_super2 in: $features" >&2; exit 1 ;;
-esac
-case "$features" in
-  *sparse_super*) ;;
-  *) echo "missing sparse_super in: $features" >&2; exit 1 ;;
-esac
-e2fsck -fn /work/rootfs.img
-truncate -s 1G /work/rootfs.img
-e2fsck -f -y /work/rootfs.img >/dev/null
-resize2fs /work/rootfs.img >/tmp/resize2fs.log
-e2fsck -fn /work/rootfs.img
-"#;
+    let tune2fs = run("tune2fs", &["-l", &image_str]);
+    let features = tune2fs
+        .lines()
+        .find_map(|line| line.strip_prefix("Filesystem features:"))
+        .expect("tune2fs output contains filesystem features");
+    assert!(
+        features
+            .split_whitespace()
+            .any(|feature| feature == "resize_inode"),
+        "missing resize_inode in: {features}"
+    );
+    assert!(
+        features
+            .split_whitespace()
+            .any(|feature| feature == "sparse_super"),
+        "missing sparse_super in: {features}"
+    );
+    assert!(
+        !features
+            .split_whitespace()
+            .any(|feature| feature == "sparse_super2"),
+        "unexpected sparse_super2 in: {features}"
+    );
 
-    let status = Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-v",
-            &mount,
-            "fedora:45",
-            "sh",
-            "-lc",
-            script,
-        ])
-        .status()
-        .expect("failed to run Docker e2fsprogs validation");
+    run("e2fsck", &["-fn", &image_str]);
 
-    assert!(status.success(), "Docker e2fsprogs validation failed");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&image)
+        .unwrap()
+        .set_len(1024 * 1024 * 1024)
+        .unwrap();
+
+    run("e2fsck", &["-f", "-y", &image_str]);
+    run("resize2fs", &[&image_str]);
+    run("e2fsck", &["-fn", &image_str]);
 }
 
 #[test]
-#[ignore = "requires privileged Docker with loop-device mount support"]
-fn privileged_docker_online_resize_generated_image() {
-    let dir = workspace_tempdir();
-    create_test_image(dir.path());
+fn debugfs_reports_full_32_bit_owner_ids() {
+    let dir = outside_workspace_tempdir();
+    let image = dir.path().join("owners.img");
 
-    let mount = format!("{}:/work", dir.path().display());
-    let script = r#"
-set -eu
-dnf -y install e2fsprogs util-linux >/dev/null
-test -f /work/rootfs.img
-if ! losetup -f >/dev/null 2>&1; then
-  echo "skipping online resize validation: no loop device available" >&2
-  exit 0
-fi
-mkdir -p /mnt/root
-if ! loop=$(losetup --find --show /work/rootfs.img); then
-  echo "skipping online resize validation: cannot attach loop device" >&2
-  exit 0
-fi
-cleanup() {
-  set +e
-  umount /mnt/root >/dev/null 2>&1
-  losetup -d "$loop" >/dev/null 2>&1
+    let mut formatter = Formatter::new(&image, 4096, 256 * 1024).unwrap();
+    formatter
+        .create(
+            "/owned",
+            make_mode(file_mode::S_IFREG, 0o644),
+            None,
+            None,
+            Some(&mut "owned".as_bytes()),
+            Some(100_000),
+            Some(200_000),
+            None,
+        )
+        .unwrap();
+    formatter.close().unwrap();
+
+    let image_str = image.to_string_lossy();
+    run("e2fsck", &["-fn", &image_str]);
+    let stat = run("debugfs", &["-R", "stat /owned", &image_str]);
+
+    assert!(
+        stat.contains("User: 100000"),
+        "debugfs did not report the full 32-bit uid:\n{stat}"
+    );
+    assert!(
+        stat.contains("Group: 200000"),
+        "debugfs did not report the full 32-bit gid:\n{stat}"
+    );
 }
-trap cleanup EXIT
-mount "$loop" /mnt/root
-before=$(df -B1 --output=size /mnt/root | tail -n 1)
-truncate -s 1G /work/rootfs.img
-losetup -c "$loop"
-resize2fs "$loop"
-after=$(df -B1 --output=size /mnt/root | tail -n 1)
-test "$after" -gt "$before"
-umount /mnt/root
-losetup -d "$loop"
-trap - EXIT
-e2fsck -fn /work/rootfs.img
-"#;
 
-    let status = Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "--privileged",
-            "-v",
-            &mount,
-            "fedora:45",
-            "sh",
-            "-lc",
-            script,
-        ])
-        .status()
-        .expect("failed to run privileged Docker online-resize validation");
+#[test]
+fn e2fsck_validates_external_xattr_block() {
+    let dir = outside_workspace_tempdir();
+    let image = dir.path().join("xattrs.img");
 
-    assert!(status.success(), "privileged Docker online resize failed");
+    let mut formatter = Formatter::new(&image, 4096, 256 * 1024).unwrap();
+    let mut xattrs = HashMap::new();
+    xattrs.insert("user.small".to_string(), b"inline".to_vec());
+    xattrs.insert("user.large".to_string(), vec![0xAB; 1024]);
+    formatter
+        .create(
+            "/xattrs",
+            make_mode(file_mode::S_IFREG, 0o644),
+            None,
+            None,
+            Some(&mut "xattrs".as_bytes()),
+            None,
+            None,
+            Some(&xattrs),
+        )
+        .unwrap();
+    formatter.close().unwrap();
+
+    let image_str = image.to_string_lossy();
+    run("e2fsck", &["-fn", &image_str]);
+    let stat = run("debugfs", &["-R", "stat /xattrs", &image_str]);
+    assert!(
+        stat.contains("File ACL: ") && !stat.contains("File ACL: 0"),
+        "large xattr should be stored in an external xattr block:\n{stat}"
+    );
+}
+
+#[test]
+fn e2fsck_validates_unlink_reclaims_external_xattr_block() {
+    let dir = outside_workspace_tempdir();
+    let image = dir.path().join("xattr-delete.img");
+
+    let mut formatter = Formatter::new(&image, 4096, 256 * 1024).unwrap();
+    let mut xattrs = HashMap::new();
+    xattrs.insert("user.large".to_string(), vec![0xCD; 1024]);
+    formatter
+        .create(
+            "/deleted-xattr",
+            make_mode(file_mode::S_IFREG, 0o644),
+            None,
+            None,
+            Some(&mut "delete me".as_bytes()),
+            None,
+            None,
+            Some(&xattrs),
+        )
+        .unwrap();
+    formatter.unlink("/deleted-xattr", false).unwrap();
+    formatter
+        .create(
+            "/kept",
+            make_mode(file_mode::S_IFREG, 0o644),
+            None,
+            None,
+            Some(&mut "kept".as_bytes()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    formatter.close().unwrap();
+
+    let image_str = image.to_string_lossy();
+    run("e2fsck", &["-fn", &image_str]);
+}
+
+#[test]
+fn e2fsck_validates_hardlink_external_xattr_delete() {
+    let dir = outside_workspace_tempdir();
+    let image = dir.path().join("xattr-hardlink-delete.img");
+
+    let mut formatter = Formatter::new(&image, 4096, 256 * 1024).unwrap();
+    let mut xattrs = HashMap::new();
+    xattrs.insert("user.large".to_string(), vec![0xEF; 1024]);
+    formatter
+        .create(
+            "/original",
+            make_mode(file_mode::S_IFREG, 0o644),
+            None,
+            None,
+            Some(&mut "delete via hardlink".as_bytes()),
+            None,
+            None,
+            Some(&xattrs),
+        )
+        .unwrap();
+    formatter.link("/alias", "/original").unwrap();
+    formatter.unlink("/original", false).unwrap();
+    formatter.unlink("/alias", false).unwrap();
+    formatter
+        .create(
+            "/kept",
+            make_mode(file_mode::S_IFREG, 0o644),
+            None,
+            None,
+            Some(&mut "kept".as_bytes()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    formatter.close().unwrap();
+
+    let image_str = image.to_string_lossy();
+    run("e2fsck", &["-fn", &image_str]);
+}
+
+#[test]
+fn initialized_group_records_unused_inode_table_tail() {
+    let dir = outside_workspace_tempdir();
+    let image = dir.path().join("itable-unused.img");
+
+    let formatter = Formatter::new(&image, 4096, 256 * 1024).unwrap();
+    formatter.close().unwrap();
+
+    let mut reader = Reader::new(&image).unwrap();
+    let sb = reader.superblock().clone();
+    let gd0 = reader.get_group_descriptor(0).unwrap();
+
+    let expected_unused = sb.inodes_per_group - LOST_AND_FOUND_INODE;
+    assert_eq!(
+        gd0.itable_unused_lo as u32, expected_unused,
+        "bg_itable_unused_lo must describe the unused tail of the initialized inode table"
+    );
+}
+
+#[test]
+fn rejects_directory_entry_names_longer_than_ext4_allows() {
+    let dir = outside_workspace_tempdir();
+    let image = dir.path().join("long-name.img");
+    let mut formatter = Formatter::new(&image, 4096, 256 * 1024).unwrap();
+    let too_long = "a".repeat(256);
+    let path = format!("/{too_long}");
+
+    let result = formatter.create(
+        &path,
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "nope".as_bytes()),
+        None,
+        None,
+        None,
+    );
+
+    assert!(
+        matches!(result, Err(FormatError::InvalidName(name)) if name == too_long),
+        "256-byte path components must be rejected before writing a corrupt directory entry"
+    );
 }

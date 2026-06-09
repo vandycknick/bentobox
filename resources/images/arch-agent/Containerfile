@@ -29,6 +29,7 @@ RUN pacman --disable-sandbox -Syu --noconfirm \
     systemd \
     systemd-sysvcompat \
     util-linux \
+    btrfs-progs \
     fish \
   && pacman --disable-sandbox -Scc --noconfirm
 

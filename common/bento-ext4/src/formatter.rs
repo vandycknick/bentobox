@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::Component;
 use std::path::Path;
 
 use uuid::Uuid;
@@ -487,6 +488,8 @@ impl Formatter {
         gid: Option<u32>,
         xattrs: Option<&HashMap<String, Vec<u8>>>,
     ) -> FormatResult<()> {
+        validate_path_component_names(path)?;
+
         let path_buf = std::path::PathBuf::from(path);
 
         // ------- Handle "already exists" cases -------
@@ -771,6 +774,8 @@ impl Formatter {
 
     /// Create a hard link at `link_path` pointing to `target_path`.
     pub fn link(&mut self, link_path: &str, target_path: &str) -> FormatResult<()> {
+        validate_path_component_names(link_path)?;
+
         let target_buf = std::path::PathBuf::from(target_path);
         let target_idx = self
             .tree
@@ -783,13 +788,13 @@ impl Formatter {
             return Err(FormatError::CannotHardlinkDirectory(target_buf));
         }
 
-        // Increment link count on the target inode.
-        self.inodes[(target_inode_num - 1) as usize].links_count += 1;
-
-        // If the link path already exists, remove it first.
         let link_buf = std::path::PathBuf::from(link_path);
-        if self.tree.lookup(&link_buf).is_some() {
-            self.unlink(link_path, false)?;
+        let existing_target = self.tree.lookup(&link_buf).map(|idx| {
+            let node = self.tree.node(idx);
+            node.link.unwrap_or(node.inode)
+        });
+        if existing_target == Some(target_inode_num) {
+            return Ok(());
         }
 
         let parent_path = parent_of(link_path);
@@ -803,6 +808,14 @@ impl Formatter {
         if self.inodes[(parent_inode_num - 1) as usize].links_count as u32 >= MAX_LINKS {
             return Err(FormatError::MaximumLinksExceeded(parent_path_buf));
         }
+
+        // If the link path already exists, remove it after all validation so a
+        // failed link creation cannot mutate the target inode's link count.
+        if existing_target.is_some() {
+            self.unlink(link_path, false)?;
+        }
+
+        self.inodes[(target_inode_num - 1) as usize].links_count += 1;
 
         let link_node = FileTreeNode {
             inode: ROOT_INODE, // placeholder, not used for hard links
@@ -833,8 +846,15 @@ impl Formatter {
 
         let inode_num = self.tree.node(node_idx).inode;
         let inode_idx = (inode_num - 1) as usize;
+        let linked_ino = self.tree.node(node_idx).link;
+        let (target_ino, target_idx) = if let Some(linked_ino) = linked_ino {
+            (linked_ino, (linked_ino - 1) as usize)
+        } else {
+            (inode_num, inode_idx)
+        };
+        let node_is_dir = linked_ino.is_none() && self.inodes[inode_idx].is_dir();
 
-        if directory_whiteout && !self.inodes[inode_idx].is_dir() {
+        if directory_whiteout && !node_is_dir {
             return Err(FormatError::NotDirectory(path_buf));
         }
 
@@ -864,22 +884,11 @@ impl Formatter {
         let parent_path_buf = std::path::PathBuf::from(parent_path);
         if let Some(parent_idx) = self.tree.lookup(&parent_path_buf) {
             let parent_inode_num = self.tree.node(parent_idx).inode;
-            if self.inodes[inode_idx].is_dir()
-                && self.inodes[(parent_inode_num - 1) as usize].links_count > 2
-            {
+            if node_is_dir && self.inodes[(parent_inode_num - 1) as usize].links_count > 2 {
                 self.inodes[(parent_inode_num - 1) as usize].links_count -= 1;
             }
             self.tree.remove_child(parent_idx, basename(path));
         }
-
-        // Determine which inode to decrement and potentially reclaim.
-        // For hard-link entries the target inode is the one that matters;
-        // for regular entries it is the node's own inode.
-        let (target_ino, target_idx) = if let Some(linked_ino) = self.tree.node(node_idx).link {
-            (linked_ino, (linked_ino - 1) as usize)
-        } else {
-            (inode_num, inode_idx)
-        };
 
         if target_ino > FIRST_INODE - 1 {
             if self.inodes[target_idx].links_count > 0 {
@@ -897,6 +906,7 @@ impl Formatter {
             for blk in &node.additional_blocks {
                 node_blocks.push(*blk);
             }
+            let xattr_block = self.inodes[target_idx].xattr_block_lo;
 
             if self.inodes[target_idx].links_count == 0 {
                 // Last reference removed -- reclaim blocks and mark deleted.
@@ -910,6 +920,12 @@ impl Formatter {
                     for blk in deferred {
                         self.deleted_blocks.push(blk);
                     }
+                }
+                if xattr_block != 0 {
+                    self.deleted_blocks.push(BlockRange {
+                        start: xattr_block,
+                        end: xattr_block + 1,
+                    });
                 }
 
                 let (now_lo, _) = timestamp_now();
@@ -1025,6 +1041,7 @@ impl Formatter {
         for group in 0..block_groups {
             let mut dirs: u32 = 0;
             let mut used_inodes: u32 = 0;
+            let mut last_used_inode_index: u32 = 0;
             let mut used_blocks: u32 = 0;
 
             // Two bitmaps per group: block bitmap + inode bitmap, each one
@@ -1089,6 +1106,7 @@ impl Formatter {
                 }
                 bitmap[inode_bitmap_start + (i / 8) as usize] |= 1 << (i % 8);
                 used_inodes += 1;
+                last_used_inode_index = i + 1;
                 if inode.is_dir() {
                     dirs += 1;
                 }
@@ -1108,6 +1126,7 @@ impl Formatter {
                 0
             };
             let free_inodes = inodes_per_group - used_inodes;
+            let itable_unused = inodes_per_group - last_used_inode_index;
             let block_bitmap_lo = bitmap_offset + 2 * group;
             let inode_bitmap_lo = block_bitmap_lo + 1;
             let inode_table_lo = (inode_table_offset as u32) + group * inode_table_size_per_group;
@@ -1123,7 +1142,7 @@ impl Formatter {
                 exclude_bitmap_lo: 0,
                 block_bitmap_csum_lo: 0,
                 inode_bitmap_csum_lo: 0,
-                itable_unused_lo: 0,
+                itable_unused_lo: itable_unused as u16,
                 checksum: 0,
             });
 
@@ -1254,7 +1273,7 @@ impl Formatter {
         sb.magic = SUPERBLOCK_MAGIC;
         sb.state = 1; // cleanly unmounted
         sb.errors = 1; // continue on error
-        sb.creator_os = 3; // FreeBSD (matches Apple's implementation)
+        sb.creator_os = 0; // Linux inode osd2 layout (uid/gid high bits, block counts).
         sb.rev_level = 1; // dynamic inode sizes
         sb.first_ino = FIRST_INODE;
         sb.lpf_ino = LOST_AND_FOUND_INODE;
@@ -1599,6 +1618,22 @@ impl Formatter {
 // ---------------------------------------------------------------------------
 // Free-standing helpers
 // ---------------------------------------------------------------------------
+
+/// Reject path components that cannot be represented in ext4 dir entries.
+fn validate_path_component_names(path: &str) -> FormatResult<()> {
+    for component in Path::new(path).components() {
+        if let Component::Normal(name) = component {
+            let name = name
+                .to_str()
+                .ok_or_else(|| FormatError::InvalidPathEncoding(path.to_string()))?;
+            if name.len() > EXT4_NAME_LEN {
+                return Err(FormatError::InvalidName(name.to_string()));
+            }
+        }
+    }
+
+    Ok(())
+}
 
 /// Return the parent directory of `path`.
 ///

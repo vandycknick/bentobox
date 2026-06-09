@@ -163,17 +163,19 @@ Tests cover:
 - Formatter and reader end-to-end behavior for files, directories, symlinks, hard links, and xattrs.
 - OCI two-layer rootfs simulation.
 - Low-level superblock, group descriptor, bitmap, inode table, backup metadata, and resize inode validation.
-- Docker/e2fsprogs validation for generated images and offline resize.
+- Linux-only e2fsprogs validation for generated images and offline resize.
 - Error paths, symlink loops, boundary conditions, and bug regressions.
 
 ```sh
 cargo test -p bento-ext4
 ```
 
-Docker/e2fsprogs validation tests are ignored by default:
+The e2fsprogs integration tests compile and run only on Linux. They call the
+host `tune2fs`, `e2fsck`, `resize2fs`, and `debugfs` binaries, and they create
+temporary images under the system temp directory outside the workspace.
 
 ```sh
-cargo test -p bento-ext4 --test e2fsprogs -- --ignored --nocapture
+cargo test -p bento-ext4 --test e2fsprogs -- --nocapture
 ```
 
 ## Origins

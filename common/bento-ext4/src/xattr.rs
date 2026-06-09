@@ -191,6 +191,12 @@ impl XattrState {
     /// Add an attribute.  It is placed inline if there is room; otherwise it
     /// goes into the block area.  Returns an error if neither has enough space.
     pub fn add(&mut self, attr: ExtendedAttribute) -> Result<(), FormatError> {
+        if attr.name.len() > EXT4_NAME_LEN {
+            return Err(FormatError::InvalidName(
+                ExtendedAttribute::decompress_name(attr.index, &attr.name),
+            ));
+        }
+
         let total = attr.total_size();
 
         // Try inline first.  Reserve 4 bytes for the null terminator that

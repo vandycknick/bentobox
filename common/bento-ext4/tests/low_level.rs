@@ -5,8 +5,10 @@
 // descriptors, inodes, bitmaps) match expected values.
 
 use bento_ext4::constants::*;
+use bento_ext4::error::FormatError;
 use bento_ext4::types::{GroupDescriptor, SuperBlock};
 use bento_ext4::{Formatter, Reader, extent};
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use tempfile::NamedTempFile;
 
@@ -114,6 +116,27 @@ fn read_le_u32(buf: &[u8], index: usize) -> u32 {
     u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap())
 }
 
+fn superblock_free_blocks(sb: &SuperBlock) -> u64 {
+    sb.free_blocks_count_lo as u64 | ((sb.free_blocks_count_hi as u64) << 32)
+}
+
+fn bitmap_bit_set(bitmap: &[u8], bit: u32) -> bool {
+    (bitmap[(bit / 8) as usize] & (1 << (bit % 8))) != 0
+}
+
+fn count_free_bits(bitmap: &[u8], bits: u32) -> u32 {
+    (0..bits)
+        .filter(|&bit| !bitmap_bit_set(bitmap, bit))
+        .count() as u32
+}
+
+fn last_used_bit_index(bitmap: &[u8], bits: u32) -> u32 {
+    (0..bits)
+        .rev()
+        .find(|&bit| bitmap_bit_set(bitmap, bit))
+        .map_or(0, |bit| bit + 1)
+}
+
 // ===========================================================================
 // Test: superblock fields
 // ===========================================================================
@@ -177,6 +200,11 @@ fn test_superblock_fields() {
         0,
         "FLEX_BG incompat flag not set"
     );
+    assert_eq!(
+        sb.feature_incompat & incompat::BIT64,
+        0,
+        "64bit must stay disabled while descriptors are written in 32-byte form"
+    );
 
     // Read-only compatible feature flags.
     assert_ne!(
@@ -204,6 +232,11 @@ fn test_superblock_fields() {
         0,
         "GDT_CSUM ro_compat flag not set"
     );
+    assert_eq!(
+        sb.feature_ro_compat & ro_compat::METADATA_CSUM,
+        0,
+        "metadata_csum must stay disabled while metadata checksums are not emitted"
+    );
     assert_ne!(
         sb.reserved_gdt_blocks, 0,
         "online-growable filesystems reserve GDT blocks"
@@ -215,8 +248,8 @@ fn test_superblock_fields() {
     // Error behavior: 1 = continue on error.
     assert_eq!(sb.errors, 1, "expected errors == 1 (continue)");
 
-    // Creator OS: 3 = FreeBSD (matches the formatter's output).
-    assert_eq!(sb.creator_os, 3, "expected creator_os == 3 (FreeBSD)");
+    // Creator OS: 0 = Linux. The formatter writes Linux osd2 inode fields.
+    assert_eq!(sb.creator_os, 0, "expected creator_os == 0 (Linux)");
 
     // Sanity: free inodes must be less than total inodes.
     assert!(
@@ -512,6 +545,69 @@ fn test_block_and_inode_bitmaps() {
     );
 }
 
+#[test]
+fn test_group_descriptor_counts_match_bitmaps() {
+    let tmp = NamedTempFile::new().unwrap();
+    let fmt = Formatter::new(tmp.path(), 4096, 512 * 1024 * 1024).unwrap();
+    fmt.close().unwrap();
+
+    let mut reader = Reader::new(tmp.path()).unwrap();
+    let sb = reader.superblock().clone();
+    let block_size = 1024u64 * (1 << sb.log_block_size);
+    let group_count = (sb.blocks_count_lo - 1) / sb.blocks_per_group + 1;
+    let mut file = std::fs::File::open(tmp.path()).unwrap();
+    let mut total_free_blocks = 0u64;
+    let mut total_free_inodes = 0u64;
+
+    for group in 0..group_count {
+        let gd = reader.get_group_descriptor(group).unwrap();
+        let block_bitmap = read_block(&mut file, gd.block_bitmap_lo, block_size);
+        let inode_bitmap = read_block(&mut file, gd.inode_bitmap_lo, block_size);
+
+        let group_start = group * sb.blocks_per_group;
+        let blocks_in_group = if group == group_count - 1 {
+            sb.blocks_count_lo - group_start
+        } else {
+            sb.blocks_per_group
+        };
+
+        let free_blocks = count_free_bits(&block_bitmap, blocks_in_group);
+        assert_eq!(
+            gd.free_blocks_count_lo as u32, free_blocks,
+            "group {group} free block descriptor count must match the block bitmap"
+        );
+
+        let free_inodes = count_free_bits(&inode_bitmap, sb.inodes_per_group);
+        assert_eq!(
+            gd.free_inodes_count_lo as u32, free_inodes,
+            "group {group} free inode descriptor count must match the inode bitmap"
+        );
+
+        let expected_itable_unused = if gd.flags & bg_flags::INODE_UNINIT != 0 {
+            sb.inodes_per_group
+        } else {
+            sb.inodes_per_group - last_used_bit_index(&inode_bitmap, sb.inodes_per_group)
+        };
+        assert_eq!(
+            gd.itable_unused_lo as u32, expected_itable_unused,
+            "group {group} bg_itable_unused_lo must match the unused inode-table tail"
+        );
+
+        total_free_blocks += free_blocks as u64;
+        total_free_inodes += free_inodes as u64;
+    }
+
+    assert_eq!(
+        total_free_blocks,
+        superblock_free_blocks(&sb),
+        "sum of group free-block counts must match the superblock"
+    );
+    assert_eq!(
+        total_free_inodes, sb.free_inodes_count as u64,
+        "sum of group free-inode counts must match the superblock"
+    );
+}
+
 // ===========================================================================
 // Test: inode dtime after unlink
 // ===========================================================================
@@ -603,6 +699,326 @@ fn test_hardlink_links_count() {
     assert_eq!(
         inode.links_count, 3,
         "original + 2 hard links should give links_count == 3"
+    );
+}
+
+#[test]
+fn test_unlink_hardlink_does_not_decrement_parent_directory_link_count() {
+    let (mut fmt, tmp) = new_formatter();
+
+    fmt.create(
+        "/original",
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "data".as_bytes()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    fmt.link("/alias", "/original").unwrap();
+    fmt.unlink("/alias", false).unwrap();
+
+    fmt.close().unwrap();
+
+    let mut reader = Reader::new(tmp.path()).unwrap();
+    let root = reader.get_inode(ROOT_INODE).unwrap();
+    assert_eq!(
+        root.links_count, 3,
+        "unlinking a hardlink entry must not decrement the parent directory link count"
+    );
+
+    let (_, original) = reader.stat("/original").unwrap();
+    assert_eq!(
+        original.links_count, 1,
+        "removing the hardlink entry must leave the original with one link"
+    );
+}
+
+#[test]
+fn test_failed_hardlink_does_not_mutate_target_link_count() {
+    let (mut fmt, tmp) = new_formatter();
+
+    fmt.create(
+        "/target",
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "data".as_bytes()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let result = fmt.link("/missing/alias", "/target");
+    assert!(
+        matches!(result, Err(FormatError::NotFound(_))),
+        "hardlinking into a missing parent must fail"
+    );
+
+    fmt.close().unwrap();
+
+    let mut reader = Reader::new(tmp.path()).unwrap();
+    let (_, inode) = reader.stat("/target").unwrap();
+    assert_eq!(
+        inode.links_count, 1,
+        "failed hardlink creation must not increment the target inode link count"
+    );
+}
+
+#[test]
+fn test_directory_entry_name_length_boundaries() {
+    let (mut fmt, tmp) = new_formatter();
+
+    let ascii_255 = "a".repeat(EXT4_NAME_LEN);
+    let ascii_path = format!("/{ascii_255}");
+    fmt.create(
+        &ascii_path,
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "ascii".as_bytes()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let utf8_255 = "界".repeat(85);
+    assert_eq!(utf8_255.len(), EXT4_NAME_LEN);
+    let utf8_path = format!("/{utf8_255}");
+    fmt.create(
+        &utf8_path,
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "utf8".as_bytes()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let ascii_256 = "b".repeat(EXT4_NAME_LEN + 1);
+    let ascii_too_long_path = format!("/{ascii_256}");
+    let result = fmt.create(
+        &ascii_too_long_path,
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "too long".as_bytes()),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        matches!(result, Err(FormatError::InvalidName(name)) if name == ascii_256),
+        "256-byte directory entry names must be rejected"
+    );
+
+    let utf8_258 = "界".repeat(86);
+    assert_eq!(utf8_258.len(), 258);
+    let utf8_too_long_path = format!("/{utf8_258}");
+    let result = fmt.create(
+        &utf8_too_long_path,
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "too long".as_bytes()),
+        None,
+        None,
+        None,
+    );
+    assert!(
+        matches!(result, Err(FormatError::InvalidName(name)) if name == utf8_258),
+        "directory entry name limits are byte limits, not scalar-value limits"
+    );
+
+    fmt.create(
+        "/target",
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "target".as_bytes()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let result = fmt.link(&ascii_too_long_path, "/target");
+    assert!(
+        matches!(result, Err(FormatError::InvalidName(name)) if name == ascii_256),
+        "hardlink paths must reject overlong directory entry names too"
+    );
+
+    fmt.close().unwrap();
+
+    let mut reader = Reader::new(tmp.path()).unwrap();
+    assert!(reader.exists(&ascii_path));
+    assert!(reader.exists(&utf8_path));
+}
+
+#[test]
+fn test_xattr_name_length_boundaries() {
+    let (mut fmt, tmp) = new_formatter();
+
+    let suffix_255 = "x".repeat(EXT4_NAME_LEN);
+    let max_name = format!("user.{suffix_255}");
+    let mut max_xattrs = HashMap::new();
+    max_xattrs.insert(max_name, vec![1]);
+    fmt.create(
+        "/max-xattr-name",
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "ok".as_bytes()),
+        None,
+        None,
+        Some(&max_xattrs),
+    )
+    .unwrap();
+
+    let suffix_256 = "y".repeat(EXT4_NAME_LEN + 1);
+    let too_long_name = format!("user.{suffix_256}");
+    let mut too_long_xattrs = HashMap::new();
+    too_long_xattrs.insert(too_long_name.clone(), vec![1]);
+    let result = fmt.create(
+        "/bad-xattr-name",
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "bad".as_bytes()),
+        None,
+        None,
+        Some(&too_long_xattrs),
+    );
+    assert!(
+        matches!(result, Err(FormatError::InvalidName(name)) if name == too_long_name),
+        "xattr suffixes longer than 255 bytes must be rejected before e_name_len truncates"
+    );
+
+    fmt.close().unwrap();
+
+    let mut reader = Reader::new(tmp.path()).unwrap();
+    assert!(reader.stat("/max-xattr-name").unwrap().1.xattr_block_lo != 0);
+}
+
+#[test]
+fn test_i_blocks_accounts_for_external_xattr_blocks() {
+    let (mut fmt, tmp) = new_formatter();
+    let mut xattrs = HashMap::new();
+    xattrs.insert("user.large".to_string(), vec![0xA5; 1024]);
+
+    let data = vec![0x5A; 5000];
+    let data_blocks = data.len().div_ceil(4096) as u32;
+    let mut data_reader = data.as_slice();
+    fmt.create(
+        "/with-data",
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut data_reader),
+        None,
+        None,
+        Some(&xattrs),
+    )
+    .unwrap();
+
+    fmt.create(
+        "/xattr-only",
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&xattrs),
+    )
+    .unwrap();
+
+    fmt.close().unwrap();
+
+    let mut reader = Reader::new(tmp.path()).unwrap();
+    let (_, with_data) = reader.stat("/with-data").unwrap();
+    assert_ne!(with_data.xattr_block_lo, 0);
+    assert_ne!(with_data.flags & inode_flags::HUGE_FILE, 0);
+    assert_eq!(
+        with_data.blocks_lo,
+        data_blocks + 1,
+        "HUGE_FILE inodes count i_blocks in filesystem blocks and must include the xattr block"
+    );
+
+    let (_, xattr_only) = reader.stat("/xattr-only").unwrap();
+    assert_ne!(xattr_only.xattr_block_lo, 0);
+    assert_eq!(
+        xattr_only.blocks_lo, 1,
+        "a zero-byte file with an external xattr still owns the xattr block"
+    );
+}
+
+#[test]
+fn test_hardlink_external_xattr_blocks_are_reclaimed() {
+    let (mut fmt, tmp) = new_formatter();
+    let mut xattrs = HashMap::new();
+    xattrs.insert("user.large".to_string(), vec![0xCD; 1024]);
+
+    fmt.create(
+        "/original",
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "xattr content".as_bytes()),
+        None,
+        None,
+        Some(&xattrs),
+    )
+    .unwrap();
+    fmt.link("/alias", "/original").unwrap();
+    fmt.unlink("/original", false).unwrap();
+    fmt.unlink("/alias", false).unwrap();
+    fmt.create(
+        "/keeper",
+        make_mode(file_mode::S_IFREG, 0o644),
+        None,
+        None,
+        Some(&mut "keep".as_bytes()),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    fmt.close().unwrap();
+
+    let mut reader = Reader::new(tmp.path()).unwrap();
+    let deleted_inode = reader.get_inode(12).unwrap();
+    assert_eq!(deleted_inode.links_count, 0);
+    assert_ne!(deleted_inode.dtime, 0);
+    let free_with_delete = superblock_free_blocks(reader.superblock());
+
+    let baseline_tmp = NamedTempFile::new().unwrap();
+    let mut baseline = Formatter::new(baseline_tmp.path(), 4096, 256 * 1024).unwrap();
+    baseline
+        .create(
+            "/keeper",
+            make_mode(file_mode::S_IFREG, 0o644),
+            None,
+            None,
+            Some(&mut "keep".as_bytes()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    baseline.close().unwrap();
+    let baseline_reader = Reader::new(baseline_tmp.path()).unwrap();
+    let free_baseline = superblock_free_blocks(baseline_reader.superblock());
+
+    assert_eq!(
+        free_with_delete, free_baseline,
+        "removing the last hardlink must reclaim both data and external xattr blocks"
     );
 }
 
