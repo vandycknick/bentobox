@@ -3,10 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const DEFAULT_GUEST_CONTROL_PORT: u32 = 1027;
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct VmSpec {
     pub version: u32,
     pub platform: Platform,
@@ -18,33 +15,6 @@ pub struct VmSpec {
     #[serde(default)]
     pub vsock_endpoints: Vec<VsockEndpointSpec>,
     pub settings: Settings,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guest: Option<GuestSpec>,
-}
-
-impl VmSpec {
-    pub fn guest_agent(&self) -> Option<GuestSpec> {
-        self.guest.clone()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GuestSpec {
-    #[serde(default = "default_guest_control_port")]
-    pub control_port: u32,
-}
-
-impl Default for GuestSpec {
-    fn default() -> Self {
-        Self {
-            control_port: default_guest_control_port(),
-        }
-    }
-}
-
-const fn default_guest_control_port() -> u32 {
-    DEFAULT_GUEST_CONTROL_PORT
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,7 +113,6 @@ const fn default_backoff_max() -> u64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Platform {
     pub guest_os: GuestOs,
     pub architecture: Architecture,
@@ -198,10 +167,11 @@ pub struct Mount {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Settings {
     pub nested_virtualization: bool,
     pub rosetta: bool,
+    #[serde(default)]
+    pub agent: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,9 +190,9 @@ pub enum Architecture {
 #[cfg(test)]
 mod tests {
     use super::{
-        Architecture, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec,
-        LifecycleSpec, Mount, Platform, PluginSpec, Resources, RestartPolicy, Settings, Storage,
-        VmSpec, VsockEndpointMode, VsockEndpointSpec,
+        Architecture, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, GuestOs, LifecycleSpec, Mount,
+        Platform, PluginSpec, Resources, RestartPolicy, Settings, Storage, VmSpec,
+        VsockEndpointMode, VsockEndpointSpec,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -289,8 +259,8 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: true,
+                agent: true,
             },
-            guest: Some(GuestSpec::default()),
         }
     }
 
@@ -313,8 +283,7 @@ mod tests {
         assert!(yaml.contains("kind: root"));
         assert!(yaml.contains("kind: data"));
         assert!(yaml.contains("vsock_endpoints:"));
-        assert!(yaml.contains("guest:"));
-        assert!(yaml.contains("control_port: 1027"));
+        assert!(yaml.contains("agent: true"));
         assert!(yaml.contains("userdata:"));
         assert!(!yaml.contains("network:"));
         assert!(!yaml.contains("name: dev"));
@@ -346,46 +315,15 @@ mounts: []
 settings:
   nested_virtualization: false
   rosetta: true
-guest:
-  control_port: 1027
 "#;
 
         let decoded: VmSpec = serde_yaml_ng::from_str(yaml).expect("deserialize vm spec");
         assert!(decoded.vsock_endpoints.is_empty());
-        assert_eq!(decoded.guest_agent(), Some(GuestSpec::default()));
+        assert!(!decoded.settings.agent);
     }
 
     #[test]
-    fn vm_spec_rejects_legacy_guest_enabled_setting() {
-        let yaml = r#"
-version: 1
-platform:
-  guest_os: linux
-  architecture: aarch64
-resources:
-  cpus: 4
-  memory_mib: 4096
-boot:
-  kernel: /kernel
-  initramfs: /initramfs
-  kernel_cmdline: []
-  bootstrap: null
-storage:
-  disks: []
-mounts: []
-settings:
-  nested_virtualization: false
-  rosetta: true
-  guest_enabled: true
-"#;
-
-        let err = serde_yaml_ng::from_str::<VmSpec>(yaml)
-            .expect_err("legacy guest_enabled setting should be rejected");
-        assert!(err.to_string().contains("guest_enabled"));
-    }
-
-    #[test]
-    fn vm_spec_rejects_backend_field() {
+    fn vm_spec_accepts_unknown_fields() {
         let yaml = r#"
 version: 1
 platform:
@@ -406,43 +344,13 @@ mounts: []
 settings:
   nested_virtualization: false
   rosetta: true
+  guest_enabled: true
 guest:
   control_port: 1027
 "#;
 
-        let err = serde_yaml_ng::from_str::<VmSpec>(yaml)
-            .expect_err("backend selection should be rejected");
-        assert!(err.to_string().contains("backend"));
-    }
-
-    #[test]
-    fn vm_spec_rejects_legacy_endpoints_field() {
-        let yaml = r#"
-version: 1
-platform:
-  guest_os: linux
-  architecture: aarch64
-resources:
-  cpus: 4
-  memory_mib: 4096
-boot:
-  kernel: /kernel
-  initramfs: /initramfs
-  kernel_cmdline: []
-  bootstrap: null
-storage:
-  disks: []
-mounts: []
-endpoints: []
-settings:
-  nested_virtualization: false
-  rosetta: true
-guest:
-  control_port: 1027
-"#;
-
-        let err = serde_yaml_ng::from_str::<VmSpec>(yaml)
-            .expect_err("legacy endpoints field should be rejected");
-        assert!(err.to_string().contains("endpoints"));
+        let decoded =
+            serde_yaml_ng::from_str::<VmSpec>(yaml).expect("unknown fields should be ignored");
+        assert!(!decoded.settings.agent);
     }
 }

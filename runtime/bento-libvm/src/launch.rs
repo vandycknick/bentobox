@@ -158,9 +158,8 @@ mod tests {
         resolve_guest_runtime_config,
     };
     use bento_core::{
-        Architecture, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec, LifecycleSpec, Mount,
-        Platform, PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode,
-        VsockEndpointSpec,
+        Architecture, Boot, Bootstrap, Disk, DiskKind, GuestOs, LifecycleSpec, Mount, Platform,
+        PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -193,8 +192,8 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
+                agent: guest_configured,
             },
-            guest: guest_configured.then_some(GuestSpec::default()),
         }
     }
 
@@ -533,10 +532,10 @@ fn resolve_guest_runtime_config(
 ) -> eyre::Result<AgentConfig> {
     Ok(AgentConfig {
         ssh: AgentSshConfig {
-            enabled: spec.guest_agent().is_some(),
+            enabled: spec.settings.agent,
         },
         dns: AgentDnsConfig {
-            enabled: spec.guest_agent().is_some() && !matches!(network, RuntimeNetwork::None),
+            enabled: spec.settings.agent && !matches!(network, RuntimeNetwork::None),
             ..AgentDnsConfig::default()
         },
         forward: resolve_forward_runtime_config(spec)?,
@@ -544,7 +543,7 @@ fn resolve_guest_runtime_config(
 }
 
 fn resolve_forward_runtime_config(spec: &VmSpec) -> eyre::Result<AgentForwardConfig> {
-    if spec.guest_agent().is_none() {
+    if !spec.settings.agent {
         return Ok(AgentForwardConfig::default());
     }
 

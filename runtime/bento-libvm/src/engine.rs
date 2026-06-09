@@ -10,10 +10,9 @@ use crate::launch::prepare_instance_runtime;
 use crate::root_disk::{clone_or_copy_root_disk, resize_raw_disk};
 use crate::InstanceFile;
 use bento_core::{
-    Architecture, Boot, Bootstrap, Disk, DiskKind, GuestOs, GuestSpec, MachineId, Mount, Platform,
-    Resources, Settings, Storage, VmSpec,
+    Architecture, Boot, Bootstrap, Disk, DiskKind, GuestOs, MachineId, Mount, Platform, Resources,
+    Settings, Storage, VmSpec,
 };
-use bento_protocol::agent_port_arg;
 use bento_protocol::v1::InspectResponse;
 use nix::{
     errno::Errno,
@@ -183,7 +182,6 @@ impl LibVm {
         let disk_paths = canonicalize_existing_paths(&request.disks, "disk")?;
 
         let bootstrap = (userdata.is_some() || request.rosetta).then_some(Bootstrap { userdata });
-        let guest = guest_spec_from_request(request.agent);
 
         let resolved_cpus = request.cpus.unwrap_or(DEFAULT_IMAGE_CPUS);
         let resolved_memory = request.memory_mib.unwrap_or(DEFAULT_IMAGE_MEMORY_MIB);
@@ -203,7 +201,7 @@ impl LibVm {
             boot: Boot {
                 kernel: kernel_path,
                 initramfs: initramfs_path,
-                kernel_cmdline: guest_kernel_cmdline(&guest),
+                kernel_cmdline: Vec::new(),
                 bootstrap,
             },
             storage: Storage {
@@ -224,8 +222,8 @@ impl LibVm {
             settings: Settings {
                 nested_virtualization: request.nested_virtualization,
                 rosetta: request.rosetta,
+                agent: request.agent,
             },
-            guest,
         };
 
         let network = request.network.unwrap_or_default();
@@ -596,7 +594,7 @@ impl LibVm {
 
         if wait_for_guest_readiness {
             let machine_record = self.machine_record(metadata.clone())?;
-            let should_wait = machine_record.spec.guest_agent().is_some();
+            let should_wait = machine_record.spec.settings.agent;
 
             if should_wait {
                 monitor::wait_for_shell_with_timeout(
@@ -836,17 +834,6 @@ fn assign_mount_tags(mounts: Vec<Mount>) -> Vec<Mount> {
             mount
         })
         .collect()
-}
-
-fn guest_spec_from_request(agent: bool) -> Option<GuestSpec> {
-    agent.then(GuestSpec::default)
-}
-
-fn guest_kernel_cmdline(guest: &Option<GuestSpec>) -> Vec<String> {
-    guest
-        .as_ref()
-        .map(|guest| vec![agent_port_arg(guest.control_port)])
-        .unwrap_or_default()
 }
 
 fn host_architecture() -> Result<Architecture, LibVmError> {
@@ -1214,16 +1201,12 @@ fn create_staging_dir(layout: &Layout) -> Result<PathBuf, LibVmError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        assign_mount_tags, guest_kernel_cmdline, guest_spec_from_request, read_syncpipe,
-        release_startpipe, LibVm, StartupResult,
-    };
+    use super::{assign_mount_tags, read_syncpipe, release_startpipe, LibVm, StartupResult};
     use crate::{
         CreateMachineRequest, InstanceFile, Layout, LibVmError, MachineRef, MachineRuntimeState,
     };
     use bento_core::{
-        Architecture, Boot, GuestOs, GuestSpec, Mount, Platform, Resources, Settings, Storage,
-        VmSpec,
+        Architecture, Boot, GuestOs, Mount, Platform, Resources, Settings, Storage, VmSpec,
     };
     use nix::unistd::pipe;
     use std::io::{Read, Write};
@@ -1252,8 +1235,8 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
+                agent: true,
             },
-            guest: Some(GuestSpec::default()),
         }
     }
 
@@ -1324,17 +1307,6 @@ mod tests {
             bootstrap.userdata.as_deref(),
             Some("#!/bin/sh\necho profile\n")
         );
-    }
-
-    #[test]
-    fn guest_agent_request_controls_guest_spec_and_kernel_arg() {
-        let disabled = guest_spec_from_request(false);
-        assert!(disabled.is_none());
-        assert!(guest_kernel_cmdline(&disabled).is_empty());
-
-        let enabled = guest_spec_from_request(true);
-        assert!(enabled.is_some());
-        assert!(!guest_kernel_cmdline(&enabled).is_empty());
     }
 
     #[test]

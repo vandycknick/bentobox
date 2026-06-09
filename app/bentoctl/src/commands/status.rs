@@ -13,7 +13,6 @@ use crate::constants::PROFILE_METADATA_KEY;
 struct GuestConfigStatus {
     enabled: bool,
     bootstrap: bool,
-    agent_port: Option<u32>,
     cidata_present: bool,
     shell_expected: bool,
 }
@@ -119,15 +118,13 @@ impl Cmd {
 }
 
 fn guest_config_status(spec: &VmSpec, machine_dir: &std::path::Path) -> GuestConfigStatus {
-    let guest = spec.guest_agent();
     GuestConfigStatus {
-        enabled: guest.is_some(),
+        enabled: spec.settings.agent,
         bootstrap: spec.boot.bootstrap.is_some(),
-        agent_port: guest.map(|guest| guest.control_port),
         cidata_present: machine_dir
             .join(InstanceFile::CidataDisk.as_str())
             .is_file(),
-        shell_expected: spec.guest_agent().is_some(),
+        shell_expected: spec.settings.agent,
     }
 }
 
@@ -154,10 +151,6 @@ fn print_guest(runtime: Option<(&str, bool)>, config: GuestConfigStatus) {
     println!("  settings:");
     println!("    enabled: {}", yes_no(config.enabled));
     println!("    bootstrap: {}", yes_no(config.bootstrap));
-    match config.agent_port {
-        Some(port) => println!("    agent_port: {}", port),
-        None => println!("    agent_port: none"),
-    }
     println!("    cidata: {}", present_absent(config.cidata_present));
     println!("    shell_expected: {}", yes_no(config.shell_expected));
 }
@@ -266,14 +259,12 @@ mod tests {
     use super::{
         guest_config_status, now_unix, process_started_at, process_status_label, relative_time,
     };
-    use bento_core::{
-        Architecture, Boot, GuestOs, GuestSpec, Platform, Resources, Settings, Storage, VmSpec,
-    };
+    use bento_core::{Architecture, Boot, GuestOs, Platform, Resources, Settings, Storage, VmSpec};
     use bento_libvm::MachineRuntimeState;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn sample_spec(guest: Option<GuestSpec>, bootstrap: bool) -> VmSpec {
+    fn sample_spec(agent: bool, bootstrap: bool) -> VmSpec {
         VmSpec {
             version: 1,
             platform: Platform {
@@ -296,8 +287,8 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
+                agent,
             },
-            guest,
         }
     }
 
@@ -314,10 +305,9 @@ mod tests {
         let dir = temp_dir("disabled");
         fs::create_dir_all(&dir).expect("create temp dir");
 
-        let config = guest_config_status(&sample_spec(None, false), &dir);
+        let config = guest_config_status(&sample_spec(false, false), &dir);
 
         assert!(!config.enabled);
-        assert_eq!(config.agent_port, None);
         assert!(!config.cidata_present);
         assert!(!config.shell_expected);
 
@@ -325,18 +315,14 @@ mod tests {
     }
 
     #[test]
-    fn guest_config_status_reports_agent_port_and_cidata_when_present() {
+    fn guest_config_status_reports_agent_and_cidata_when_present() {
         let dir = temp_dir("enabled");
         fs::create_dir_all(&dir).expect("create temp dir");
         fs::write(dir.join("cidata.img"), b"cidata").expect("write cidata marker");
 
-        let config = guest_config_status(
-            &sample_spec(Some(GuestSpec { control_port: 7001 }), false),
-            &dir,
-        );
+        let config = guest_config_status(&sample_spec(true, false), &dir);
 
         assert!(config.enabled);
-        assert_eq!(config.agent_port, Some(7001));
         assert!(config.cidata_present);
         assert!(config.shell_expected);
 

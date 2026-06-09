@@ -1,12 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use bento_core::{agent::RESERVED_SHELL_PORT, DiskKind, VmSpec, VsockEndpointMode};
+use bento_protocol::agent_port_arg;
 use bento_utils::parse_mac;
 use bento_virt::{
     DiskImage, MachineIdentifier, SharedDirectory, VirtError, VmConfig, VmConfigBuilder, VsockPort,
     VsockPortMode,
 };
 use thiserror::Error;
+
+use crate::agent::AGENT_CONTROL_PORT;
 
 const APPLE_MACHINE_IDENTIFIER_FILE: &str = "apple-machine-id";
 
@@ -54,7 +57,7 @@ pub(crate) fn vm_spec_machine_config(
     let mut builder = VmConfig::builder(inputs.name)
         .vm_id(inputs.id)
         .base_directory(inputs.data_dir.to_path_buf())
-        .kernel_cmdline(inputs.spec.boot.kernel_cmdline.clone())
+        .kernel_cmdline(vm_spec_kernel_cmdline(inputs.spec))
         .nested_virtualization(inputs.spec.settings.nested_virtualization)
         .rosetta(inputs.spec.settings.rosetta);
 
@@ -114,9 +117,9 @@ fn vm_spec_vsock_ports(spec: &VmSpec) -> Vec<VsockPort> {
         });
     }
 
-    if let Some(guest) = spec.guest_agent() {
+    if spec.settings.agent {
         ports.push(VsockPort {
-            port: guest.control_port,
+            port: AGENT_CONTROL_PORT,
             mode: VsockPortMode::Connect,
         });
         ports.push(VsockPort {
@@ -126,6 +129,14 @@ fn vm_spec_vsock_ports(spec: &VmSpec) -> Vec<VsockPort> {
     }
 
     ports
+}
+
+fn vm_spec_kernel_cmdline(spec: &VmSpec) -> Vec<String> {
+    let mut kernel_cmdline = spec.boot.kernel_cmdline.clone();
+    if spec.settings.agent {
+        kernel_cmdline.push(agent_port_arg(AGENT_CONTROL_PORT));
+    }
+    kernel_cmdline
 }
 
 fn map_vsock_endpoint_mode(mode: VsockEndpointMode) -> VsockPortMode {
@@ -263,8 +274,8 @@ fn load_host_machine_identifier(
 mod tests {
     use super::{apply_runtime_network, vm_spec_machine_config, RuntimeNetwork, VmSpecInputs};
     use bento_core::{
-        agent::RESERVED_SHELL_PORT, Architecture, Boot, Disk, DiskKind, GuestOs, GuestSpec,
-        Platform, Resources, Settings, Storage, VmSpec,
+        agent::RESERVED_SHELL_PORT, Architecture, Boot, Disk, DiskKind, GuestOs, Platform,
+        Resources, Settings, Storage, VmSpec,
     };
     use bento_virt::{VmConfig, VsockPortMode};
     use std::fs;
@@ -346,20 +357,17 @@ mod tests {
                         .expect("relative initramfs")
                         .to_path_buf(),
                 ),
-                kernel_cmdline: vec![
-                    "console=hvc0".to_string(),
-                    "bento.guest.port=1027".to_string(),
-                ],
+                kernel_cmdline: vec!["console=hvc0".to_string()],
                 bootstrap: None,
             },
             storage: Storage { disks: Vec::new() },
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             settings: Settings {
+                agent: true,
                 nested_virtualization: false,
                 rosetta: false,
             },
-            guest: Some(GuestSpec::default()),
         };
 
         let machine_config = vm_spec_machine_config(VmSpecInputs {
@@ -373,7 +381,10 @@ mod tests {
 
         assert_eq!(
             machine_config.config.kernel_cmdline,
-            spec.boot.kernel_cmdline
+            vec![
+                "console=hvc0".to_string(),
+                "bento.agent.port=1027".to_string()
+            ]
         );
         assert_eq!(machine_config.config.vm_id(), "vm123");
         assert!(machine_config
@@ -416,10 +427,10 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             settings: Settings {
+                agent: false,
                 nested_virtualization: false,
                 rosetta: false,
             },
-            guest: None,
         };
 
         let machine_config = vm_spec_machine_config(VmSpecInputs {
@@ -467,10 +478,10 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             settings: Settings {
+                agent: false,
                 nested_virtualization: false,
                 rosetta: false,
             },
-            guest: None,
         };
 
         let machine_config = vm_spec_machine_config(VmSpecInputs {
@@ -531,10 +542,10 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             settings: Settings {
+                agent: false,
                 nested_virtualization: false,
                 rosetta: false,
             },
-            guest: None,
         };
         let runtime_network = RuntimeNetwork::UnixDatagram {
             path: PathBuf::from("/tmp/gvproxy.sock"),

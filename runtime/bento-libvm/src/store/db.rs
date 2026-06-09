@@ -490,10 +490,10 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             settings: Settings {
+                agent: false,
                 nested_virtualization: false,
                 rosetta: false,
             },
-            guest: None,
         }
     }
 

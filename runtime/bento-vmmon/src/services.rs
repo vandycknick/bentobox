@@ -123,10 +123,10 @@ pub async fn start_services(
         }
     });
 
-    let guest_monitor = if ctx.spec.guest_agent().is_some() {
+    let guest_monitor = if ctx.spec.settings.agent {
         ctx.store.dispatch(Action::guest_starting());
         Some(spawn_agent_monitor(
-            AgentClient::new(&ctx.machine, &ctx.spec),
+            AgentClient::new(&ctx.machine),
             ctx.store.clone(),
             ctx.shutdown.clone(),
         ))

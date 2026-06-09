@@ -4,14 +4,17 @@ echo "Installing busybox"
 /bin/busybox --install -s /bin
 /bin/busybox --install -s /sbin
 
+mkdir /dev
+mkdir /proc
+mkdir /sys
+mkdir /tmp
+
 mount -t devtmpfs  devtmpfs  /dev
 mount -t proc      proc      /proc
 mount -t sysfs     sysfs     /sys
 mount -t tmpfs     tmpfs     /tmp
 
 # Create device nodes
-# mknod /dev/null c 1 3
-# mknod /dev/tty c 5 0
 mdev -s
 
 #Function for parsing command line options with "=" in them

@@ -63,7 +63,7 @@ async fn ensure_guest_ready(
     libvm: &LibVm,
     machine: &bento_libvm::MachineRecord,
 ) -> eyre::Result<()> {
-    if machine.spec.guest_agent().is_none() {
+    if !machine.spec.settings.agent {
         bail!("instance has no guest agent configured, cannot run remote commands");
     }
 

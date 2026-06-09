@@ -28,7 +28,7 @@ pub mod v1 {
 }
 
 pub const DEFAULT_AGENT_CONTROL_PORT: u32 = 1027;
-pub const KERNEL_PARAM_AGENT_PORT: &str = "bento.guest.port";
+pub const KERNEL_PARAM_AGENT_PORT: &str = "bento.agent.port";
 
 pub fn agent_port_arg(port: u32) -> String {
     format!("{}={port}", KERNEL_PARAM_AGENT_PORT)

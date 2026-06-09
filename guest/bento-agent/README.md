@@ -13,7 +13,7 @@ Guest-side agent for Bento VMs.
 - runs the guest-side forward service used by the `forward` plugin
 - optionally manages guest DNS and `resolv.conf`
 
-The control RPC port is selected from the kernel command line via `bento.guest.port`. If that kernel arg is missing or invalid, the agent falls back to Bento's default control port.
+The control RPC port is selected from the kernel command line via `bento.agent.port`. If that kernel arg is missing or invalid, the agent falls back to Bento's default control port.
 
 At startup the agent:
 

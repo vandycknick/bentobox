@@ -2,7 +2,6 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_core::VmSpec;
 use bento_protocol::v1::agent_service_client::AgentServiceClient;
 use bento_protocol::v1::{AgentPingRequest, HealthRequest, HealthResponse};
 use bento_virt::VirtualMachine;
@@ -15,6 +14,7 @@ use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
 
 const AGENT_PROBE_RETRY: Duration = Duration::from_secs(1);
+pub(crate) const AGENT_CONTROL_PORT: u32 = 1027;
 
 pub(crate) struct AgentClient {
     machine: VirtualMachine,
@@ -23,10 +23,10 @@ pub(crate) struct AgentClient {
 }
 
 impl AgentClient {
-    pub(crate) fn new(machine: &VirtualMachine, spec: &VmSpec) -> Self {
+    pub(crate) fn new(machine: &VirtualMachine) -> Self {
         Self {
             machine: machine.clone(),
-            port: agent_port_from_spec(spec),
+            port: AGENT_CONTROL_PORT,
             client: None,
         }
     }
@@ -115,59 +115,12 @@ async fn connect_agent_client(
     Ok(AgentServiceClient::new(channel))
 }
 
-fn agent_port_from_spec(spec: &VmSpec) -> u32 {
-    spec.guest_agent()
-        .map(|guest| guest.control_port)
-        .unwrap_or(bento_core::DEFAULT_GUEST_CONTROL_PORT)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::agent_port_from_spec;
-    use bento_core::{
-        Architecture, Boot, GuestOs, GuestSpec, Platform, Resources, Settings, Storage, VmSpec,
-    };
-
-    fn sample_spec(guest: Option<GuestSpec>) -> VmSpec {
-        VmSpec {
-            version: 1,
-            platform: Platform {
-                guest_os: GuestOs::Linux,
-                architecture: Architecture::Aarch64,
-            },
-            resources: Resources {
-                cpus: 4,
-                memory_mib: 4096,
-            },
-            boot: Boot {
-                kernel: None,
-                initramfs: None,
-                kernel_cmdline: Vec::new(),
-                bootstrap: None,
-            },
-            storage: Storage { disks: Vec::new() },
-            mounts: Vec::new(),
-            vsock_endpoints: Vec::new(),
-            settings: Settings {
-                nested_virtualization: false,
-                rosetta: false,
-            },
-            guest,
-        }
-    }
+    use super::AGENT_CONTROL_PORT;
 
     #[test]
-    fn reads_agent_port_from_spec_guest_config() {
-        let spec = sample_spec(Some(GuestSpec { control_port: 7001 }));
-        assert_eq!(agent_port_from_spec(&spec), 7001);
-    }
-
-    #[test]
-    fn falls_back_when_spec_guest_config_is_missing() {
-        let spec = sample_spec(None);
-        assert_eq!(
-            agent_port_from_spec(&spec),
-            bento_core::DEFAULT_GUEST_CONTROL_PORT
-        );
+    fn agent_control_port_is_fixed() {
+        assert_eq!(AGENT_CONTROL_PORT, 1027);
     }
 }

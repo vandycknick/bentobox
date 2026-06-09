@@ -80,7 +80,7 @@ impl Cmd {
         let machine = libvm.create_from_base_image(request).await?;
         let machine_ref = MachineRef::Id(machine.id);
         let machine = libvm.start(&machine_ref).await?;
-        if machine.spec.guest_agent().is_some() {
+        if machine.spec.settings.agent {
             libvm
                 .wait_for_guest_running(&machine_ref, bento_libvm::DEFAULT_GUEST_READINESS_TIMEOUT)
                 .await
