@@ -2,7 +2,8 @@ GUEST_TARGET := aarch64-unknown-linux-musl
 GUEST_BIN := $(CURDIR)/target/$(GUEST_TARGET)/release/bento-agent
 GUEST_INIT_BIN := $(CURDIR)/target/$(GUEST_TARGET)/release/init
 GUEST_ASSETS_DIR := $(CURDIR)/target/resources/assets
-INITRAMFS_OUT := $(CURDIR)/target/resources/initramfs
+INITRAMFS_OUT := $(GUEST_ASSETS_DIR)/initramfs
+INITRAMFS_NO_AGENT_OUT := $(GUEST_ASSETS_DIR)/initramfs-no-agent
 ARCH ?= arm64
 PROFILE ?= debug
 RUST_HOST_TRIPLE := $(shell rustc -vV | awk '/host:/ { print $$2 }')
@@ -90,10 +91,12 @@ kernel:
 	@$(MAKE) -C resources/kernels kernel TRACK=$(TRACK) ARCH=$(ARCH)
 
 .PHONY: initramfs
-initramfs: build-guest-init
-	@mkdir -p ./target/resources
-	@if [ -d "$(INITRAMFS_OUT)" ]; then rm -rf "$(INITRAMFS_OUT)"; fi
-	cargo run -p bento-initramfs -- --init "$(GUEST_INIT_BIN)" --out "$(INITRAMFS_OUT)"
+initramfs: build-guest-init build-guest-agent
+	@mkdir -p "$(GUEST_ASSETS_DIR)"
+	@if [ -d "$(INITRAMFS_OUT)" ]; then rm -rf "$(INITRAMFS_OUT)"; else rm -f "$(INITRAMFS_OUT)"; fi
+	@if [ -d "$(INITRAMFS_NO_AGENT_OUT)" ]; then rm -rf "$(INITRAMFS_NO_AGENT_OUT)"; else rm -f "$(INITRAMFS_NO_AGENT_OUT)"; fi
+	cargo run -p bento-initramfs -- --init "$(GUEST_INIT_BIN)" --agent "$(GUEST_BIN)" --out "$(INITRAMFS_OUT)"
+	cargo run -p bento-initramfs -- --init "$(GUEST_INIT_BIN)" --out "$(INITRAMFS_NO_AGENT_OUT)"
 
 .PHONY: rootfs
 rootfs:

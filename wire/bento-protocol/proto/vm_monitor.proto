@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package bento.v1;
 
-import "common.proto";
-
 service VmMonitorService {
   rpc Ping(PingRequest) returns (PingResponse);
   rpc Inspect(InspectRequest) returns (InspectResponse);
@@ -24,8 +22,6 @@ message InspectResponse {
   LifecycleState guest_state = 2;
   bool ready = 3;
   string summary = 4;
-  repeated ServiceHealth services = 5;
-  repeated VsockEndpointStatus vsock_endpoints = 6;
 }
 
 message WatchStatusRequest {}

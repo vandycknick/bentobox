@@ -49,6 +49,8 @@ RUN systemctl enable \
 RUN userdel -r builder \
   && rm -f /etc/sudoers.d/builder
 
-RUN (passwd -d root && passwd -u root || true) \
-  && rm -f /etc/machine-id \
+RUN \
+  printf 'L+ /etc/resolv.conf - - - - /run/systemd/resolve/stub-resolv.conf\n' > /etc/tmpfiles.d/resolv.conf \
+  && (passwd -d root && passwd -u root || true) \
+  && rm -f /etc/machine-id /var/lib/dbus/machine-id \
   && touch /etc/machine-id

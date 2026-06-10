@@ -59,8 +59,6 @@ async fn main() -> io::Result<()> {
 async fn run(plugin: Arc<Plugin>) -> io::Result<()> {
     let config: ForwardPluginConfig = plugin.config()?;
 
-    let static_tcp_count = config.tcp.ports.len();
-    let uds_count = config.uds.len();
     let auto_discover = config.tcp.auto_discover;
 
     for mapping in &config.tcp.ports {
@@ -71,12 +69,6 @@ async fn run(plugin: Arc<Plugin>) -> io::Result<()> {
         let host_path = resolve_host_socket_path(&plugin.socks_dir(), &uds.host_path)?;
         spawn_uds_listener(Arc::clone(&plugin), host_path, uds.guest_path.clone())?;
     }
-
-    let summary = format!(
-        "forward ready: {} tcp, {} uds, auto_discover={}",
-        static_tcp_count, uds_count, auto_discover
-    );
-    plugin.status(true, &summary, &[])?;
 
     if auto_discover {
         run_auto_discover(plugin, config.tcp.ports).await
@@ -200,19 +192,6 @@ async fn run_auto_discover(
             }
             bind_failures.remove(&port);
         }
-
-        let mut problems = bind_failures
-            .values()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        problems.sort_unstable();
-        let summary = format!(
-            "forward ready: {} static tcp, {} discovered tcp, {} bind problems",
-            static_host_ports.len(),
-            dynamic_listeners.len(),
-            problems.len()
-        );
-        plugin.status(problems.is_empty(), &summary, &problems)?;
 
         tokio::time::sleep(AUTO_DISCOVER_POLL_INTERVAL).await;
     }

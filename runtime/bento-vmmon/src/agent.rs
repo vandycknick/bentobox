@@ -1,118 +1,202 @@
 use std::io;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bento_protocol::v1::agent_service_client::AgentServiceClient;
-use bento_protocol::v1::{AgentPingRequest, HealthRequest, HealthResponse};
-use bento_virt::VirtualMachine;
-use eyre::Context;
+use bento_protocol::v1::agent_control_service_server::{
+    AgentControlService, AgentControlServiceServer,
+};
+use bento_protocol::v1::{
+    GetAgentConfigRequest, GetAgentConfigResponse, RegisterAgentRequest, RegisterAgentResponse,
+};
+use bento_virt::{VirtualMachine, VsockListener, VsockStream};
+use eyre::Context as EyreContext;
 use futures::stream::{self, Stream};
-use hyper_util::rt::TokioIo;
-use tokio::sync::Mutex;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::{Channel, Endpoint};
-use tower::service_fn;
+use tonic::transport::server::Connected;
+use tonic::{Request, Response, Status};
 
-const AGENT_PROBE_RETRY: Duration = Duration::from_secs(1);
+use crate::state::{Action, InstanceStore};
+
 pub(crate) const AGENT_CONTROL_PORT: u32 = 1027;
 
-pub(crate) struct AgentClient {
-    machine: VirtualMachine,
-    port: u32,
-    client: Option<AgentServiceClient<Channel>>,
+#[derive(Clone)]
+struct AgentControlSvc {
+    store: Arc<InstanceStore>,
+    config: Arc<String>,
+    ready: Arc<AtomicBool>,
 }
 
-impl AgentClient {
-    pub(crate) fn new(machine: &VirtualMachine) -> Self {
+impl AgentControlSvc {
+    fn new(store: Arc<InstanceStore>, config: String, ready: Arc<AtomicBool>) -> Self {
         Self {
-            machine: machine.clone(),
-            port: AGENT_CONTROL_PORT,
-            client: None,
+            store,
+            config: Arc::new(config),
+            ready,
         }
     }
+}
 
-    pub(crate) async fn health(&mut self) -> eyre::Result<HealthResponse> {
-        let client = self.connect().await?;
-        client
-            .health(HealthRequest {})
-            .await
-            .map(|response| response.into_inner())
-            .context("agent health failed")
+#[tonic::async_trait]
+impl AgentControlService for AgentControlSvc {
+    async fn register(
+        &self,
+        request: Request<RegisterAgentRequest>,
+    ) -> Result<Response<RegisterAgentResponse>, Status> {
+        let request = request.into_inner();
+        let hostname = request
+            .system_info
+            .as_ref()
+            .map(|system| system.hostname.as_str())
+            .unwrap_or("");
+        let arch = request
+            .system_info
+            .as_ref()
+            .map(|system| system.arch.as_str())
+            .unwrap_or("");
+
+        tracing::info!(
+            agent_version = %request.agent_version,
+            hostname,
+            arch,
+            "guest agent registered"
+        );
+        self.ready.store(true, Ordering::Release);
+        self.store.dispatch(Action::guest_running());
+
+        Ok(Response::new(RegisterAgentResponse {
+            accepted: true,
+            message: String::from("registered"),
+        }))
     }
 
-    pub(crate) fn watch(
-        self,
-        shutdown: CancellationToken,
-    ) -> impl Stream<Item = eyre::Result<HealthResponse>> {
-        let interval = tokio::time::interval(AGENT_PROBE_RETRY);
+    async fn get_config(
+        &self,
+        _request: Request<GetAgentConfigRequest>,
+    ) -> Result<Response<GetAgentConfigResponse>, Status> {
+        tracing::info!(
+            config_len = self.config.len(),
+            "guest agent config requested"
+        );
+        Ok(Response::new(GetAgentConfigResponse {
+            config: self.config.as_ref().clone(),
+        }))
+    }
+}
 
-        stream::unfold(
-            (self, shutdown, interval),
-            |(mut client, shutdown, mut interval)| async move {
-                tokio::select! {
-                    _ = shutdown.cancelled() => None,
-                    _ = interval.tick() => Some((client.health().await, (client, shutdown, interval))),
+#[derive(Debug)]
+struct ConnectedVsock(VsockStream);
+
+impl Connected for ConnectedVsock {
+    type ConnectInfo = ();
+
+    fn connect_info(&self) -> Self::ConnectInfo {}
+}
+
+impl AsyncRead for ConnectedVsock {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ConnectedVsock {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+pub(crate) async fn spawn_agent_control_service(
+    machine: &VirtualMachine,
+    store: Arc<InstanceStore>,
+    config: String,
+    timeout: Duration,
+    shutdown: CancellationToken,
+) -> eyre::Result<JoinHandle<()>> {
+    let listener = machine
+        .listen_vsock(AGENT_CONTROL_PORT)
+        .await
+        .context("listen for guest agent control connections")?;
+    let ready = Arc::new(AtomicBool::new(false));
+    let service = AgentControlSvc::new(store.clone(), config, ready.clone());
+    let timeout_task = spawn_readiness_timeout(store.clone(), ready, timeout, shutdown.clone());
+
+    Ok(tokio::spawn(async move {
+        let result = serve_agent_control(listener, service, shutdown).await;
+        timeout_task.abort();
+
+        if let Err(err) = result {
+            tracing::warn!(error = %err, "agent control service failed");
+            store.dispatch(Action::guest_error(format!(
+                "agent control service failed: {err}"
+            )));
+        }
+    }))
+}
+
+async fn serve_agent_control(
+    listener: VsockListener,
+    service: AgentControlSvc,
+    shutdown: CancellationToken,
+) -> eyre::Result<()> {
+    tonic::transport::Server::builder()
+        .add_service(AgentControlServiceServer::new(service))
+        .serve_with_incoming_shutdown(incoming_vsock_connections(listener), shutdown.cancelled())
+        .await?;
+    Ok(())
+}
+
+fn incoming_vsock_connections(
+    listener: VsockListener,
+) -> impl Stream<Item = io::Result<ConnectedVsock>> {
+    stream::unfold(listener, |mut listener| async move {
+        let accepted = listener.accept().await.map(ConnectedVsock);
+        Some((accepted, listener))
+    })
+}
+
+fn spawn_readiness_timeout(
+    store: Arc<InstanceStore>,
+    ready: Arc<AtomicBool>,
+    timeout: Duration,
+    shutdown: CancellationToken,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = shutdown.cancelled() => {}
+            _ = tokio::time::sleep(timeout) => {
+                if !ready.load(Ordering::Acquire) {
+                    tracing::warn!(timeout = ?timeout, "guest agent did not register before timeout");
+                    store.dispatch(Action::guest_error(format!(
+                        "guest agent did not register within {} seconds",
+                        timeout.as_secs()
+                    )));
                 }
-            },
-        )
-    }
-
-    async fn connect(&mut self) -> eyre::Result<&mut AgentServiceClient<Channel>> {
-        if let Some(mut client) = self.client.take() {
-            if Self::ping(&mut client).await.is_ok() {
-                self.client = Some(client);
-                return self.client.as_mut().ok_or_else(|| {
-                    eyre::eyre!("agent client cache was empty after successful ping")
-                });
             }
         }
-
-        self.client = Some(connect_agent_client(&self.machine, self.port).await?);
-
-        self.client
-            .as_mut()
-            .ok_or_else(|| eyre::eyre!("agent client cache was empty after connect"))
-    }
-
-    async fn ping(client: &mut AgentServiceClient<Channel>) -> eyre::Result<()> {
-        client
-            .ping(AgentPingRequest {
-                message: String::new(),
-            })
-            .await
-            .context("agent ping failed")?;
-        Ok(())
-    }
-}
-
-async fn connect_agent_client(
-    machine: &VirtualMachine,
-    port: u32,
-) -> eyre::Result<AgentServiceClient<Channel>> {
-    let stream = machine.connect_vsock(port).await?;
-    let stream_slot = Arc::new(Mutex::new(Some(stream)));
-    let connector = service_fn(move |_| {
-        let stream_slot = Arc::clone(&stream_slot);
-        async move {
-            let mut guard = stream_slot.lock().await;
-            guard
-                .take()
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotConnected,
-                        "agent connector stream already consumed",
-                    )
-                })
-                .map(TokioIo::new)
-        }
-    });
-
-    let channel = Endpoint::from_static("http://agent.local")
-        .connect_with_connector(connector)
-        .await
-        .context("connect agent rpc client")?;
-
-    Ok(AgentServiceClient::new(channel))
+    })
 }
 
 #[cfg(test)]

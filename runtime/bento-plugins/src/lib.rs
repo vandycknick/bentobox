@@ -160,14 +160,6 @@ impl Plugin {
         into_async_stream(fd)
     }
 
-    pub fn status(&self, active: bool, summary: &str, problems: &[&str]) -> io::Result<()> {
-        emit_event(PluginEvent::VsockEndpointStatus {
-            active,
-            summary,
-            problems,
-        })
-    }
-
     pub fn fail(&self, message: &str) -> io::Result<()> {
         emit_event(PluginEvent::Failed { message })
     }
@@ -214,14 +206,7 @@ pub struct Plugin {
 #[serde(tag = "event", rename_all = "snake_case")]
 enum PluginEvent<'a> {
     Ready,
-    Failed {
-        message: &'a str,
-    },
-    VsockEndpointStatus {
-        active: bool,
-        summary: &'a str,
-        problems: &'a [&'a str],
-    },
+    Failed { message: &'a str },
 }
 
 fn emit_event(event: PluginEvent<'_>) -> io::Result<()> {

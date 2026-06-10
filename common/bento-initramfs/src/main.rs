@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::path::PathBuf;
 
-use bento_initramfs::{write_initramfs, InitramfsOptions};
+use bento_initramfs::{write_initramfs, InitramfsFile, InitramfsOptions};
 use clap::Parser;
 
 #[derive(Debug, Parser)]
@@ -9,6 +9,8 @@ use clap::Parser;
 struct Args {
     #[arg(long, value_name = "PATH")]
     init: PathBuf,
+    #[arg(long, value_name = "PATH")]
+    agent: Option<PathBuf>,
     #[arg(long, value_name = "PATH")]
     out: PathBuf,
 }
@@ -27,5 +29,10 @@ fn main() {
 
 fn run() -> bento_initramfs::Result<()> {
     let args = Args::parse();
-    write_initramfs(&InitramfsOptions::new(args.init, args.out))
+    let mut options = InitramfsOptions::new(args.init, args.out);
+    if let Some(agent) = args.agent {
+        options = options.with_extra_file(InitramfsFile::new("agent/bento-agent", agent, 0o755));
+    }
+
+    write_initramfs(&options)
 }

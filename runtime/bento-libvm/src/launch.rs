@@ -1,14 +1,13 @@
 use std::path::{Path, PathBuf};
 
 use bento_core::agent::{
-    AgentConfig, AgentDnsConfig, AgentForwardConfig, AgentRosettaConfig, AgentSshConfig,
-    AgentUdsForwardConfig, CertificateAuthorityConfig, MountConfig as ProvisionMountConfig,
+    AgentConfig, AgentForwardConfig, AgentRosettaConfig, AgentUdsForwardConfig,
+    CertificateAuthorityConfig, MountConfig as ProvisionMountConfig,
     NetworkConfig as ProvisionNetworkConfig, NetworkInterfaceConfig, NetworkMatchConfig,
     ProvisionConfig, ResizeRootfsConfig, UserConfig, UserdataConfig, UserdataContentType,
     UserdataRunPolicy,
 };
 use bento_core::VmSpec;
-use bento_initramfs::{write_initramfs, InitramfsFile, InitramfsOptions};
 use bento_utils::format_mac;
 use eyre::Context;
 use serde::Deserialize;
@@ -20,11 +19,8 @@ use crate::network::RuntimeNetwork;
 use crate::ssh_keys;
 use crate::{resolve_mount_location, InstanceFile, Layout};
 
-const ASSET_INIT_FILENAME: &str = "init";
-const ASSET_AGENT_FILENAME: &str = "agent";
-const AGENT_BINARY_ARCHIVE_PATH: &str = "agent/bento-agent";
-const AGENT_CONFIG_ARCHIVE_PATH: &str = "agent/bento-agent.yaml";
-const AGENT_CONFIG_SOURCE_FILENAME: &str = ".bento-agent.yaml";
+const ASSET_INITRAMFS_FILENAME: &str = "initramfs";
+const ASSET_NO_AGENT_INITRAMFS_FILENAME: &str = "initramfs-no-agent";
 const FORWARD_ENDPOINT_NAME: &str = "forward";
 const GUEST_CERTIFICATE_AUTHORITY_PATH: &str = "/usr/local/share/ca-certificates/bento-ca.crt";
 
@@ -80,65 +76,37 @@ fn write_vm_spec_to_dir(instance_dir: &Path, spec: &VmSpec) -> eyre::Result<()> 
 
 fn prepare_runtime_initramfs(
     layout: &Layout,
-    instance_dir: &Path,
+    _instance_dir: &Path,
     name: &str,
     spec: &mut VmSpec,
     network: &RuntimeNetwork,
 ) -> eyre::Result<()> {
+    let agent_enabled = spec.settings.agent.enabled;
+    if agent_enabled {
+        let agent_config = resolve_agent_config(layout, name, spec, network)?;
+        spec.settings.agent.config = render_agent_config(&agent_config)?;
+    } else {
+        spec.settings.agent.config.clear();
+    }
+
     if spec.boot.initramfs.is_some() {
-        if spec.settings.agent {
-            eyre::bail!(
-                "settings.agent=true requires the Bento-managed initramfs; remove explicit boot.initramfs so /agent can be injected"
-            );
-        }
         return Ok(());
     }
 
-    let init_binary = asset_path(layout, ASSET_INIT_FILENAME);
-    ensure_asset(&init_binary, "init binary")?;
-
-    let output = instance_dir.join(InstanceFile::Initramfs.as_str());
-    let mut options = InitramfsOptions::new(&init_binary, &output);
-    let agent_config_source = if spec.settings.agent {
-        let agent_binary = asset_path(layout, ASSET_AGENT_FILENAME);
-        ensure_asset(&agent_binary, "agent binary")?;
-
-        let agent_config = resolve_agent_config(layout, name, spec, network)?;
-        let agent_config_source = instance_dir.join(AGENT_CONFIG_SOURCE_FILENAME);
-        std::fs::write(&agent_config_source, render_agent_config(&agent_config)?).with_context(
-            || {
-                format!(
-                    "write agent config payload {}",
-                    agent_config_source.display()
-                )
-            },
-        )?;
-
-        options = options
-            .with_extra_file(InitramfsFile::new(
-                AGENT_BINARY_ARCHIVE_PATH,
-                agent_binary,
-                0o755,
-            ))
-            .with_extra_file(InitramfsFile::new(
-                AGENT_CONFIG_ARCHIVE_PATH,
-                &agent_config_source,
-                0o644,
-            ));
-        Some(agent_config_source)
+    let initramfs_filename = if agent_enabled {
+        ASSET_INITRAMFS_FILENAME
     } else {
-        None
+        ASSET_NO_AGENT_INITRAMFS_FILENAME
     };
+    let initramfs = asset_path(layout, initramfs_filename);
+    let label = if agent_enabled {
+        "agent initramfs"
+    } else {
+        "no-agent initramfs"
+    };
+    ensure_asset(&initramfs, label)?;
 
-    let result = write_initramfs(&options)
-        .with_context(|| format!("build runtime initramfs at {}", output.display()));
-    if let Some(path) = agent_config_source {
-        remove_file_if_exists(&path)
-            .with_context(|| format!("remove temporary agent config payload {}", path.display()))?;
-    }
-    result?;
-
-    spec.boot.initramfs = Some(PathBuf::from(InstanceFile::Initramfs.as_str()));
+    spec.boot.initramfs = Some(initramfs);
     Ok(())
 }
 
@@ -180,33 +148,18 @@ fn ensure_asset(path: &Path, label: &str) -> eyre::Result<()> {
     }
 }
 
-fn remove_file_if_exists(path: &Path) -> eyre::Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("remove {}", path.display())),
-    }
-}
-
 fn resolve_guest_runtime_config(
     spec: &VmSpec,
-    network: &RuntimeNetwork,
+    _network: &RuntimeNetwork,
 ) -> eyre::Result<AgentConfig> {
     Ok(AgentConfig {
-        ssh: AgentSshConfig {
-            enabled: spec.settings.agent,
-        },
-        dns: AgentDnsConfig {
-            enabled: spec.settings.agent && !matches!(network, RuntimeNetwork::None),
-            ..AgentDnsConfig::default()
-        },
         forward: resolve_forward_runtime_config(spec)?,
         provision: ProvisionConfig::default(),
     })
 }
 
 fn resolve_forward_runtime_config(spec: &VmSpec) -> eyre::Result<AgentForwardConfig> {
-    if !spec.settings.agent {
+    if !spec.settings.agent.enabled {
         return Ok(AgentForwardConfig::default());
     }
 
@@ -385,7 +338,7 @@ fn parse_mac_string(mac: &str) -> eyre::Result<[u8; 6]> {
 }
 
 fn render_agent_config(guest_runtime: &AgentConfig) -> eyre::Result<String> {
-    serde_yaml_ng::to_string(guest_runtime).context("serialize agent config")
+    serde_json::to_string(guest_runtime).context("serialize agent config")
 }
 
 fn resolve_host_timezone() -> String {
@@ -438,8 +391,8 @@ mod tests {
     };
     use bento_core::{
         agent::{AgentConfig, UserdataContentType, UserdataRunPolicy},
-        Architecture, Boot, Bootstrap, GuestOs, LifecycleSpec, Mount, Platform, PluginSpec,
-        Resources, Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
+        AgentSettings, Architecture, Boot, Bootstrap, GuestOs, LifecycleSpec, Mount, Platform,
+        PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -448,7 +401,6 @@ mod tests {
 
     use crate::host_user::HostUser;
     use crate::network::RuntimeNetwork;
-    use crate::InstanceFile;
     use crate::Layout;
 
     fn sample_spec(kernel_cmdline: Vec<String>, guest_configured: bool) -> VmSpec {
@@ -474,7 +426,10 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
-                agent: guest_configured,
+                agent: AgentSettings {
+                    enabled: guest_configured,
+                    ..AgentSettings::default()
+                },
             },
         }
     }
@@ -545,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn guest_runtime_defaults_to_ssh_and_dns_when_guest_is_enabled() {
+    fn guest_runtime_has_no_forward_without_endpoint_when_guest_is_enabled() {
         let runtime = resolve_guest_runtime_config(
             &sample_spec(Vec::new(), true),
             &RuntimeNetwork::UnixDatagram {
@@ -555,31 +510,25 @@ mod tests {
         )
         .expect("runtime config should resolve");
 
-        assert!(runtime.ssh.enabled);
-        assert!(runtime.dns.enabled);
         assert!(!runtime.forward.enabled);
     }
 
     #[test]
-    fn guest_runtime_disables_dns_but_keeps_ssh_without_guest_networking() {
+    fn guest_runtime_has_no_forward_without_guest_networking() {
         let spec = sample_spec(Vec::new(), true);
 
         let runtime = resolve_guest_runtime_config(&spec, &RuntimeNetwork::None)
             .expect("runtime config should resolve");
 
-        assert!(runtime.ssh.enabled);
-        assert!(!runtime.dns.enabled);
         assert!(!runtime.forward.enabled);
     }
 
     #[test]
-    fn guest_runtime_disables_ssh_dns_and_forward_when_guest_is_disabled() {
+    fn guest_runtime_disables_forward_when_guest_is_disabled() {
         let runtime =
             resolve_guest_runtime_config(&sample_spec(Vec::new(), false), &RuntimeNetwork::None)
                 .expect("runtime config should resolve");
 
-        assert!(!runtime.ssh.enabled);
-        assert!(!runtime.dns.enabled);
         assert!(!runtime.forward.enabled);
     }
 
@@ -703,12 +652,19 @@ mod tests {
             ..AgentConfig::default()
         })
         .expect("render agent config");
-        assert!(rendered.contains("provision:"));
-        assert!(rendered.contains("enabled: true"));
-        assert!(rendered.contains("resize_rootfs:"));
-        assert!(rendered.contains("rosetta:"));
-        assert!(rendered.contains("run: once"));
-        assert!(rendered.contains("interfaces:"));
+        let decoded: AgentConfig = serde_json::from_str(&rendered).expect("decode agent config");
+        assert!(decoded.provision.enabled);
+        assert!(decoded.provision.resize_rootfs.enabled);
+        assert_eq!(decoded.provision.rosetta.mount_tag, "bento-rosetta");
+        assert_eq!(decoded.provision.network.interfaces.len(), 1);
+        assert_eq!(
+            decoded
+                .provision
+                .userdata
+                .as_ref()
+                .map(|userdata| &userdata.run),
+            Some(&UserdataRunPolicy::Once)
+        );
     }
 
     #[test]
@@ -796,16 +752,16 @@ mod tests {
     }
 
     #[test]
-    fn runtime_initramfs_packages_init_without_agent() {
+    fn runtime_initramfs_selects_no_agent_static_asset_without_agent() {
         let temp = tempfile::tempdir().expect("create temp dir");
         let data_dir = temp.path().join("bento");
-        write_asset(&data_dir, "init", b"init binary");
+        write_asset(&data_dir, "initramfs-no-agent", b"initramfs");
         let instance_dir = temp.path().join("instance");
         fs::create_dir_all(&instance_dir).expect("create instance dir");
         let mut spec = sample_spec(Vec::new(), false);
 
         prepare_runtime_initramfs(
-            &Layout::new(data_dir),
+            &Layout::new(&data_dir),
             &instance_dir,
             "demo",
             &mut spec,
@@ -815,33 +771,10 @@ mod tests {
 
         assert_eq!(
             spec.boot.initramfs,
-            Some(PathBuf::from(InstanceFile::Initramfs.as_str()))
+            Some(data_dir.join("assets").join("initramfs-no-agent"))
         );
-        assert!(instance_dir
-            .join(InstanceFile::Initramfs.as_str())
-            .is_file());
+        assert!(!instance_dir.join("initramfs").exists());
         assert!(spec.storage.disks.is_empty());
-    }
-
-    #[test]
-    fn runtime_initramfs_rejects_explicit_initramfs_when_agent_enabled() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let instance_dir = temp.path().join("instance");
-        fs::create_dir_all(&instance_dir).expect("create instance dir");
-        let mut spec = sample_spec(Vec::new(), true);
-        spec.boot.initramfs = Some(PathBuf::from("custom-initramfs"));
-
-        let err = prepare_runtime_initramfs(
-            &Layout::new(data_dir),
-            &instance_dir,
-            "demo",
-            &mut spec,
-            &RuntimeNetwork::None,
-        )
-        .expect_err("explicit initramfs should fail with agent enabled");
-
-        assert!(err.to_string().contains("Bento-managed initramfs"));
     }
 
     #[test]
@@ -854,7 +787,7 @@ mod tests {
         spec.boot.initramfs = Some(PathBuf::from("custom-initramfs"));
 
         prepare_runtime_initramfs(
-            &Layout::new(data_dir),
+            &Layout::new(&data_dir),
             &instance_dir,
             "demo",
             &mut spec,
@@ -863,7 +796,7 @@ mod tests {
         .expect("explicit initramfs should be accepted with agent disabled");
 
         assert_eq!(spec.boot.initramfs, Some(PathBuf::from("custom-initramfs")));
-        assert!(!instance_dir.join(InstanceFile::Initramfs.as_str()).exists());
+        assert!(!instance_dir.join("initramfs").exists());
     }
 
     fn write_asset(data_dir: &std::path::Path, name: &str, contents: &[u8]) {

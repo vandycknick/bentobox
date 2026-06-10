@@ -2,16 +2,16 @@
 
 Guest-side agent for Bento VMs.
 
-`bento-agent` runs inside the Linux guest and exposes Bento's guest control plane over vsock. It is responsible for agent RPC, shell proxying, guest-side forwarding, and optional guest DNS management. The host uses it to probe guest readiness and to reach guest services without modeling each guest feature as a separate pluggable daemon.
+`bento-agent` runs inside the Linux guest and connects back to Bento's guest control plane over vsock. It is responsible for registration, SSH access, guest-side forwarding, and optional guest provisioning.
 
 ## Overview
 
 `bento-agent` currently does four main jobs inside the guest:
 
-- serves the guest RPC API over vsock
-- proxies shell access to the guest SSH daemon on the reserved shell vsock port
+- registers with the host-side control service over vsock
+- serves SSH on guest `vsock::22` when that port is free
 - runs the guest-side forward service used by the `forward` plugin
-- optionally manages guest DNS and `resolv.conf`
+- runs optional guest provisioning tasks
 
 The control RPC port is selected from the kernel command line via `bento.agent.port`. If that kernel arg is missing or invalid, the agent falls back to Bento's default control port.
 
@@ -20,16 +20,10 @@ At startup the agent:
 1. initializes tracing
 2. loads guest config from disk
 3. reads the control port from `/proc/cmdline`
-4. starts DNS if enabled
-5. starts the shell proxy if enabled
+4. runs provisioning if enabled
+5. attempts to bind guest `vsock::22` for SSH, unless another listener already owns it
 6. starts the forward service if enabled
-7. starts the control RPC server
-
-The active RPC surface currently includes:
-
-- `Ping`
-- `Health`
-- `GetSystemInfo`
+7. registers with the host-side control service
 
 ## Config
 
@@ -44,55 +38,50 @@ If the file is missing, the agent falls back to its built-in defaults.
 Current config shape:
 
 ```yaml
-ssh:
-  enabled: true
-
-dns:
-  enabled: false
-  listen_address: 127.0.0.1
-  upstream_servers: []
-  zones: []
-
 forward:
   enabled: false
   port: 0
   uds: []
+
+provision:
+  enabled: false
 ```
 
 Example with all supported sections populated:
 
 ```yaml
-ssh:
-  enabled: true
-
-dns:
-  enabled: true
-  listen_address: 127.0.0.1
-  upstream_servers:
-    - 1.1.1.1:53
-    - 8.8.8.8:53
-  zones:
-    - domain: docker.internal
-      authoritative: false
-      records:
-        - name: host
-          type: CNAME
-          value: host.bento.internal
-
 forward:
   enabled: true
   port: 4000
   uds:
     - guest_path: /var/run/docker.sock
+
+provision:
+  enabled: true
+  hostname: bento-dev
+  resize_rootfs:
+    enabled: true
 ```
 
 Notes:
 
-- `ssh.enabled` controls whether the agent exposes the reserved shell proxy over vsock.
-- `dns.enabled` enables the guest DNS server and managed `resolv.conf` behavior.
+- SSH is not configured here. The agent attempts to bind guest `vsock::22`; if another listener already owns `vsock::22`, the agent leaves it alone.
 - `forward.port` must be set when `forward.enabled` is true. This is the guest-side vsock port used by the host `forward` plugin endpoint.
 - `forward.uds` is an allowlist of guest Unix socket paths the forward service may connect to.
+- `provision` controls optional guest provisioning work such as hostname and root filesystem resizing.
 - The agent does not read its control RPC port from this file. That comes from the kernel arg owned by the host side.
+
+## SSH
+
+When `bento-agent` owns guest `vsock::22`, it prepares OpenSSH's `/run/sshd` runtime directory before registering with the host. Each incoming connection then starts `/usr/sbin/sshd -i` and passes the accepted vsock stream as the child process stdin/stdout. This matches the inetd-style shape used by systemd socket activation for `sshd-vsock.socket`, while keeping the child stderr attached to the agent logs instead of the SSH byte stream.
+
+Some systemd guests can automatically bind SSH sockets such as `vsock::22` before the agent starts. To disable those automatic systemd SSH bindings and let `bento-agent` own the port, add this kernel command line argument:
+
+```text
+systemd.ssh_auto=0
+```
+
+Explicit systemd SSH listeners configured with `systemd.ssh_listen=` or the `ssh.listen` system credential still apply even when automatic bindings are disabled.
 
 ## Logging
 

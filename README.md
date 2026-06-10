@@ -78,8 +78,7 @@ bento profile create rust-dev \
   --disk-size 40gb \
   --mount .:/workspace:rw \
   --network private \
-  --label stack=rust \
-  --ssh
+  --label stack=rust
 
 bento profile list
 bento profile show rust-dev
@@ -104,8 +103,6 @@ mounts:
       mode: rw
 network:
     kind: private
-ssh:
-    enabled: true
 labels:
     stack: rust
 ```
@@ -236,7 +233,7 @@ bento inspect dev
 bento inspect dev --json
 ```
 
-`status` includes process state, guest agent readiness, services, network mode, profile, and image. `inspect --json` is the better target for scripts that need labels, metadata, paths, and the resolved VM spec.
+`status` includes process state, guest agent readiness, network mode, profile, and image. `inspect --json` is the better target for scripts that need labels, metadata, paths, and the resolved VM spec.
 
 ## More Docs
 

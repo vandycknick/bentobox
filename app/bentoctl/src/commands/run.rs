@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
+use std::time::Duration;
 
 use bento_core::Mount;
 use bento_libvm::{CreateMachineRequest, LibVm, MachineRef, RequestedNetwork};
@@ -54,9 +55,6 @@ impl Cmd {
         }
 
         let mut resolved = self.resolve(libvm).await?;
-        if !resolved.ssh_enabled {
-            eyre::bail!("profile ssh.enabled is false; bento run needs SSH to open a shell or execute a command");
-        }
         let boot_assets = resolve_boot_assets(
             libvm.layout().data_dir(),
             resolved.kernel.take(),
@@ -76,7 +74,7 @@ impl Cmd {
             initramfs: boot_assets.initramfs,
             disk_size_bytes: resolved.disk_size_bytes,
             nested_virtualization: resolved.nested_virtualization,
-            agent: resolved.ssh_enabled,
+            agent: true,
             rosetta: resolved.rosetta,
             userdata: resolved.userdata,
             disks: resolved.disks,
@@ -87,9 +85,12 @@ impl Cmd {
         let machine = libvm.create_from_base_image(request).await?;
         let machine_ref = MachineRef::Id(machine.id);
         let machine = libvm.start(&machine_ref).await?;
-        if machine.spec.settings.agent {
+        if machine.spec.settings.agent.enabled {
             libvm
-                .wait_for_guest_running(&machine_ref, bento_libvm::DEFAULT_GUEST_READINESS_TIMEOUT)
+                .wait_for_guest_running(
+                    &machine_ref,
+                    Duration::from_secs(machine.spec.settings.agent.timeout_seconds),
+                )
                 .await
                 .map_err(|err| eyre::eyre!("guest readiness check failed: {err}"))?;
         }
@@ -120,7 +121,6 @@ impl Cmd {
         let mut metadata = BTreeMap::new();
         let mut mounts = Vec::<Mount>::new();
         let mut network = RequestedNetwork::default();
-        let mut ssh_enabled = true;
         let mut userdata = None;
         let mut cpus = None;
         let mut memory_mib = None;
@@ -135,12 +135,6 @@ impl Cmd {
             let named = store.resolve(&selected)?;
             image_ref = named.profile.image.clone();
             network = named.profile.requested_network();
-            ssh_enabled = named
-                .profile
-                .ssh
-                .as_ref()
-                .map(|ssh| ssh.enabled)
-                .unwrap_or(true);
             userdata = named.profile.userdata.clone();
             cpus = named.profile.cpus();
             memory_mib = named.profile.memory_mib()?;
@@ -182,7 +176,6 @@ impl Cmd {
             metadata,
             mounts,
             network,
-            ssh_enabled: ssh_enabled || self.overrides.agent,
             userdata,
             cpus: self.overrides.cpus.or(cpus),
             memory_mib: self.overrides.memory_mib()?.or(memory_mib),
@@ -203,7 +196,6 @@ struct ResolvedRun {
     metadata: BTreeMap<String, String>,
     mounts: Vec<Mount>,
     network: RequestedNetwork,
-    ssh_enabled: bool,
     userdata: Option<String>,
     cpus: Option<u8>,
     memory_mib: Option<u32>,

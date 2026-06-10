@@ -434,15 +434,15 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let init = temp.path().join("init");
         let agent = temp.path().join("bento-agent");
-        let config = temp.path().join("bento-agent.yaml");
+        let helper = temp.path().join("helper.conf");
         let output = temp.path().join("initramfs");
         fs::write(&init, b"init").expect("write init");
         fs::write(&agent, b"agent").expect("write agent");
-        fs::write(&config, b"config").expect("write config");
+        fs::write(&helper, b"helper").expect("write helper");
 
         let options = InitramfsOptions::new(&init, &output)
             .with_extra_file(InitramfsFile::new("agent/bento-agent", &agent, 0o755))
-            .with_extra_file(InitramfsFile::new("agent/bento-agent.yaml", &config, 0o644));
+            .with_extra_file(InitramfsFile::new("etc/helper.conf", &helper, 0o644));
         write_initramfs(&options).expect("write initramfs");
 
         let entries = read_archive(&output).expect("read archive");
@@ -452,7 +452,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(names.contains(&"agent"));
         assert!(names.contains(&"agent/bento-agent"));
-        assert!(names.contains(&"agent/bento-agent.yaml"));
+        assert!(names.contains(&"etc"));
+        assert!(names.contains(&"etc/helper.conf"));
 
         let agent_entry = entries
             .iter()
@@ -462,13 +463,13 @@ mod tests {
         assert_eq!(agent_entry.mode & 0o777, 0o755);
         assert_eq!(agent_entry.contents, b"agent");
 
-        let config_entry = entries
+        let helper_entry = entries
             .iter()
-            .find(|entry| entry.name == "agent/bento-agent.yaml")
-            .expect("config entry");
-        assert_eq!(config_entry.mode & 0o170000, 0o100000);
-        assert_eq!(config_entry.mode & 0o777, 0o644);
-        assert_eq!(config_entry.contents, b"config");
+            .find(|entry| entry.name == "etc/helper.conf")
+            .expect("helper entry");
+        assert_eq!(helper_entry.mode & 0o170000, 0o100000);
+        assert_eq!(helper_entry.mode & 0o777, 0o644);
+        assert_eq!(helper_entry.contents, b"helper");
     }
 
     #[test]

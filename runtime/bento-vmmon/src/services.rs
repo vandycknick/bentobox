@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_core::agent::RESERVED_SHELL_PORT;
+use bento_core::agent::SSH_VSOCK_PORT;
 use bento_protocol::negotiate::Upgrade;
 use bento_protocol::v1::vm_monitor_service_server::{VmMonitorService, VmMonitorServiceServer};
 use bento_protocol::v1::{
@@ -14,10 +14,9 @@ use futures::stream::{self, Stream, StreamExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 
-use crate::agent::AgentClient;
+use crate::agent::spawn_agent_control_service;
 use crate::context::{DaemonContext, RuntimeContext};
 use crate::endpoints::start_endpoint_supervisor;
 use crate::net::server::NegotiateServer;
@@ -27,8 +26,6 @@ use crate::state::{
     guest_shell_ready as state_guest_shell_ready, select_current_events, select_current_inspect,
     select_current_ping, Action, InstanceStore,
 };
-
-const GUEST_HEALTH_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 
 type WatchStatusStream = Pin<Box<dyn Stream<Item = Result<StatusUpdate, Status>> + Send>>;
 
@@ -123,13 +120,18 @@ pub async fn start_services(
         }
     });
 
-    let guest_monitor = if ctx.spec.settings.agent {
+    let guest_monitor = if ctx.spec.settings.agent.enabled {
         ctx.store.dispatch(Action::guest_starting());
-        Some(spawn_agent_monitor(
-            AgentClient::new(&ctx.machine),
-            ctx.store.clone(),
-            ctx.shutdown.clone(),
-        ))
+        Some(
+            spawn_agent_control_service(
+                &ctx.machine,
+                ctx.store.clone(),
+                ctx.spec.settings.agent.config.clone(),
+                Duration::from_secs(ctx.spec.settings.agent.timeout_seconds),
+                ctx.shutdown.clone(),
+            )
+            .await?,
+        )
     } else {
         ctx.store.dispatch(Action::guest_running());
         None
@@ -177,7 +179,7 @@ async fn handle_connection(
                 return Ok(());
             }
 
-            match ctx.machine.connect_vsock(RESERVED_SHELL_PORT).await {
+            match ctx.machine.connect_vsock(SSH_VSOCK_PORT).await {
                 Ok(vsock_stream) => {
                     spawn_tunnel(stream, vsock_stream);
                     Ok(())
@@ -190,80 +192,6 @@ async fn handle_connection(
         }
         Upgrade::Api { .. } => serve(stream, ctx.store).await,
     }
-}
-
-fn spawn_agent_monitor(
-    agent: AgentClient,
-    store: Arc<InstanceStore>,
-    shutdown: CancellationToken,
-) -> JoinHandle<()> {
-    let mut health_stream = Box::pin(agent.watch(shutdown));
-
-    tokio::spawn(async move {
-        let deadline = tokio::time::Instant::now() + GUEST_HEALTH_TIMEOUT;
-
-        while let Some(result) = health_stream.next().await {
-            if let Err(err) = handle_agent_update(&store, result, deadline) {
-                tracing::warn!(error = %err, timeout = ?GUEST_HEALTH_TIMEOUT, "guest services did not become ready before timeout");
-                store.dispatch(Action::guest_error(format!(
-                    "guest health check failed: {err}"
-                )));
-                return;
-            }
-        }
-
-        tracing::info!("agent monitor shutting down");
-    })
-}
-
-fn handle_agent_update(
-    store: &InstanceStore,
-    result: eyre::Result<bento_protocol::v1::HealthResponse>,
-    deadline: tokio::time::Instant,
-) -> Result<(), eyre::Report> {
-    match result {
-        Ok(health) => {
-            let waiting_summary = health.summary.clone();
-            store.dispatch(Action::set_services(health.services));
-
-            if health.ready {
-                store.dispatch(Action::guest_running());
-            } else {
-                store.dispatch(Action::guest_starting());
-                tracing::warn!(reason = %waiting_summary, "startup-required guest services not ready yet");
-            }
-
-            Ok(())
-        }
-        Err(err) if tokio::time::Instant::now() >= deadline => Err(err),
-        Err(err) => {
-            tracing::info!(reason = %classify_health_retry(&err), "agent not ready yet");
-            tracing::debug!(error = %err, "agent retry detail");
-            Ok(())
-        }
-    }
-}
-
-fn classify_health_retry(err: &eyre::Report) -> &'static str {
-    let message = err.to_string().to_ascii_lowercase();
-
-    if message.contains("unimplemented") {
-        return "agent protocol is older than vmmon";
-    }
-
-    if message.contains("connection reset by peer")
-        || message.contains("connection refused")
-        || message.contains("not connected")
-        || message.contains("service unavailable")
-    {
-        return "agent is not reachable yet";
-    }
-
-    if message.contains("timed out") {
-        return "agent rpc timed out";
-    }
-
-    "waiting for agent rpc"
 }
 
 fn guest_shell_ready(store: &InstanceStore) -> bool {

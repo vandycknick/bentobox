@@ -53,9 +53,9 @@ where
     H: Fn(VsockStream) -> F + Clone + Send + Sync + 'static,
     F: Future<Output = io::Result<()>> + Send + 'static,
 {
-    pub fn listen(self, port: u32) -> eyre::Result<RunningServer> {
+    pub fn listen(self, port: u32) -> io::Result<RunningServer> {
         let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, port))
-            .map_err(|err| eyre::eyre!("bind listener on {port}: {err}"))?;
+            .map_err(|err| io::Error::new(err.kind(), format!("bind listener on {port}: {err}")))?;
         let handler = self.handler;
         let concurrency = self.concurrency;
         let span = self.span;

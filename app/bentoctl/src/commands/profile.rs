@@ -9,8 +9,7 @@ use clap::{Args, Subcommand};
 use tabwriter::TabWriter;
 
 use crate::profile::{
-    parse_profile, MountMode, Profile, ProfileMount, ProfileNetwork, ProfileResources, ProfileSsh,
-    ProfileStore,
+    parse_profile, MountMode, Profile, ProfileMount, ProfileNetwork, ProfileResources, ProfileStore,
 };
 
 #[derive(Args, Debug)]
@@ -97,12 +96,6 @@ pub struct CreateCmd {
     /// Add a mount. Format: SRC:DST[:ro|rw].
     #[arg(long = "mount", value_name = "SRC:DST[:MODE]", value_parser = parse_profile_mount)]
     pub mounts: Vec<ProfileMount>,
-    /// Enable SSH support for VMs created from this profile.
-    #[arg(long, conflicts_with = "no_ssh")]
-    pub ssh: bool,
-    /// Disable SSH support for VMs created from this profile.
-    #[arg(long, conflicts_with = "ssh")]
-    pub no_ssh: bool,
     /// Add a label. Format: KEY=VALUE.
     #[arg(long = "label", value_name = "KEY=VALUE", value_parser = parse_label)]
     pub labels: Vec<(String, String)>,
@@ -213,11 +206,6 @@ fn create_profile(store: &ProfileStore, cmd: &CreateCmd) -> eyre::Result<()> {
         userdata: None,
         mounts: cmd.mounts.clone(),
         network: Some(requested_network_to_profile(cmd.network.clone())),
-        ssh: Some(ProfileSsh {
-            enabled: cmd.ssh && !cmd.no_ssh,
-            github_users: Vec::new(),
-            authorized_keys: Vec::new(),
-        }),
         labels,
     };
     crate::profile::validate_profile(&profile)?;

@@ -33,8 +33,6 @@ pub(crate) struct Profile {
     pub mounts: Vec<ProfileMount>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<ProfileNetwork>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ssh: Option<ProfileSsh>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
 }
@@ -101,21 +99,6 @@ impl<'de> Deserialize<'de> for ProfileNetwork {
         let raw = ProfileNetworkConfig::deserialize(deserializer)?;
         normalize_network(raw).map_err(serde::de::Error::custom)
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ProfileSsh {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default, rename = "githubUsers", skip_serializing_if = "Vec::is_empty")]
-    pub github_users: Vec<String>,
-    #[serde(
-        default,
-        rename = "authorizedKeys",
-        skip_serializing_if = "Vec::is_empty"
-    )]
-    pub authorized_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,14 +365,6 @@ pub(crate) fn validate_profile(profile: &Profile) -> eyre::Result<()> {
             );
         }
     }
-    if let Some(ssh) = &profile.ssh {
-        if !ssh.github_users.is_empty() {
-            bail!("ssh.githubUsers is not supported yet; guest agent support is still needed");
-        }
-        if !ssh.authorized_keys.is_empty() {
-            bail!("ssh.authorizedKeys is not supported yet; guest agent support is still needed");
-        }
-    }
     Ok(())
 }
 
@@ -416,11 +391,6 @@ fn built_in_default_profile() -> NamedProfile {
             userdata: None,
             mounts: Vec::new(),
             network: Some(ProfileNetwork::Private { policy_ref: None }),
-            ssh: Some(ProfileSsh {
-                enabled: true,
-                github_users: Vec::new(),
-                authorized_keys: Vec::new(),
-            }),
             labels: BTreeMap::new(),
         },
     }

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use bento_core::{agent::RESERVED_SHELL_PORT, DiskKind, VmSpec, VsockEndpointMode};
+use bento_core::{agent::SSH_VSOCK_PORT, DiskKind, VmSpec, VsockEndpointMode};
 use bento_protocol::agent_port_arg;
 use bento_utils::parse_mac;
 use bento_virt::{
@@ -117,13 +117,13 @@ fn vm_spec_vsock_ports(spec: &VmSpec) -> Vec<VsockPort> {
         });
     }
 
-    if spec.settings.agent {
+    if spec.settings.agent.enabled {
         ports.push(VsockPort {
             port: AGENT_CONTROL_PORT,
-            mode: VsockPortMode::Connect,
+            mode: VsockPortMode::Listen,
         });
         ports.push(VsockPort {
-            port: RESERVED_SHELL_PORT,
+            port: SSH_VSOCK_PORT,
             mode: VsockPortMode::Connect,
         });
     }
@@ -133,7 +133,7 @@ fn vm_spec_vsock_ports(spec: &VmSpec) -> Vec<VsockPort> {
 
 fn vm_spec_kernel_cmdline(spec: &VmSpec) -> Vec<String> {
     let mut kernel_cmdline = spec.boot.kernel_cmdline.clone();
-    if spec.settings.agent {
+    if spec.settings.agent.enabled {
         kernel_cmdline.push(agent_port_arg(AGENT_CONTROL_PORT));
     }
     kernel_cmdline
@@ -267,8 +267,8 @@ fn load_host_machine_identifier(
 mod tests {
     use super::{apply_runtime_network, vm_spec_machine_config, RuntimeNetwork, VmSpecInputs};
     use bento_core::{
-        agent::RESERVED_SHELL_PORT, Architecture, Boot, Disk, DiskKind, GuestOs, Platform,
-        Resources, Settings, Storage, VmSpec,
+        agent::SSH_VSOCK_PORT, AgentSettings, Architecture, Boot, Disk, DiskKind, GuestOs,
+        Platform, Resources, Settings, Storage, VmSpec,
     };
     use bento_virt::{VmConfig, VsockPortMode};
     use std::fs;
@@ -371,7 +371,10 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             settings: Settings {
-                agent: true,
+                agent: AgentSettings {
+                    enabled: true,
+                    ..AgentSettings::default()
+                },
                 nested_virtualization: false,
                 rosetta: false,
             },
@@ -398,12 +401,12 @@ mod tests {
             .config
             .vsock_ports
             .iter()
-            .any(|port| port.port == 1027 && port.mode == VsockPortMode::Connect));
+            .any(|port| port.port == 1027 && port.mode == VsockPortMode::Listen));
         assert!(machine_config
             .config
             .vsock_ports
             .iter()
-            .any(|port| port.port == RESERVED_SHELL_PORT && port.mode == VsockPortMode::Connect));
+            .any(|port| port.port == SSH_VSOCK_PORT && port.mode == VsockPortMode::Connect));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -429,7 +432,7 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             settings: Settings {
-                agent: false,
+                agent: AgentSettings::default(),
                 nested_virtualization: false,
                 rosetta: false,
             },
@@ -475,7 +478,7 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             settings: Settings {
-                agent: false,
+                agent: AgentSettings::default(),
                 nested_virtualization: false,
                 rosetta: false,
             },
@@ -539,7 +542,7 @@ mod tests {
             mounts: Vec::new(),
             vsock_endpoints: Vec::new(),
             settings: Settings {
-                agent: false,
+                agent: AgentSettings::default(),
                 nested_virtualization: false,
                 rosetta: false,
             },

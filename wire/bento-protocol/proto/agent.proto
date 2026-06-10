@@ -4,25 +4,23 @@ package bento.v1;
 
 import "common.proto";
 
-service AgentService {
-  rpc Ping(AgentPingRequest) returns (AgentPingResponse);
-  rpc GetSystemInfo(Empty) returns (SystemInfo);
-  rpc Health(HealthRequest) returns (HealthResponse);
+service AgentControlService {
+  rpc Register(RegisterAgentRequest) returns (RegisterAgentResponse);
+  rpc GetConfig(GetAgentConfigRequest) returns (GetAgentConfigResponse);
 }
 
-message AgentPingRequest {
-  string message = 1;
+message RegisterAgentRequest {
+  string agent_version = 1;
+  SystemInfo system_info = 2;
 }
 
-message AgentPingResponse {
-  string message = 1;
-  string version = 2;
+message RegisterAgentResponse {
+  bool accepted = 1;
+  string message = 2;
 }
 
-message HealthRequest {}
+message GetAgentConfigRequest {}
 
-message HealthResponse {
-  bool ready = 1;
-  string summary = 2;
-  repeated ServiceHealth services = 3;
+message GetAgentConfigResponse {
+  string config = 1;
 }

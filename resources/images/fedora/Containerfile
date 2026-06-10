@@ -26,10 +26,8 @@ RUN systemctl enable \
     systemd-timesyncd.service \
     systemd-resolved.service
 
-RUN printf 'L+ /etc/resolv.conf - - - - /run/systemd/resolve/stub-resolv.conf\n' > /etc/tmpfiles.d/resolv.conf \
+RUN \
+  printf 'L+ /etc/resolv.conf - - - - /run/systemd/resolve/stub-resolv.conf\n' > /etc/tmpfiles.d/resolv.conf \
   && (passwd -d root && passwd -u root || true) \
   && rm -f /etc/machine-id /var/lib/dbus/machine-id \
   && touch /etc/machine-id
-
-# Configure SSHD
-# RUN mkdir -p /var/empty/sshd # sshd needs this for some reason

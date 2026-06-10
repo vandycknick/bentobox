@@ -10,8 +10,8 @@ use crate::launch::prepare_instance_runtime;
 use crate::root_disk::{clone_or_copy_root_disk, resize_raw_disk};
 use crate::InstanceFile;
 use bento_core::{
-    Architecture, Boot, Bootstrap, Disk, DiskKind, GuestOs, MachineId, Mount, Platform, Resources,
-    Settings, Storage, VmSpec,
+    AgentSettings, Architecture, Boot, Bootstrap, Disk, DiskKind, GuestOs, MachineId, Mount,
+    Platform, Resources, Settings, Storage, VmSpec,
 };
 use bento_protocol::v1::InspectResponse;
 use nix::{
@@ -222,7 +222,10 @@ impl LibVm {
             settings: Settings {
                 nested_virtualization: request.nested_virtualization,
                 rosetta: request.rosetta,
-                agent: request.agent,
+                agent: AgentSettings {
+                    enabled: request.agent,
+                    ..AgentSettings::default()
+                },
             },
         };
 
@@ -588,12 +591,14 @@ impl LibVm {
 
         if wait_for_guest_readiness {
             let machine_record = self.machine_record(metadata.clone())?;
-            let should_wait = machine_record.spec.settings.agent;
+            let should_wait = machine_record.spec.settings.agent.enabled;
 
             if should_wait {
                 monitor::wait_for_shell_with_timeout(
                     &socket_path,
-                    monitor::DEFAULT_GUEST_READINESS_TIMEOUT,
+                    std::time::Duration::from_secs(
+                        machine_record.spec.settings.agent.timeout_seconds,
+                    ),
                     std::time::Duration::from_secs(1),
                 )
                 .await
@@ -1210,7 +1215,8 @@ mod tests {
         CreateMachineRequest, InstanceFile, Layout, LibVmError, MachineRef, MachineRuntimeState,
     };
     use bento_core::{
-        Architecture, Boot, GuestOs, Mount, Platform, Resources, Settings, Storage, VmSpec,
+        AgentSettings, Architecture, Boot, GuestOs, Mount, Platform, Resources, Settings, Storage,
+        VmSpec,
     };
     use nix::unistd::pipe;
     use std::io::{Read, Write};
@@ -1239,7 +1245,10 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
-                agent: true,
+                agent: AgentSettings {
+                    enabled: true,
+                    ..AgentSettings::default()
+                },
             },
         }
     }

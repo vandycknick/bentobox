@@ -175,16 +175,7 @@ async fn probe_shell_once(socket_path: &Path) -> Result<(), ProbeError> {
         Ok(stream) => {
             let ping = call_vm_monitor_ping(stream).await?;
             if ping.ok {
-                let status = get_vm_monitor_inspect(socket_path).await.map_err(|err| {
-                    ProbeError::Retryable(format!("get vm monitor inspect failed: {err}"))
-                })?;
-                if shell_available(&status) {
-                    Ok(())
-                } else {
-                    Err(ProbeError::Fatal(String::from(
-                        "unsupported_service: guest is ready but shell is not supported",
-                    )))
-                }
+                Ok(())
             } else {
                 let message = if ping.message.is_empty() {
                     "vm monitor ping failed".to_string()
@@ -269,15 +260,6 @@ async fn vm_monitor_client(
         .await?;
 
     Ok(VmMonitorServiceClient::new(channel))
-}
-
-fn shell_available(status: &InspectResponse) -> bool {
-    status
-        .services
-        .iter()
-        .find(|service| service.name == "shell")
-        .map(|service| service.healthy)
-        .unwrap_or(false)
 }
 
 fn classify_io_error(context: &str, err: io::Error) -> ProbeError {

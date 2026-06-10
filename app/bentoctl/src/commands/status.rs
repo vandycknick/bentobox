@@ -3,7 +3,6 @@ use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bento_core::VmSpec;
-use bento_libvm::InstanceFile;
 use bento_libvm::{LibVm, MachineRef, MachineRuntimeState};
 use bento_protocol::v1::LifecycleState;
 
@@ -14,7 +13,6 @@ struct GuestConfigStatus {
     enabled: bool,
     bootstrap: bool,
     initramfs_present: bool,
-    shell_expected: bool,
 }
 
 #[derive(Args, Debug)]
@@ -81,48 +79,27 @@ impl Cmd {
             println!("summary: {}", status.summary);
         }
 
-        if !status.services.is_empty() {
-            println!("services:");
-            for service in status.services {
-                println!(
-                    "  - {} startup_required={} healthy={}",
-                    service.name, service.startup_required, service.healthy,
-                );
-                if !service.summary.is_empty() {
-                    println!("    summary: {}", service.summary);
-                }
-                for problem in service.problems {
-                    println!("    problem: {}", problem);
-                }
-            }
-        }
-
-        if !status.vsock_endpoints.is_empty() {
-            println!("vsock_endpoints:");
-            for endpoint in status.vsock_endpoints {
-                println!(
-                    "  - {} port={} active={}",
-                    endpoint.name, endpoint.port, endpoint.active
-                );
-                if !endpoint.summary.is_empty() {
-                    println!("    summary: {}", endpoint.summary);
-                }
-                for problem in endpoint.problems {
-                    println!("    problem: {}", problem);
-                }
-            }
-        }
-
         Ok(())
     }
 }
 
 fn guest_config_status(spec: &VmSpec, machine_dir: &std::path::Path) -> GuestConfigStatus {
     GuestConfigStatus {
-        enabled: spec.settings.agent,
+        enabled: spec.settings.agent.enabled,
         bootstrap: spec.boot.bootstrap.is_some(),
-        initramfs_present: machine_dir.join(InstanceFile::Initramfs.as_str()).is_file(),
-        shell_expected: spec.settings.agent,
+        initramfs_present: initramfs_path_exists(spec, machine_dir),
+    }
+}
+
+fn initramfs_path_exists(spec: &VmSpec, machine_dir: &std::path::Path) -> bool {
+    let Some(initramfs) = spec.boot.initramfs.as_deref() else {
+        return false;
+    };
+
+    if initramfs.is_absolute() {
+        initramfs.is_file()
+    } else {
+        machine_dir.join(initramfs).is_file()
     }
 }
 
@@ -153,7 +130,6 @@ fn print_guest(runtime: Option<(&str, bool)>, config: GuestConfigStatus) {
         "    initramfs: {}",
         present_absent(config.initramfs_present)
     );
-    println!("    shell_expected: {}", yes_no(config.shell_expected));
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -260,7 +236,9 @@ mod tests {
     use super::{
         guest_config_status, now_unix, process_started_at, process_status_label, relative_time,
     };
-    use bento_core::{Architecture, Boot, GuestOs, Platform, Resources, Settings, Storage, VmSpec};
+    use bento_core::{
+        AgentSettings, Architecture, Boot, GuestOs, Platform, Resources, Settings, Storage, VmSpec,
+    };
     use bento_libvm::MachineRuntimeState;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -278,7 +256,7 @@ mod tests {
             },
             boot: Boot {
                 kernel: None,
-                initramfs: None,
+                initramfs: agent.then_some(std::path::PathBuf::from("initramfs")),
                 kernel_cmdline: Vec::new(),
                 bootstrap: bootstrap.then_some(bento_core::Bootstrap { userdata: None }),
             },
@@ -288,7 +266,10 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: false,
-                agent,
+                agent: AgentSettings {
+                    enabled: agent,
+                    ..AgentSettings::default()
+                },
             },
         }
     }
@@ -310,7 +291,6 @@ mod tests {
 
         assert!(!config.enabled);
         assert!(!config.initramfs_present);
-        assert!(!config.shell_expected);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -325,7 +305,6 @@ mod tests {
 
         assert!(config.enabled);
         assert!(config.initramfs_present);
-        assert!(config.shell_expected);
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -1,8 +1,7 @@
 use std::sync::Mutex;
 
 use bento_protocol::v1::{
-    InspectResponse, LifecycleState, PingResponse, ServiceHealth, StatusSource, StatusUpdate,
-    VsockEndpointStatus,
+    InspectResponse, LifecycleState, PingResponse, StatusSource, StatusUpdate,
 };
 use tokio::sync::broadcast;
 
@@ -89,8 +88,6 @@ pub(crate) struct InstanceState {
     vm: LifecycleState,
     guest: LifecycleState,
     guest_message: String,
-    services: Vec<ServiceHealth>,
-    vsock_endpoints: Vec<VsockEndpointStatus>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,12 +99,6 @@ pub(crate) enum Action {
     GuestTransition {
         state: LifecycleState,
         message: String,
-    },
-    SetServices {
-        services: Vec<ServiceHealth>,
-    },
-    UpsertVsockEndpoint {
-        endpoint: VsockEndpointStatus,
     },
 }
 
@@ -129,14 +120,14 @@ impl Action {
     pub(crate) fn guest_starting() -> Self {
         Self::GuestTransition {
             state: LifecycleState::Starting,
-            message: String::from("waiting for guest services"),
+            message: String::from("waiting for guest agent"),
         }
     }
 
     pub(crate) fn guest_running() -> Self {
         Self::GuestTransition {
             state: LifecycleState::Running,
-            message: String::from("startup-required guest services ready"),
+            message: String::from("guest agent registered"),
         }
     }
 
@@ -145,14 +136,6 @@ impl Action {
             state: LifecycleState::Error,
             message: message.into(),
         }
-    }
-
-    pub(crate) fn set_services(services: Vec<ServiceHealth>) -> Self {
-        Self::SetServices { services }
-    }
-
-    pub(crate) fn upsert_vsock_endpoint(endpoint: VsockEndpointStatus) -> Self {
-        Self::UpsertVsockEndpoint { endpoint }
     }
 }
 
@@ -181,8 +164,6 @@ pub(crate) fn select_current_inspect(state: &InstanceState) -> InspectResponse {
         guest_state: state.guest as i32,
         ready: state.vm == LifecycleState::Running && state.guest == LifecycleState::Running,
         summary: status_summary(state),
-        services: state.services.clone(),
-        vsock_endpoints: state.vsock_endpoints.clone(),
     }
 }
 
@@ -206,12 +187,6 @@ pub(crate) fn select_current_events(state: &InstanceState) -> Vec<StatusUpdate> 
 
 pub(crate) fn guest_shell_ready(state: &InstanceState) -> bool {
     state.guest == LifecycleState::Running
-        && state
-            .services
-            .iter()
-            .find(|service| service.name == "shell")
-            .map(|service| service.healthy)
-            .unwrap_or(false)
 }
 
 fn reduce_instance_state(current: &InstanceState, action: &Action) -> InstanceState {
@@ -224,22 +199,6 @@ fn reduce_instance_state(current: &InstanceState, action: &Action) -> InstanceSt
         Action::GuestTransition { state, message } => {
             next.guest = *state;
             next.guest_message = message.clone();
-        }
-        Action::SetServices { services } => {
-            next.services = services.clone();
-        }
-        Action::UpsertVsockEndpoint { endpoint } => {
-            if let Some(existing) = next
-                .vsock_endpoints
-                .iter_mut()
-                .find(|item| item.name == endpoint.name)
-            {
-                *existing = endpoint.clone();
-            } else {
-                next.vsock_endpoints.push(endpoint.clone());
-                next.vsock_endpoints
-                    .sort_by(|left, right| left.name.cmp(&right.name));
-            }
         }
     }
 
@@ -256,7 +215,6 @@ fn project_status_update(action: &Action) -> Option<StatusUpdate> {
             *state,
             message.clone(),
         )),
-        Action::SetServices { .. } | Action::UpsertVsockEndpoint { .. } => None,
     }
 }
 
@@ -269,27 +227,5 @@ fn status_summary(state: &InstanceState) -> String {
         return String::from("instance ready");
     }
 
-    let problems = state
-        .services
-        .iter()
-        .filter(|service| service.startup_required)
-        .flat_map(|service| {
-            if service.healthy {
-                Vec::new()
-            } else if service.problems.is_empty() {
-                vec![service.summary.clone()]
-            } else {
-                service.problems.clone()
-            }
-        })
-        .collect::<Vec<_>>();
-
-    if problems.is_empty() {
-        state.guest_message.clone()
-    } else {
-        format!(
-            "startup-required services not ready: {}",
-            problems.join("; ")
-        )
-    }
+    state.guest_message.clone()
 }

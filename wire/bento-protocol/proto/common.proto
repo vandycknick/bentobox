@@ -4,14 +4,6 @@ package bento.v1;
 
 message Empty {}
 
-message ServiceHealth {
-  string name = 1;
-  bool startup_required = 2;
-  bool healthy = 3;
-  string summary = 4;
-  repeated string problems = 5;
-}
-
 message SystemInfo {
   string kernel_version = 1;
   string os_name = 2;
@@ -24,25 +16,4 @@ message SystemInfo {
   string hostname = 9;
   uint64 uptime = 10;
   repeated string ip_addresses = 11;
-}
-
-enum VsockEndpointKind {
-  VSOCK_ENDPOINT_KIND_UNSPECIFIED = 0;
-  VSOCK_ENDPOINT_KIND_CONNECT = 1;
-  VSOCK_ENDPOINT_KIND_LISTEN = 2;
-}
-
-message VsockEndpointDescriptor {
-  string name = 1;
-  VsockEndpointKind kind = 2;
-  uint32 port = 3;
-}
-
-message VsockEndpointStatus {
-  string name = 1;
-  VsockEndpointKind kind = 2;
-  uint32 port = 3;
-  bool active = 4;
-  string summary = 5;
-  repeated string problems = 6;
 }

@@ -124,7 +124,7 @@ impl Cmd {
             initramfs: boot_assets.initramfs,
             disk_size_bytes: resolved.disk_size_bytes,
             nested_virtualization: resolved.nested_virtualization,
-            agent: resolved.ssh_enabled,
+            agent: true,
             rosetta: resolved.rosetta,
             userdata: resolved.userdata,
             disks: resolved.disks,
@@ -153,7 +153,6 @@ impl Cmd {
         let mut mounts = Vec::new();
         let mut image_ref;
         let mut network = RequestedNetwork::default();
-        let mut ssh_enabled = true;
         let mut userdata = None;
         let mut cpus = None;
         let mut memory_mib = None;
@@ -164,12 +163,6 @@ impl Cmd {
             let named = store.resolve(&profile_name)?;
             image_ref = named.profile.image.clone();
             network = named.profile.requested_network();
-            ssh_enabled = named
-                .profile
-                .ssh
-                .as_ref()
-                .map(|ssh| ssh.enabled)
-                .unwrap_or(true);
             userdata = named.profile.userdata.clone();
             cpus = named.profile.cpus();
             memory_mib = named.profile.memory_mib()?;
@@ -212,7 +205,6 @@ impl Cmd {
             metadata,
             mounts,
             network,
-            ssh_enabled: ssh_enabled || self.overrides.agent,
             userdata,
             cpus: self.overrides.cpus.or(cpus),
             memory_mib: self.overrides.memory_mib()?.or(memory_mib),
@@ -249,7 +241,6 @@ struct ResolvedCreate {
     metadata: BTreeMap<String, String>,
     mounts: Vec<Mount>,
     network: RequestedNetwork,
-    ssh_enabled: bool,
     userdata: Option<String>,
     cpus: Option<u8>,
     memory_mib: Option<u32>,

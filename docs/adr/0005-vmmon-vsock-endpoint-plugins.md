@@ -154,27 +154,18 @@ flowchart TD
 
 ### Runtime reporting
 
-`InspectResponse.vsock_endpoints` reports runtime vsock endpoint health only. It does not expose the full configured endpoint specification.
+`InspectResponse` does not expose per-endpoint runtime health.
 
-Endpoint status is summarized by the plugin protocol and projected into monitor state.
-
-Endpoint runtime status does not change the existing meaning of instance readiness:
+Endpoint supervision does not change the existing meaning of instance readiness:
 
 - `PingResponse.ok` remains driven by VM and guest readiness,
 - `InspectResponse.ready` remains driven by VM and guest readiness.
 
-Endpoint failures are visible through endpoint status, not by redefining overall instance readiness.
+Endpoint failures are handled by `vmmon` supervision, restart policy, and logs, not by redefining overall instance readiness.
 
 ### Protocol ownership
 
-The runtime reporting contract in `bento-protocol` becomes the source of truth for endpoint status returned by `InspectResponse`.
-
-The protocol enum `VsockEndpointKind` is used for runtime reporting. It is distinct from config-time `VsockEndpointMode`.
-
-For this ADR, `VsockEndpointKind` is defined in terms of endpoint runtime type:
-
-- `VSOCK_ENDPOINT_KIND_CONNECT`
-- `VSOCK_ENDPOINT_KIND_LISTEN`
+`bento-protocol` does not define a runtime endpoint status model. The configured endpoint model remains owned by `bento-core` and the monitor only reports overall instance lifecycle state.
 
 ### Scope of first implementation
 
@@ -190,19 +181,18 @@ This ADR does not require every host virtualization driver to expose `listen_vso
 - Plugins can be written against one small API with no driver-specific logic.
 - `vmmon` avoids becoming a per-byte relay in the hot data path.
 - One plugin process can serve multiple guest streams in both `connect` and `listen` mode.
-- Endpoint health becomes visible in monitor status without overloading guest-service readiness.
+- Plugin startup failures stay isolated from core VM lifecycle readiness.
 
 ### Negative
 
 - `vmmon` gains process supervision logic for plugins.
 - `vmmon` must own fd hygiene, child process setup, restart policy, and stdout protocol parsing.
-- `bento-protocol` must change to reflect the actual endpoint runtime model instead of carrying stale endpoint fields.
 - Plugins must correctly handle raw nonblocking stream fds.
 
 ### Constraints
 
 - The plugin API must stay driver-agnostic.
-- Endpoint runtime health must stay separate from instance readiness.
+- Endpoint supervision must stay separate from instance readiness.
 - The first implementation must work on macOS without depending on unfinished Linux listener plumbing.
 
 ## Appendix A: Config Schema
@@ -342,30 +332,7 @@ Required events:
 { "event": "failed", "message": "string" }
 ```
 
-Optional events:
-
-```json
-{ "event": "healthy" }
-```
-
-```json
-{ "event": "degraded", "message": "string" }
-```
-
-```json
-{ "event": "stopping", "message": "string" }
-```
-
-```json
-{
-  "event": "vsock_endpoint_status",
-  "active": true,
-  "summary": "string",
-  "problems": ["string"]
-}
-```
-
-The `vsock_endpoint_status` event is the plugin's way to report its current runtime state into `InspectResponse.vsock_endpoints`.
+No runtime status events are currently part of the plugin stdout protocol.
 
 ### fd 3 semantics
 
@@ -425,7 +392,6 @@ use bento_plugins::Plugin;
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let plugin = Plugin::init("hello-world").await?;
-    plugin.status(true, "hello-world ready", &[])?;
 
     loop {
         let stream = plugin.accept().await?;
@@ -461,37 +427,6 @@ That contract is compatible with the macOS-first implementation and with future 
 
 ## Appendix C: Runtime Reporting
 
-`InspectResponse.vsock_endpoints` returns a high-level runtime view, not the full configured endpoint definition.
+There is no per-endpoint runtime status schema in `InspectResponse`.
 
-The runtime protocol shape is:
-
-```proto
-enum VsockEndpointKind {
-  VSOCK_ENDPOINT_KIND_UNSPECIFIED = 0;
-  VSOCK_ENDPOINT_KIND_CONNECT = 1;
-  VSOCK_ENDPOINT_KIND_LISTEN = 2;
-}
-
-message VsockEndpointStatus {
-  string name = 1;
-  VsockEndpointKind kind = 2;
-  uint32 port = 3;
-  bool active = 4;
-  string summary = 5;
-  repeated string problems = 6;
-}
-```
-
-`vmmon` owns the static runtime fields:
-
-- `name`
-- `kind`
-- `port`
-
-Plugins own the dynamic runtime fields through stdout events:
-
-- `active`
-- `summary`
-- `problems`
-
-This reporting is additive and informational. It does not redefine the existing VM or guest lifecycle states.
+`vmmon` owns endpoint supervision internally and treats plugin readiness/failure events as process-supervision inputs. Scripts that need endpoint definitions should read the VM spec, not monitor inspection output.

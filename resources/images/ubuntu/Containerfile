@@ -22,17 +22,12 @@ RUN apt update && \
         /var/tmp/*
 
 RUN systemctl enable \
-    ssh.service \
     systemd-networkd.service \
     systemd-timesyncd.service \
     systemd-resolved.service
 
-# RUN ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf \
-#   && passwd -d root && passwd -u root || true \
-#   && rm -f /etc/machine-id \
-#   && touch /etc/machine-id \
-#   && cloud-init clean --logs --machine-id || true
-
-RUN (passwd -d root && passwd -u root || true) \
+RUN \
+  printf 'L+ /etc/resolv.conf - - - - /run/systemd/resolve/stub-resolv.conf\n' > /etc/tmpfiles.d/resolv.conf \
+  && (passwd -d root && passwd -u root || true) \
   && rm -f /etc/machine-id /var/lib/dbus/machine-id \
   && touch /etc/machine-id

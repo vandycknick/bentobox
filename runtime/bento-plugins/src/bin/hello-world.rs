@@ -12,7 +12,6 @@ use hyper_util::rt::TokioIo;
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let plugin = Plugin::init("hello-world").await?;
-    plugin.status(true, "hello-world ready", &[])?;
 
     loop {
         let stream = plugin.accept().await?;

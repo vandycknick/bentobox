@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bento_core::{RestartPolicy, VsockEndpointMode, VsockEndpointSpec};
-use bento_protocol::v1::{VsockEndpointKind, VsockEndpointStatus};
 use nix::errno::Errno;
 use nix::sys::socket::{
     recvmsg, sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType,
@@ -20,7 +19,6 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::context::DaemonContext;
-use crate::state::Action;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const STABLE_RUN_RESET: Duration = Duration::from_secs(30);
@@ -33,11 +31,6 @@ pub(crate) fn start_endpoint_supervisor(
 ) -> Option<JoinHandle<()>> {
     if ctx.spec.vsock_endpoints.is_empty() {
         return None;
-    }
-
-    for endpoint in &ctx.spec.vsock_endpoints {
-        ctx.store
-            .dispatch(Action::upsert_vsock_endpoint(base_status(endpoint)));
     }
 
     Some(tokio::spawn(async move {
@@ -82,7 +75,6 @@ async fn supervise_endpoint(
 
     loop {
         if ctx.shutdown.is_cancelled() {
-            set_endpoint_status(&ctx, &endpoint, false, "stopped", Vec::new());
             return;
         }
 
@@ -104,7 +96,6 @@ async fn supervise_endpoint(
 
         match &outcome {
             EndpointOutcome::Shutdown => {
-                set_endpoint_status(&ctx, &endpoint, false, "stopped", Vec::new());
                 return;
             }
             EndpointOutcome::ExitedCleanly => {
@@ -114,7 +105,6 @@ async fn supervise_endpoint(
                     port = endpoint.port,
                     "endpoint plugin exited cleanly"
                 );
-                set_endpoint_status(&ctx, &endpoint, false, "plugin exited", Vec::new());
             }
             EndpointOutcome::Failed(message) => {
                 tracing::error!(
@@ -124,7 +114,6 @@ async fn supervise_endpoint(
                     error = %message,
                     "endpoint failed"
                 );
-                set_endpoint_status(&ctx, &endpoint, false, message, vec![message.clone()]);
             }
         }
 
@@ -145,7 +134,6 @@ async fn supervise_endpoint(
 
         tokio::select! {
             _ = ctx.shutdown.cancelled() => {
-                set_endpoint_status(&ctx, &endpoint, false, "stopped", Vec::new());
                 return;
             }
             _ = tokio::time::sleep(backoff) => {}
@@ -280,55 +268,41 @@ async fn wait_for_plugin_ready(
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
 
-    loop {
-        tokio::select! {
-            _ = ctx.shutdown.cancelled() => {
-                let _ = terminate_plugin(&mut plugin.child).await;
-                return Err(EndpointOutcome::Shutdown);
-            }
-            _ = &mut deadline => {
-                let _ = terminate_plugin(&mut plugin.child).await;
-                return Err(EndpointOutcome::Failed(format!("plugin did not become ready within {timeout:?}")));
-            }
-            status = plugin.child.wait() => {
-                return Err(child_exit_outcome(status));
-            }
-            event = plugin.events.recv() => {
-                match event {
-                    Some(PluginEvent::Ready) => {
-                        tracing::info!(
-                            endpoint = %endpoint.name,
-                            mode = %endpoint_mode_name(endpoint.mode),
-                            port = endpoint.port,
-                            "endpoint plugin ready"
-                        );
-                        return Ok(());
-                    }
-                    Some(PluginEvent::Failed(message)) => {
-                        tracing::error!(
-                            endpoint = %endpoint.name,
-                            mode = %endpoint_mode_name(endpoint.mode),
-                            port = endpoint.port,
-                            plugin_message = %message,
-                            "endpoint plugin reported failure"
-                        );
-                        let _ = terminate_plugin(&mut plugin.child).await;
-                        return Err(EndpointOutcome::Failed(message));
-                    }
-                    Some(PluginEvent::VsockEndpointStatus { active, summary, problems }) => {
-                        set_endpoint_status(ctx, endpoint, active, &summary, problems);
-                    }
-                    Some(PluginEvent::Healthy) => {
-                        set_endpoint_status(ctx, endpoint, false, "healthy", Vec::new());
-                    }
-                    Some(PluginEvent::Degraded(message)) => {
-                        set_endpoint_status(ctx, endpoint, false, &message, vec![message.clone()]);
-                    }
-                    Some(PluginEvent::Stopping(message)) => {
-                        set_endpoint_status(ctx, endpoint, false, &message, vec![message.clone()]);
-                    }
-                    None => return Err(EndpointOutcome::Failed("plugin stdout closed before ready".to_string())),
+    tokio::select! {
+        _ = ctx.shutdown.cancelled() => {
+            let _ = terminate_plugin(&mut plugin.child).await;
+            Err(EndpointOutcome::Shutdown)
+        }
+        _ = &mut deadline => {
+            let _ = terminate_plugin(&mut plugin.child).await;
+            Err(EndpointOutcome::Failed(format!("plugin did not become ready within {timeout:?}")))
+        }
+        status = plugin.child.wait() => {
+            Err(child_exit_outcome(status))
+        }
+        event = plugin.events.recv() => {
+            match event {
+                Some(PluginEvent::Ready) => {
+                    tracing::info!(
+                        endpoint = %endpoint.name,
+                        mode = %endpoint_mode_name(endpoint.mode),
+                        port = endpoint.port,
+                        "endpoint plugin ready"
+                    );
+                    Ok(())
                 }
+                Some(PluginEvent::Failed(message)) => {
+                    tracing::error!(
+                        endpoint = %endpoint.name,
+                        mode = %endpoint_mode_name(endpoint.mode),
+                        port = endpoint.port,
+                        plugin_message = %message,
+                        "endpoint plugin reported failure"
+                    );
+                    let _ = terminate_plugin(&mut plugin.child).await;
+                    Err(EndpointOutcome::Failed(message))
+                }
+                None => Err(EndpointOutcome::Failed("plugin stdout closed before ready".to_string())),
             }
         }
     }
@@ -353,7 +327,7 @@ async fn run_plugin_event_loop(
                 return child_exit_outcome(status);
             }
             event = plugin.events.recv() => {
-                if let Some(outcome) = handle_plugin_event(ctx, endpoint, event) {
+                if let Some(outcome) = handle_plugin_event(endpoint, event) {
                     stop_control_task(&mut broker).await;
                     if !matches!(outcome, EndpointOutcome::ExitedCleanly) {
                         let _ = terminate_plugin(&mut plugin.child).await;
@@ -401,7 +375,6 @@ async fn await_broker(broker: &mut Option<JoinHandle<Result<(), String>>>) -> Re
 }
 
 fn handle_plugin_event(
-    ctx: &DaemonContext,
     endpoint: &VsockEndpointSpec,
     event: Option<PluginEvent>,
 ) -> Option<EndpointOutcome> {
@@ -416,26 +389,6 @@ fn handle_plugin_event(
                 "endpoint plugin reported failure"
             );
             Some(EndpointOutcome::Failed(message))
-        }
-        Some(PluginEvent::VsockEndpointStatus {
-            active,
-            summary,
-            problems,
-        }) => {
-            set_endpoint_status(ctx, endpoint, active, &summary, problems);
-            None
-        }
-        Some(PluginEvent::Healthy) => {
-            set_endpoint_status(ctx, endpoint, false, "healthy", Vec::new());
-            None
-        }
-        Some(PluginEvent::Degraded(message)) => {
-            set_endpoint_status(ctx, endpoint, false, &message, vec![message.clone()]);
-            None
-        }
-        Some(PluginEvent::Stopping(message)) => {
-            set_endpoint_status(ctx, endpoint, false, &message, vec![message.clone()]);
-            None
         }
         None => Some(EndpointOutcome::Failed(
             "plugin stdout closed unexpectedly".to_string(),
@@ -702,38 +655,6 @@ async fn run_listen_dispatch(
                 );
             }
         }
-    }
-}
-
-fn base_status(endpoint: &VsockEndpointSpec) -> VsockEndpointStatus {
-    VsockEndpointStatus {
-        name: endpoint.name.clone(),
-        kind: endpoint_kind(endpoint.mode) as i32,
-        port: endpoint.port,
-        active: false,
-        summary: String::new(),
-        problems: Vec::new(),
-    }
-}
-
-fn set_endpoint_status(
-    ctx: &DaemonContext,
-    endpoint: &VsockEndpointSpec,
-    active: bool,
-    summary: impl Into<String>,
-    problems: Vec<String>,
-) {
-    let mut status = base_status(endpoint);
-    status.active = active;
-    status.summary = summary.into();
-    status.problems = problems;
-    ctx.store.dispatch(Action::upsert_vsock_endpoint(status));
-}
-
-fn endpoint_kind(mode: VsockEndpointMode) -> VsockEndpointKind {
-    match mode {
-        VsockEndpointMode::Connect => VsockEndpointKind::Connect,
-        VsockEndpointMode::Listen => VsockEndpointKind::Listen,
     }
 }
 
@@ -1063,23 +984,7 @@ fn nix_errno_to_io_error(err: Errno) -> io::Error {
 #[serde(tag = "event", rename_all = "snake_case")]
 enum PluginStdoutEvent {
     Ready,
-    Failed {
-        message: String,
-    },
-    Healthy,
-    Degraded {
-        message: String,
-    },
-    Stopping {
-        message: String,
-    },
-    VsockEndpointStatus {
-        active: bool,
-        #[serde(default)]
-        summary: String,
-        #[serde(default)]
-        problems: Vec<String>,
-    },
+    Failed { message: String },
 }
 
 impl From<PluginStdoutEvent> for PluginEvent {
@@ -1087,18 +992,6 @@ impl From<PluginStdoutEvent> for PluginEvent {
         match value {
             PluginStdoutEvent::Ready => Self::Ready,
             PluginStdoutEvent::Failed { message } => Self::Failed(message),
-            PluginStdoutEvent::Healthy => Self::Healthy,
-            PluginStdoutEvent::Degraded { message } => Self::Degraded(message),
-            PluginStdoutEvent::Stopping { message } => Self::Stopping(message),
-            PluginStdoutEvent::VsockEndpointStatus {
-                active,
-                summary,
-                problems,
-            } => Self::VsockEndpointStatus {
-                active,
-                summary,
-                problems,
-            },
         }
     }
 }
@@ -1107,14 +1000,6 @@ impl From<PluginStdoutEvent> for PluginEvent {
 enum PluginEvent {
     Ready,
     Failed(String),
-    Healthy,
-    Degraded(String),
-    Stopping(String),
-    VsockEndpointStatus {
-        active: bool,
-        summary: String,
-        problems: Vec<String>,
-    },
 }
 
 fn endpoint_mode_name(mode: VsockEndpointMode) -> &'static str {
@@ -1129,28 +1014,5 @@ fn restart_policy_name(policy: RestartPolicy) -> &'static str {
         RestartPolicy::Never => "never",
         RestartPolicy::OnFailure => "on_failure",
         RestartPolicy::Always => "always",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PluginStdoutEvent;
-
-    #[test]
-    fn parse_vsock_endpoint_status_event() {
-        let raw = r#"{"event":"vsock_endpoint_status","active":true,"summary":"ready","problems":["none"]}"#;
-        let event: PluginStdoutEvent = serde_json::from_str(raw).expect("event should parse");
-        match event {
-            PluginStdoutEvent::VsockEndpointStatus {
-                active,
-                summary,
-                problems,
-            } => {
-                assert!(active);
-                assert_eq!(summary, "ready");
-                assert_eq!(problems, vec!["none"]);
-            }
-            _ => panic!("expected vsock_endpoint_status event"),
-        }
     }
 }

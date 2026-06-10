@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub const DEFAULT_AGENT_TIMEOUT_SECONDS: u64 = 60 * 5;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmSpec {
     pub version: u32,
@@ -171,7 +173,31 @@ pub struct Settings {
     pub nested_virtualization: bool,
     pub rosetta: bool,
     #[serde(default)]
-    pub agent: bool,
+    pub agent: AgentSettings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_agent_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub config: String,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            timeout_seconds: default_agent_timeout_seconds(),
+            config: String::new(),
+        }
+    }
+}
+
+const fn default_agent_timeout_seconds() -> u64 {
+    DEFAULT_AGENT_TIMEOUT_SECONDS
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,9 +216,9 @@ pub enum Architecture {
 #[cfg(test)]
 mod tests {
     use super::{
-        Architecture, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, GuestOs, LifecycleSpec, Mount,
-        Platform, PluginSpec, Resources, RestartPolicy, Settings, Storage, VmSpec,
-        VsockEndpointMode, VsockEndpointSpec,
+        AgentSettings, Architecture, BackoffSpec, Boot, Bootstrap, Disk, DiskKind, GuestOs,
+        LifecycleSpec, Mount, Platform, PluginSpec, Resources, RestartPolicy, Settings, Storage,
+        VmSpec, VsockEndpointMode, VsockEndpointSpec,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -259,7 +285,11 @@ mod tests {
             settings: Settings {
                 nested_virtualization: false,
                 rosetta: true,
-                agent: true,
+                agent: AgentSettings {
+                    enabled: true,
+                    config: "{\"demo\":true}".to_string(),
+                    ..AgentSettings::default()
+                },
             },
         }
     }
@@ -283,7 +313,10 @@ mod tests {
         assert!(yaml.contains("kind: root"));
         assert!(yaml.contains("kind: data"));
         assert!(yaml.contains("vsock_endpoints:"));
-        assert!(yaml.contains("agent: true"));
+        assert!(yaml.contains("agent:"));
+        assert!(yaml.contains("enabled: true"));
+        assert!(yaml.contains("timeout_seconds: 300"));
+        assert!(yaml.contains("config:"));
         assert!(yaml.contains("userdata:"));
         assert!(!yaml.contains("network:"));
         assert!(!yaml.contains("name: dev"));
@@ -319,7 +352,9 @@ settings:
 
         let decoded: VmSpec = serde_yaml_ng::from_str(yaml).expect("deserialize vm spec");
         assert!(decoded.vsock_endpoints.is_empty());
-        assert!(!decoded.settings.agent);
+        assert!(!decoded.settings.agent.enabled);
+        assert_eq!(decoded.settings.agent.timeout_seconds, 300);
+        assert!(decoded.settings.agent.config.is_empty());
     }
 
     #[test]
@@ -351,6 +386,6 @@ guest:
 
         let decoded =
             serde_yaml_ng::from_str::<VmSpec>(yaml).expect("unknown fields should be ignored");
-        assert!(!decoded.settings.agent);
+        assert!(!decoded.settings.agent.enabled);
     }
 }
