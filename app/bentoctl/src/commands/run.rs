@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::time::Duration;
 
-use bento_core::Mount;
+use bento_agent_spec::DEFAULT_AGENT_TIMEOUT_SECONDS;
 use bento_libvm::{CreateMachineRequest, LibVm, MachineRef, RequestedNetwork};
+use bento_vm_spec::Mount;
 use clap::Args;
 
 use crate::commands::create::{
@@ -85,11 +86,11 @@ impl Cmd {
         let machine = libvm.create_from_base_image(request).await?;
         let machine_ref = MachineRef::Id(machine.id);
         let machine = libvm.start(&machine_ref).await?;
-        if machine.spec.settings.agent.enabled {
+        if machine.agent_enabled() {
             libvm
                 .wait_for_guest_running(
                     &machine_ref,
-                    Duration::from_secs(machine.spec.settings.agent.timeout_seconds),
+                    Duration::from_secs(DEFAULT_AGENT_TIMEOUT_SECONDS),
                 )
                 .await
                 .map_err(|err| eyre::eyre!("guest readiness check failed: {err}"))?;

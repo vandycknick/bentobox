@@ -1,6 +1,6 @@
-use bento_core::Mount;
 use bento_libvm::{CreateMachineRequest, LibVm, MachineRef, RequestedNetwork};
 use bento_utils::HumanSize;
+use bento_vm_spec::Mount;
 use clap::Args;
 use eyre::Context;
 use std::collections::BTreeMap;

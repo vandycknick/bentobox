@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_core::agent::{ForwardApiRequest, ForwardApiResponse, ForwardStreamRequest};
+use bento_agent_spec::{ForwardApiRequest, ForwardApiResponse, ForwardStreamRequest};
 use bento_plugins::Plugin;
 use serde::Deserialize;
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

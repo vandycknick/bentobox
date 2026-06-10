@@ -6,6 +6,7 @@ use clap::Parser;
 mod agent;
 mod context;
 mod endpoints;
+mod ext;
 mod lock;
 mod machine;
 mod net;
@@ -35,6 +36,9 @@ struct Args {
 
     #[arg(long = "config")]
     config: PathBuf,
+
+    #[arg(long = "agent-config")]
+    agent_config: Option<PathBuf>,
 
     #[arg(long = "socket")]
     socket: PathBuf,
@@ -112,6 +116,7 @@ async fn run(args: Args, start_gate: StartGate, sync_reporter: SyncReporter) -> 
         &args.id,
         &args.name,
         &args.network,
+        args.agent_config.as_deref(),
         &mut start_gate,
     )
     .await
@@ -159,8 +164,11 @@ fn daemonize(args: &Args, inherited_fds: InheritedPipeFds) -> eyre::Result<()> {
         .arg("--pidfile")
         .arg(&args.pidfile)
         .arg("--config")
-        .arg(&args.config)
-        .arg("--socket")
+        .arg(&args.config);
+    if let Some(agent_config) = &args.agent_config {
+        cmd.arg("--agent-config").arg(agent_config);
+    }
+    cmd.arg("--socket")
         .arg(&args.socket)
         .arg("--serial-log")
         .arg(&args.serial_log)

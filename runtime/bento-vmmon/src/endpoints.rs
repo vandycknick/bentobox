@@ -6,7 +6,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_core::{RestartPolicy, VsockEndpointMode, VsockEndpointSpec};
+use bento_vm_spec::{RestartPolicy, VsockEndpoint, VsockEndpointMode};
 use nix::errno::Errno;
 use nix::sys::socket::{
     recvmsg, sendmsg, socketpair, AddressFamily, ControlMessage, MsgFlags, SockFlag, SockType,
@@ -29,13 +29,19 @@ pub(crate) fn start_endpoint_supervisor(
     ctx: DaemonContext,
     instance_dir: PathBuf,
 ) -> Option<JoinHandle<()>> {
-    if ctx.spec.vsock_endpoints.is_empty() {
+    let endpoints = ctx
+        .spec
+        .vsock
+        .as_ref()
+        .map(|vsock| vsock.endpoints.clone())
+        .unwrap_or_default();
+    if endpoints.is_empty() {
         return None;
     }
 
     Some(tokio::spawn(async move {
         let mut handles = Vec::new();
-        for endpoint in ctx.spec.vsock_endpoints.clone() {
+        for endpoint in endpoints {
             if !endpoint.lifecycle.autostart {
                 continue;
             }
@@ -57,11 +63,7 @@ pub(crate) fn start_endpoint_supervisor(
     }))
 }
 
-async fn supervise_endpoint(
-    ctx: DaemonContext,
-    instance_dir: PathBuf,
-    endpoint: VsockEndpointSpec,
-) {
+async fn supervise_endpoint(ctx: DaemonContext, instance_dir: PathBuf, endpoint: VsockEndpoint) {
     let mut backoff = endpoint_backoff_initial(&endpoint);
 
     tracing::info!(
@@ -155,7 +157,7 @@ async fn supervise_endpoint(
 async fn run_connect_endpoint(
     ctx: &DaemonContext,
     instance_dir: &Path,
-    endpoint: &VsockEndpointSpec,
+    endpoint: &VsockEndpoint,
 ) -> EndpointOutcome {
     let (control_parent, mut plugin) = match start_endpoint_plugin(instance_dir, endpoint) {
         Ok(value) => value,
@@ -184,7 +186,7 @@ async fn run_connect_endpoint(
 async fn run_listen_endpoint(
     ctx: &DaemonContext,
     instance_dir: &Path,
-    endpoint: &VsockEndpointSpec,
+    endpoint: &VsockEndpoint,
 ) -> EndpointOutcome {
     let listener = match ctx.machine.listen_vsock(endpoint.port).await {
         Ok(listener) => listener,
@@ -217,7 +219,7 @@ async fn run_listen_endpoint(
 
 fn start_endpoint_plugin(
     instance_dir: &Path,
-    endpoint: &VsockEndpointSpec,
+    endpoint: &VsockEndpoint,
 ) -> Result<(OwnedFd, RunningPlugin), EndpointOutcome> {
     let (control_parent, control_child) = match socketpair(
         AddressFamily::Unix,
@@ -261,7 +263,7 @@ fn start_endpoint_plugin(
 
 async fn wait_for_plugin_ready(
     ctx: &DaemonContext,
-    endpoint: &VsockEndpointSpec,
+    endpoint: &VsockEndpoint,
     plugin: &mut RunningPlugin,
 ) -> Result<(), EndpointOutcome> {
     let timeout = Duration::from_millis(endpoint.lifecycle.startup_timeout_ms);
@@ -310,7 +312,7 @@ async fn wait_for_plugin_ready(
 
 async fn run_plugin_event_loop(
     ctx: &DaemonContext,
-    endpoint: &VsockEndpointSpec,
+    endpoint: &VsockEndpoint,
     plugin: &mut RunningPlugin,
     broker: Option<JoinHandle<Result<(), String>>>,
 ) -> EndpointOutcome {
@@ -375,7 +377,7 @@ async fn await_broker(broker: &mut Option<JoinHandle<Result<(), String>>>) -> Re
 }
 
 fn handle_plugin_event(
-    endpoint: &VsockEndpointSpec,
+    endpoint: &VsockEndpoint,
     event: Option<PluginEvent>,
 ) -> Option<EndpointOutcome> {
     match event {
@@ -397,7 +399,7 @@ fn handle_plugin_event(
 }
 
 fn spawn_plugin(
-    endpoint: &VsockEndpointSpec,
+    endpoint: &VsockEndpoint,
     fd3: OwnedFd,
     startup: &StartupMessage,
 ) -> io::Result<RunningPlugin> {
@@ -516,7 +518,7 @@ async fn terminate_plugin(child: &mut Child) -> io::Result<()> {
 
 async fn send_incoming_conn_with_retry(
     ctx: &DaemonContext,
-    endpoint: &VsockEndpointSpec,
+    endpoint: &VsockEndpoint,
     control: &OwnedFd,
     conn_fd: OwnedFd,
     conn_id: u64,
@@ -545,7 +547,7 @@ async fn send_incoming_conn_with_retry(
 
 async fn run_connect_broker(
     ctx: DaemonContext,
-    endpoint: VsockEndpointSpec,
+    endpoint: VsockEndpoint,
     control: OwnedFd,
 ) -> Result<(), String> {
     let control = Arc::new(
@@ -621,7 +623,7 @@ async fn run_connect_broker(
 
 async fn run_listen_dispatch(
     ctx: DaemonContext,
-    endpoint: VsockEndpointSpec,
+    endpoint: VsockEndpoint,
     mut listener: bento_virt::VsockListener,
     control: OwnedFd,
 ) -> Result<(), String> {
@@ -658,11 +660,11 @@ async fn run_listen_dispatch(
     }
 }
 
-fn endpoint_backoff_initial(endpoint: &VsockEndpointSpec) -> Duration {
+fn endpoint_backoff_initial(endpoint: &VsockEndpoint) -> Duration {
     Duration::from_millis(endpoint.lifecycle.backoff_ms.initial)
 }
 
-fn endpoint_backoff_max(endpoint: &VsockEndpointSpec) -> Duration {
+fn endpoint_backoff_max(endpoint: &VsockEndpoint) -> Duration {
     Duration::from_millis(endpoint.lifecycle.backoff_ms.max)
 }
 
@@ -702,7 +704,7 @@ struct StartupMessage {
 }
 
 impl StartupMessage {
-    fn new(endpoint: &VsockEndpointSpec, runtime_dir: PathBuf, fd: i32) -> Self {
+    fn new(endpoint: &VsockEndpoint, runtime_dir: PathBuf, fd: i32) -> Self {
         Self {
             api_version: 1,
             vsock_endpoint: endpoint.name.clone(),

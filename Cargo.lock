@@ -286,7 +286,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 name = "bento-agent"
 version = "0.1.0"
 dependencies = [
- "bento-core",
+ "bento-agent-spec",
  "bento-protocol",
  "eyre",
  "futures",
@@ -305,13 +305,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "bento-core"
+name = "bento-agent-spec"
 version = "0.1.0"
 dependencies = [
  "serde",
- "serde_json",
  "serde_yaml_ng",
- "uuid",
 ]
 
 [[package]]
@@ -386,9 +384,10 @@ dependencies = [
 name = "bento-libvm"
 version = "0.1.0"
 dependencies = [
- "bento-core",
+ "bento-agent-spec",
  "bento-protocol",
  "bento-utils",
+ "bento-vm-spec",
  "eyre",
  "getrandom 0.4.2",
  "hyper-util",
@@ -405,6 +404,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tower",
+ "uuid",
 ]
 
 [[package]]
@@ -429,7 +429,7 @@ dependencies = [
 name = "bento-plugins"
 version = "0.1.0"
 dependencies = [
- "bento-core",
+ "bento-agent-spec",
  "bytes",
  "http-body-util",
  "hyper",
@@ -478,13 +478,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "bento-vm-spec"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "bento-vmmon"
 version = "0.1.0"
 dependencies = [
- "bento-core",
+ "bento-agent-spec",
  "bento-protocol",
  "bento-utils",
  "bento-virt",
+ "bento-vm-spec",
  "clap",
  "eyre",
  "futures",
@@ -493,7 +503,6 @@ dependencies = [
  "nix 0.31.3",
  "serde",
  "serde_json",
- "serde_yaml_ng",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -526,11 +535,12 @@ name = "bentoctl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bento-core",
+ "bento-agent-spec",
  "bento-libvm",
  "bento-ocidisk",
  "bento-protocol",
  "bento-utils",
+ "bento-vm-spec",
  "chrono",
  "clap",
  "eyre",
@@ -4730,6 +4740,7 @@ checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 

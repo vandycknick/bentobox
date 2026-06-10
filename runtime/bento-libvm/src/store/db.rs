@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use bento_core::{MachineId, VmSpec};
+use bento_vm_spec::VmSpec;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::SqlitePool;
 
@@ -14,7 +14,7 @@ use crate::store::wrappers::{
     DbMachine, DbMachineRuntime, DbNetworkAttachment, DbNetworkDefinition, DbNetworkInstance,
 };
 use crate::store::Database;
-use crate::{Layout, LibVmError};
+use crate::{Layout, LibVmError, MachineId};
 
 const MACHINE_COLUMNS: &str =
     "id, name, json(config_json) AS config_json, instance_dir, created_at, modified_at, image_ref, json(labels) AS labels, json(metadata) AS metadata, json(network) AS network";
@@ -436,16 +436,14 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::Path;
 
-    use bento_core::{
-        Architecture, Boot, GuestOs, MachineId, Platform, Resources, Settings, Storage, VmSpec,
-    };
+    use bento_vm_spec::{Hardware, VmSpec};
 
     use crate::models::{
         Machine, MachineRuntime, MachineRuntimeState, NetworkAttachment, NetworkInstance,
         RequestedNetwork,
     };
     use crate::store::{Database, Sqlite};
-    use crate::Layout;
+    use crate::{Layout, MachineId};
 
     fn temp_layout() -> (tempfile::TempDir, Layout) {
         let dir = tempfile::tempdir().expect("create temp dir");
@@ -471,29 +469,13 @@ mod tests {
 
     fn sample_vm_spec() -> VmSpec {
         VmSpec {
-            version: 1,
-            platform: Platform {
-                guest_os: GuestOs::Linux,
-                architecture: Architecture::Aarch64,
-            },
-            resources: Resources {
-                cpus: 2,
-                memory_mib: 1024,
-            },
-            boot: Boot {
-                kernel: None,
-                initramfs: None,
-                kernel_cmdline: Vec::new(),
-                bootstrap: None,
-            },
-            storage: Storage { disks: Vec::new() },
-            mounts: Vec::new(),
-            vsock_endpoints: Vec::new(),
-            settings: Settings {
-                agent: bento_core::AgentSettings::default(),
-                nested_virtualization: false,
-                rosetta: false,
-            },
+            hardware: Some(Hardware {
+                cpus: Some(2),
+                memory: Some(1024),
+                nested_virtualization: Some(false),
+                rosetta: Some(false),
+            }),
+            ..VmSpec::current()
         }
     }
 
@@ -680,7 +662,11 @@ mod tests {
         db.insert_machine(&metadata).await.expect("insert");
 
         let mut updated = metadata.config.clone();
-        updated.resources.cpus = 8;
+        updated
+            .hardware
+            .as_mut()
+            .expect("sample config should include hardware")
+            .cpus = Some(8);
         db.update_machine_config(id, &updated)
             .await
             .expect("update config");
@@ -690,7 +676,15 @@ mod tests {
             .await
             .expect("lookup")
             .expect("machine exists");
-        assert_eq!(found.config.resources.cpus, 8);
+        assert_eq!(
+            found
+                .config
+                .hardware
+                .as_ref()
+                .expect("stored config should include hardware")
+                .cpus,
+            Some(8)
+        );
     }
 
     #[tokio::test]

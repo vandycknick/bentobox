@@ -7,7 +7,6 @@ mod core;
 mod netd_driver;
 mod vznat_driver;
 
-use bento_core::MachineId;
 use serde::{Deserialize, Serialize};
 
 use crate::global_config::GlobalConfig;
@@ -16,7 +15,7 @@ use crate::models::{
     NetworkInstance, RequestedNetwork,
 };
 use crate::store::{Database, Sqlite};
-use crate::{Layout, LibVmError};
+use crate::{Layout, LibVmError, MachineId};
 
 use self::core::{
     NetworkDriver, NetworkDriverContext, NetworkRequest, NetworkScope, PreparedNetwork,

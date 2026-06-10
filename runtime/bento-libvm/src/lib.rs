@@ -6,6 +6,7 @@ pub mod host_user;
 mod instance_file;
 mod launch;
 mod layout;
+mod machine_id;
 mod models;
 mod monitor;
 mod mount_path;
@@ -21,6 +22,7 @@ pub use crate::engine::{CreateMachineRequest, LibVm, MachineRecord};
 pub use crate::error::LibVmError;
 pub use crate::instance_file::InstanceFile;
 pub use crate::layout::{resolve_default_data_dir, Layout, CONFIG_FILE_NAME, STATE_DB_FILE_NAME};
+pub use crate::machine_id::{looks_like_id_prefix, MachineId, MachineIdParseError, SHORT_ID_LEN};
 pub use crate::models::{
     MachineRef, MachineRuntimeState, NamedNetworkMode, NetworkDefinition, NetworkDriverKind,
     NetworkDriverPreference, RequestedNetwork,

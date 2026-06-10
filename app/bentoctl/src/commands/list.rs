@@ -52,8 +52,15 @@ impl Cmd {
         )?;
 
         for machine in machines {
-            let cpus = machine.spec.resources.cpus.to_string();
-            let memory = machine.spec.resources.memory_mib.to_string();
+            let hardware = machine.spec.hardware.as_ref();
+            let cpus = hardware
+                .and_then(|hardware| hardware.cpus)
+                .unwrap_or(1)
+                .to_string();
+            let memory = hardware
+                .and_then(|hardware| hardware.memory)
+                .unwrap_or(512)
+                .to_string();
             let created = relative_time(machine.created_at, now);
             let status = status_label(machine.state, machine.started_at, now);
             let profile = machine

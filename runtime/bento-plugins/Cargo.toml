@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bento-core = { path = "../../common/bento-core" }
+bento-agent-spec = { path = "../../specs/bento-agent-spec" }
 bytes = "1.11.1"
 http-body-util = "0.1.3"
 hyper = { version = "1.9.0", features = ["http1", "server"] }

@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bento_core::VmSpec;
 use bento_virt::{SerialConsole, VirtualMachine};
+use bento_vm_spec::VmSpec;
 use tokio_util::sync::CancellationToken;
 
 use crate::state::InstanceStore;
@@ -45,6 +45,7 @@ impl RuntimeContext {
 #[derive(Clone)]
 pub struct DaemonContext {
     pub(crate) spec: VmSpec,
+    pub(crate) agent_config: Option<String>,
     pub(crate) machine: VirtualMachine,
     pub(crate) serial_console: Arc<SerialConsole>,
     pub(crate) store: Arc<InstanceStore>,

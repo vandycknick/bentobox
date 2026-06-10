@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+/// Default guest readiness timeout used when agent integration is enabled.
+pub const DEFAULT_AGENT_TIMEOUT_SECONDS: u64 = 60 * 5;
+
+/// Default guest SSH vsock port exposed by the Bento agent.
 pub const SSH_VSOCK_PORT: u32 = 22;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -200,7 +204,7 @@ pub enum ForwardApiResponse {
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::{AgentConfig, UserdataContentType, UserdataRunPolicy};
+    use crate::{AgentConfig, UserdataContentType, UserdataRunPolicy};
 
     #[test]
     fn provision_config_defaults_are_safe() {

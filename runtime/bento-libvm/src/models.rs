@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-use bento_core::{looks_like_id_prefix, MachineId, VmSpec};
+use bento_vm_spec::VmSpec;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::{LibVmError, NetworkPolicyRef};
+use crate::{looks_like_id_prefix, LibVmError, MachineId, NetworkPolicyRef};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Machine {
@@ -279,9 +279,8 @@ impl Default for NetworkDefinition {
 
 #[cfg(test)]
 mod tests {
-    use bento_core::MachineId;
-
     use crate::models::{MachineRef, NamedNetworkMode, NetworkDefinition, NetworkDriverPreference};
+    use crate::MachineId;
 
     #[test]
     fn parse_treats_full_uuid_as_machine_id() {

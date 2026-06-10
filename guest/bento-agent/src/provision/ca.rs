@@ -1,4 +1,4 @@
-use bento_core::agent::CertificateAuthorityConfig;
+use bento_agent_spec::CertificateAuthorityConfig;
 
 use crate::provision::{run_command, write_file, ProvisionContext};
 

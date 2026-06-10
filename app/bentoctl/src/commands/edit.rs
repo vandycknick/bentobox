@@ -4,8 +4,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
-use bento_core::VmSpec;
 use bento_libvm::{LibVm, MachineRef};
+use bento_vm_spec::VmSpec;
 use clap::Args;
 use eyre::Context;
 
@@ -40,7 +40,7 @@ impl Cmd {
 
         let raw = std::fs::read_to_string(edit_file.path())
             .with_context(|| format!("read edited config {}", edit_file.path().display()))?;
-        let edited: VmSpec = serde_yaml_ng::from_str(&raw)
+        let edited: VmSpec = serde_json::from_str(&raw)
             .with_context(|| format!("parse edited config {}", edit_file.path().display()))?;
         let updated = libvm.replace_config(&machine_ref, edited).await?;
         println!("updated {}", updated.name);
@@ -60,7 +60,7 @@ impl EditFile {
             .create_new(true)
             .open(&path)
             .with_context(|| format!("create edit file {}", path.display()))?;
-        file.write_all(serde_yaml_ng::to_string(spec)?.as_bytes())?;
+        file.write_all(serde_json::to_string_pretty(spec)?.as_bytes())?;
         file.flush()?;
         Ok(Self { path })
     }
@@ -85,7 +85,7 @@ fn unique_edit_path(name: &str) -> PathBuf {
         })
         .collect::<String>();
     std::env::temp_dir().join(format!(
-        "bento-{safe_name}-{}-{}.yaml",
+        "bento-{safe_name}-{}-{}.json",
         std::process::id(),
         unix_nanos()
     ))

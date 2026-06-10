@@ -1,12 +1,11 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{BorrowedFd, FromRawFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use std::path::PathBuf;
-
-use bento_core::VmSpec;
 use bento_virt::VirtualMachine;
+use bento_vm_spec::VmSpec;
 use eyre::Context;
 use tokio_util::sync::CancellationToken;
 
@@ -130,9 +129,11 @@ pub async fn init(
     machine_id: &str,
     name: &str,
     network_args: &[String],
+    agent_config_path: Option<&Path>,
     start_gate: &mut StartGate,
 ) -> eyre::Result<DaemonContext> {
     let spec = load_spec(runtime)?;
+    let agent_config = load_agent_config(agent_config_path)?;
     let network = parse_network_args(network_args)?;
 
     tracing::info!(instance = %name, "vmmon starting");
@@ -144,6 +145,7 @@ pub async fn init(
         data_dir: runtime.dir(),
         spec: &spec,
         network: &network,
+        agent_enabled: agent_config.is_some(),
     })?;
     let machine = VirtualMachine::new(machine_config.config)?;
     if let Some(machine_identifier) = machine_config.machine_identifier.as_ref() {
@@ -163,6 +165,7 @@ pub async fn init(
 
     Ok(DaemonContext {
         spec,
+        agent_config,
         machine,
         serial_console,
         store,
@@ -173,8 +176,18 @@ pub async fn init(
 fn load_spec(runtime: &RuntimeContext) -> eyre::Result<VmSpec> {
     let raw = std::fs::read_to_string(runtime.config())
         .wrap_err_with(|| format!("read vm spec at {}", runtime.config().display()))?;
-    serde_yaml_ng::from_str(&raw)
+    serde_json::from_str(&raw)
         .map_err(|err| eyre::eyre!("parse vm spec at {}: {}", runtime.config().display(), err))
+}
+
+fn load_agent_config(path: Option<&Path>) -> eyre::Result<Option<String>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+
+    std::fs::read_to_string(path)
+        .map(Some)
+        .wrap_err_with(|| format!("read agent config at {}", path.display()))
 }
 
 fn parse_network_args(values: &[String]) -> eyre::Result<RuntimeNetwork> {

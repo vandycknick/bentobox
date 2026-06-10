@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use bento_core::agent::MountConfig;
+use bento_agent_spec::MountConfig;
 use eyre::{eyre, Context};
 
 use crate::provision::{command_exists, format_error_chain, run_command, ProvisionContext};
@@ -129,7 +129,7 @@ fn read_only_option(options: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use bento_core::agent::MountConfig;
+    use bento_agent_spec::MountConfig;
 
     use crate::provision::mounts::MountInfo;
 

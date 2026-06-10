@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bento-protocol = { path = "../../wire/bento-protocol" }
-bento-core = { path = "../../common/bento-core" }
+bento-agent-spec = { path = "../../specs/bento-agent-spec" }
+bento-protocol = { path = "../../specs/bento-protocol" }
+bento-vm-spec = { path = "../../specs/bento-vm-spec" }
 bento-utils = { path = "../../common/bento-utils" }
 eyre = "0.6.12"
 getrandom = "0.4.2"
@@ -22,6 +23,7 @@ thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["time", "fs", "rt", "net", "io-util", "sync", "macros"] }
 tonic = { version = "0.14.6", features = ["transport"] }
 tower = "0.5.3"
+uuid = { version = "1.19.0", features = ["v4", "serde"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

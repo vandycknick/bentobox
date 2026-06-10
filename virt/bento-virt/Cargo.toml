@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bento-protocol = { path = "../../wire/bento-protocol" }
+bento-protocol = { path = "../../specs/bento-protocol" }
 crossbeam = "0.8.4"
 nix = { version = "0.31.3", features = ["fs", "process", "signal", "socket", "term"] }
 thiserror = "2.0.18"

@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::fs;
 
-use bento_core::agent::{UserdataConfig, UserdataContentType, UserdataRunPolicy};
+use bento_agent_spec::{UserdataConfig, UserdataContentType, UserdataRunPolicy};
 use eyre::Context;
 use sha2::{Digest, Sha256};
 
@@ -80,7 +80,7 @@ fn userdata_content_type_name(content_type: &UserdataContentType) -> &'static st
 
 #[cfg(test)]
 mod tests {
-    use bento_core::agent::{UserdataConfig, UserdataContentType, UserdataRunPolicy};
+    use bento_agent_spec::{UserdataConfig, UserdataContentType, UserdataRunPolicy};
 
     #[test]
     fn userdata_hash_changes_with_content() {

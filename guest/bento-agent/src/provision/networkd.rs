@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
-use bento_core::agent::{NetworkConfig, NetworkInterfaceConfig};
+use bento_agent_spec::{NetworkConfig, NetworkInterfaceConfig};
 use eyre::Context;
 
 use crate::provision::{
@@ -122,7 +122,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::fs;
 
-    use bento_core::agent::{NetworkInterfaceConfig, NetworkMatchConfig};
+    use bento_agent_spec::{NetworkInterfaceConfig, NetworkMatchConfig};
 
     #[test]
     fn renders_networkd_mac_match() {

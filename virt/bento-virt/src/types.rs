@@ -80,8 +80,7 @@ pub struct VmConfig {
     pub rosetta: bool,
     pub network: NetworkMode,
     pub kernel_cmdline: Vec<String>,
-    pub root_disk: Option<DiskImage>,
-    pub data_disks: Vec<DiskImage>,
+    pub disks: Vec<DiskImage>,
     pub mounts: Vec<SharedDirectory>,
     pub vsock_ports: Vec<VsockPort>,
 }
@@ -101,8 +100,7 @@ impl VmConfig {
             rosetta: false,
             network: NetworkMode::None,
             kernel_cmdline: Vec::new(),
-            root_disk: None,
-            data_disks: Vec::new(),
+            disks: Vec::new(),
             mounts: Vec::new(),
             vsock_ports: Vec::new(),
         }
@@ -238,13 +236,8 @@ impl VmConfigBuilder {
         self
     }
 
-    pub fn root_disk(mut self, disk: DiskImage) -> Self {
-        self.config.root_disk = Some(disk);
-        self
-    }
-
     pub fn disk(mut self, disk: DiskImage) -> Self {
-        self.config.data_disks.push(disk);
+        self.config.disks.push(disk);
         self
     }
 

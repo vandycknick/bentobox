@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use bento_core::MachineId;
 use bento_utils::format_mac;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
@@ -16,7 +15,7 @@ use crate::global_config::NetdConfig;
 use crate::layout::resolve_config_dir;
 use crate::models::{Machine, NetworkAttachment, NetworkInstance};
 use crate::store::{Database, Sqlite};
-use crate::{Layout, LibVmError, NetworkPolicyRef};
+use crate::{Layout, LibVmError, MachineId, NetworkPolicyRef};
 
 use super::core::{NetworkDriver, NetworkDriverContext, NetworkRequest, PreparedNetwork};
 use super::{
@@ -419,7 +418,7 @@ mod tests {
     use std::process::Command;
 
     use crate::global_config::NetdConfig;
-    use crate::Layout;
+    use crate::{Layout, MachineId};
 
     #[test]
     fn netd_command_disables_default_ssh_forward() {
@@ -432,7 +431,7 @@ mod tests {
                 log_path: Path::new("/tmp/bento-net/netd.log"),
                 pid_path: Path::new("/tmp/bento-net/netd.pid"),
                 pcap_path: None,
-                machine_id: bento_core::MachineId::new(),
+                machine_id: MachineId::new(),
                 network_id: "net123",
                 policy_path: None,
                 secret_store_path: Path::new("/tmp/bento/secrets.json"),
@@ -452,7 +451,7 @@ mod tests {
     #[test]
     fn netd_command_adds_policy_metadata() {
         let mut command = Command::new("netd");
-        let machine_id = bento_core::MachineId::new();
+        let machine_id = MachineId::new();
         configure_network_helper_command(
             &mut command,
             &NetworkHelperCommandConfig {

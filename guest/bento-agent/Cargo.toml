@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-bento-core = { path = "../../common/bento-core" }
-bento-protocol = { path = "../../wire/bento-protocol" }
+bento-agent-spec = { path = "../../specs/bento-agent-spec" }
+bento-protocol = { path = "../../specs/bento-protocol" }
 eyre = "0.6.12"
 futures = "0.3.32"
 hyper-util = { version = "0.1.20", features = ["tokio"] }

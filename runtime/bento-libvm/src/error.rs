@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
-use bento_core::MachineId;
 use thiserror::Error;
+
+use crate::MachineId;
 
 #[derive(Debug, Error)]
 pub enum LibVmError {
@@ -59,7 +60,7 @@ pub enum LibVmError {
     VmSpecSerializeFailed {
         name: String,
         #[source]
-        source: serde_yaml_ng::Error,
+        source: serde_json::Error,
     },
 
     #[error("failed to load VmSpec for machine {id} from {path}")]
@@ -67,7 +68,7 @@ pub enum LibVmError {
         id: MachineId,
         path: PathBuf,
         #[source]
-        source: serde_yaml_ng::Error,
+        source: serde_json::Error,
     },
 
     #[error("ambiguous machine id prefix {prefix:?} matched {count} machines")]

@@ -1,7 +1,6 @@
 use std::error::Error;
 use std::str::FromStr;
 
-use bento_core::MachineId;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row};
 
@@ -9,6 +8,7 @@ use crate::models::{
     Machine, MachineRuntime, MachineRuntimeState, NetworkAttachment, NetworkDefinition,
     NetworkDriverPreference, NetworkInstance,
 };
+use crate::MachineId;
 
 pub(crate) struct DbMachine(pub(crate) Machine);
 pub(crate) struct DbMachineRuntime(pub(crate) MachineRuntime);

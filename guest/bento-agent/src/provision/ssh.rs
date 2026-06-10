@@ -1,7 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-use bento_core::agent::UserConfig;
+use bento_agent_spec::UserConfig;
 use eyre::Context;
 
 use crate::provision::{command_exists, run_command, write_file, ProvisionContext};

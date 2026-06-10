@@ -1,10 +1,10 @@
-use bento_core::{MachineId, VmSpec};
+use bento_vm_spec::VmSpec;
 
 use crate::models::{
     Machine, MachineRuntime, NetworkAttachment, NetworkDefinition, NetworkInstance,
     RequestedNetwork,
 };
-use crate::LibVmError;
+use crate::{LibVmError, MachineId};
 
 pub(crate) trait Database: Sized + Clone + Send + Sync + 'static {
     type Settings: std::fmt::Debug + Clone + Send + Sync + 'static;

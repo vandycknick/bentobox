@@ -1,14 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use bento_core::agent::{
+use bento_agent_spec::{
     AgentConfig, AgentForwardConfig, AgentRosettaConfig, AgentUdsForwardConfig,
     CertificateAuthorityConfig, MountConfig as ProvisionMountConfig,
     NetworkConfig as ProvisionNetworkConfig, NetworkInterfaceConfig, NetworkMatchConfig,
     ProvisionConfig, ResizeRootfsConfig, UserConfig, UserdataConfig, UserdataContentType,
     UserdataRunPolicy,
 };
-use bento_core::VmSpec;
 use bento_utils::format_mac;
+use bento_vm_spec::{Boot, Kernel, VmSpec};
 use eyre::Context;
 use serde::Deserialize;
 
@@ -41,9 +41,10 @@ pub(crate) fn prepare_instance_runtime(
     name: &str,
     spec: &mut VmSpec,
     network: &RuntimeNetwork,
+    agent_enabled: bool,
 ) -> eyre::Result<()> {
     normalize_runtime_mounts(spec)?;
-    prepare_runtime_initramfs(layout, instance_dir, name, spec, network)?;
+    prepare_runtime_initramfs(layout, instance_dir, name, spec, network, agent_enabled)?;
     write_vm_spec_to_dir(instance_dir, spec)?;
 
     Ok(())
@@ -68,28 +69,46 @@ fn normalize_runtime_mounts(spec: &mut VmSpec) -> eyre::Result<()> {
 
 fn write_vm_spec_to_dir(instance_dir: &Path, spec: &VmSpec) -> eyre::Result<()> {
     let config_path = instance_dir.join(InstanceFile::Config.as_str());
-    let config = serde_yaml_ng::to_string(spec)
+    let config = serde_json::to_string_pretty(spec)
         .with_context(|| format!("serialize vm spec at {}", config_path.display()))?;
     std::fs::write(&config_path, config)
         .with_context(|| format!("write vm spec at {}", config_path.display()))
 }
 
+fn write_agent_config_to_dir(instance_dir: &Path, config: &AgentConfig) -> eyre::Result<()> {
+    let config_path = instance_dir.join(InstanceFile::AgentConfig.as_str());
+    let rendered = render_agent_config(config)?;
+    std::fs::write(&config_path, rendered)
+        .with_context(|| format!("write agent config at {}", config_path.display()))
+}
+
+fn remove_agent_config_from_dir(instance_dir: &Path) -> eyre::Result<()> {
+    let config_path = instance_dir.join(InstanceFile::AgentConfig.as_str());
+    match std::fs::remove_file(&config_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => {
+            Err(err).with_context(|| format!("remove agent config at {}", config_path.display()))
+        }
+    }
+}
+
 fn prepare_runtime_initramfs(
     layout: &Layout,
-    _instance_dir: &Path,
+    instance_dir: &Path,
     name: &str,
     spec: &mut VmSpec,
     network: &RuntimeNetwork,
+    agent_enabled: bool,
 ) -> eyre::Result<()> {
-    let agent_enabled = spec.settings.agent.enabled;
     if agent_enabled {
         let agent_config = resolve_agent_config(layout, name, spec, network)?;
-        spec.settings.agent.config = render_agent_config(&agent_config)?;
+        write_agent_config_to_dir(instance_dir, &agent_config)?;
     } else {
-        spec.settings.agent.config.clear();
+        remove_agent_config_from_dir(instance_dir)?;
     }
 
-    if spec.boot.initramfs.is_some() {
+    if spec_initramfs(spec).is_some() {
         return Ok(());
     }
 
@@ -106,8 +125,27 @@ fn prepare_runtime_initramfs(
     };
     ensure_asset(&initramfs, label)?;
 
-    spec.boot.initramfs = Some(initramfs);
+    spec_kernel_mut(spec).initramfs = Some(initramfs);
     Ok(())
+}
+
+fn spec_initramfs(spec: &VmSpec) -> Option<&PathBuf> {
+    spec.boot
+        .as_ref()
+        .and_then(|boot| boot.kernel.as_ref())
+        .and_then(|kernel| kernel.initramfs.as_ref())
+}
+
+fn spec_kernel_mut(spec: &mut VmSpec) -> &mut Kernel {
+    let boot = spec.boot.get_or_insert(Boot {
+        kernel: None,
+        userdata: None,
+    });
+    boot.kernel.get_or_insert_with(|| Kernel {
+        path: None,
+        cmdline: Vec::new(),
+        initramfs: None,
+    })
 }
 
 fn resolve_agent_config(
@@ -159,15 +197,12 @@ fn resolve_guest_runtime_config(
 }
 
 fn resolve_forward_runtime_config(spec: &VmSpec) -> eyre::Result<AgentForwardConfig> {
-    if !spec.settings.agent.enabled {
-        return Ok(AgentForwardConfig::default());
-    }
-
-    let Some(endpoint) = spec
-        .vsock_endpoints
-        .iter()
-        .find(|endpoint| endpoint.name == FORWARD_ENDPOINT_NAME)
-    else {
+    let Some(endpoint) = spec.vsock.as_ref().and_then(|vsock| {
+        vsock
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == FORWARD_ENDPOINT_NAME)
+    }) else {
         return Ok(AgentForwardConfig::default());
     };
 
@@ -224,7 +259,11 @@ fn resolve_provision_config(
         }),
         network: resolve_provision_network_config(network)?,
         rosetta: AgentRosettaConfig {
-            enabled: spec.settings.rosetta,
+            enabled: spec
+                .hardware
+                .as_ref()
+                .and_then(|hardware| hardware.rosetta)
+                .unwrap_or(false),
             ..AgentRosettaConfig::default()
         },
         mounts: provision_mount_entries(spec),
@@ -233,12 +272,7 @@ fn resolve_provision_config(
 }
 
 fn provision_userdata(spec: &VmSpec) -> eyre::Result<Option<UserdataConfig>> {
-    let Some(user_data) = spec
-        .boot
-        .bootstrap
-        .as_ref()
-        .and_then(|boot| boot.userdata.as_deref())
-    else {
+    let Some(user_data) = spec.boot.as_ref().and_then(|boot| boot.userdata.as_deref()) else {
         return Ok(None);
     };
 
@@ -388,11 +422,12 @@ fn resolve_host_locale() -> String {
 mod tests {
     use super::{
         normalize_runtime_mounts, prepare_runtime_initramfs, resolve_guest_runtime_config,
+        spec_kernel_mut,
     };
-    use bento_core::{
-        agent::{AgentConfig, UserdataContentType, UserdataRunPolicy},
-        AgentSettings, Architecture, Boot, Bootstrap, GuestOs, LifecycleSpec, Mount, Platform,
-        PluginSpec, Resources, Settings, Storage, VmSpec, VsockEndpointMode, VsockEndpointSpec,
+    use bento_agent_spec::{AgentConfig, UserdataContentType, UserdataRunPolicy};
+    use bento_vm_spec::{
+        Boot, Guest, GuestOs, Hardware, Kernel, Lifecycle, Mount, Plugin, Storage, VmSpec, Vsock,
+        VsockEndpoint, VsockEndpointMode,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -403,40 +438,51 @@ mod tests {
     use crate::network::RuntimeNetwork;
     use crate::Layout;
 
-    fn sample_spec(kernel_cmdline: Vec<String>, guest_configured: bool) -> VmSpec {
+    fn sample_spec(kernel_cmdline: Vec<String>) -> VmSpec {
         VmSpec {
-            version: 1,
-            platform: Platform {
-                guest_os: GuestOs::Linux,
-                architecture: Architecture::Aarch64,
-            },
-            resources: Resources {
-                cpus: 4,
-                memory_mib: 4096,
-            },
-            boot: Boot {
-                kernel: None,
-                initramfs: None,
-                kernel_cmdline,
-                bootstrap: None,
-            },
-            storage: Storage { disks: Vec::new() },
+            guest: Some(Guest {
+                os: Some(GuestOs::Linux),
+            }),
+            boot: Some(Boot {
+                kernel: Some(Kernel {
+                    path: None,
+                    cmdline: kernel_cmdline,
+                    initramfs: None,
+                }),
+                userdata: None,
+            }),
+            hardware: Some(Hardware {
+                cpus: Some(4),
+                memory: Some(4096),
+                nested_virtualization: Some(false),
+                rosetta: Some(false),
+            }),
+            storage: Some(Storage { disks: Vec::new() }),
             mounts: Vec::new(),
-            vsock_endpoints: Vec::new(),
-            settings: Settings {
-                nested_virtualization: false,
-                rosetta: false,
-                agent: AgentSettings {
-                    enabled: guest_configured,
-                    ..AgentSettings::default()
-                },
-            },
+            ..VmSpec::current()
         }
+    }
+
+    fn boot_mut(spec: &mut VmSpec) -> &mut Boot {
+        spec.boot.as_mut().expect("sample spec boot")
+    }
+
+    fn hardware_mut(spec: &mut VmSpec) -> &mut Hardware {
+        spec.hardware.as_mut().expect("sample spec hardware")
+    }
+
+    fn push_vsock_endpoint(spec: &mut VmSpec, endpoint: VsockEndpoint) {
+        spec.vsock
+            .get_or_insert_with(|| Vsock {
+                endpoints: Vec::new(),
+            })
+            .endpoints
+            .push(endpoint);
     }
 
     #[test]
     fn normalize_runtime_mounts_resolves_sources() {
-        let mut spec = sample_spec(Vec::new(), false);
+        let mut spec = sample_spec(Vec::new());
         spec.mounts = vec![Mount {
             source: PathBuf::from("workspace"),
             tag: "workspace".to_string(),
@@ -451,7 +497,7 @@ mod tests {
 
     #[test]
     fn normalize_runtime_mounts_rejects_unsupported_tilde_forms() {
-        let mut spec = sample_spec(Vec::new(), false);
+        let mut spec = sample_spec(Vec::new());
         spec.mounts = vec![Mount {
             source: PathBuf::from("~somebody"),
             tag: "bad".to_string(),
@@ -483,26 +529,26 @@ mod tests {
         assert!(!config.interfaces[0].dhcp6);
     }
 
-    fn forward_endpoint(port: u32, config: Option<serde_json::Value>) -> VsockEndpointSpec {
-        VsockEndpointSpec {
+    fn forward_endpoint(port: u32, config: Option<serde_json::Value>) -> VsockEndpoint {
+        VsockEndpoint {
             name: "forward".to_string(),
             port,
             mode: VsockEndpointMode::Connect,
-            plugin: PluginSpec {
+            plugin: Plugin {
                 command: PathBuf::from("/usr/local/bin/forward"),
                 args: Vec::new(),
                 env: BTreeMap::new(),
                 working_dir: None,
                 config,
             },
-            lifecycle: LifecycleSpec::default(),
+            lifecycle: Lifecycle::default(),
         }
     }
 
     #[test]
     fn guest_runtime_has_no_forward_without_endpoint_when_guest_is_enabled() {
         let runtime = resolve_guest_runtime_config(
-            &sample_spec(Vec::new(), true),
+            &sample_spec(Vec::new()),
             &RuntimeNetwork::UnixDatagram {
                 path: PathBuf::from("/run/bento/net.sock"),
                 mac: "02:00:00:00:00:01".to_string(),
@@ -515,7 +561,7 @@ mod tests {
 
     #[test]
     fn guest_runtime_has_no_forward_without_guest_networking() {
-        let spec = sample_spec(Vec::new(), true);
+        let spec = sample_spec(Vec::new());
 
         let runtime = resolve_guest_runtime_config(&spec, &RuntimeNetwork::None)
             .expect("runtime config should resolve");
@@ -525,9 +571,8 @@ mod tests {
 
     #[test]
     fn guest_runtime_disables_forward_when_guest_is_disabled() {
-        let runtime =
-            resolve_guest_runtime_config(&sample_spec(Vec::new(), false), &RuntimeNetwork::None)
-                .expect("runtime config should resolve");
+        let runtime = resolve_guest_runtime_config(&sample_spec(Vec::new()), &RuntimeNetwork::None)
+            .expect("runtime config should resolve");
 
         assert!(!runtime.forward.enabled);
     }
@@ -539,10 +584,8 @@ mod tests {
             uid: 1000,
             gecos: "Bento User".to_string(),
         };
-        let mut spec = sample_spec(Vec::new(), false);
-        spec.boot.bootstrap = Some(Bootstrap {
-            userdata: Some("#!/bin/sh\necho profile\n".to_string()),
-        });
+        let mut spec = sample_spec(Vec::new());
+        boot_mut(&mut spec).userdata = Some("#!/bin/sh\necho profile\n".to_string());
 
         let provision = super::resolve_provision_config(
             "demo",
@@ -568,10 +611,9 @@ mod tests {
             uid: 1000,
             gecos: "Bento User".to_string(),
         };
-        let mut spec = sample_spec(Vec::new(), false);
-        spec.boot.bootstrap = Some(Bootstrap {
-            userdata: Some("#cloud-config\nruncmd:\n  - echo external\n".to_string()),
-        });
+        let mut spec = sample_spec(Vec::new());
+        boot_mut(&mut spec).userdata =
+            Some("#cloud-config\nruncmd:\n  - echo external\n".to_string());
 
         let err = super::resolve_provision_config(
             "demo",
@@ -595,15 +637,13 @@ mod tests {
             uid: 1000,
             gecos: "Bento User".to_string(),
         };
-        let mut spec = sample_spec(Vec::new(), true);
+        let mut spec = sample_spec(Vec::new());
         spec.mounts.push(Mount {
             source: PathBuf::from("/workspace"),
             tag: "workspace".to_string(),
             read_only: false,
         });
-        spec.boot.bootstrap = Some(Bootstrap {
-            userdata: Some("#!/bin/sh\necho profile\n".to_string()),
-        });
+        boot_mut(&mut spec).userdata = Some("#!/bin/sh\necho profile\n".to_string());
 
         let provision = super::resolve_provision_config(
             "demo",
@@ -674,8 +714,8 @@ mod tests {
             uid: 1000,
             gecos: "Bento User".to_string(),
         };
-        let mut spec = sample_spec(Vec::new(), true);
-        spec.settings.rosetta = true;
+        let mut spec = sample_spec(Vec::new());
+        hardware_mut(&mut spec).rosetta = Some(true);
 
         let provision = super::resolve_provision_config(
             "demo",
@@ -694,8 +734,8 @@ mod tests {
 
     #[test]
     fn guest_runtime_enables_forward_from_named_endpoint() {
-        let mut spec = sample_spec(Vec::new(), true);
-        spec.vsock_endpoints.push(forward_endpoint(4100, None));
+        let mut spec = sample_spec(Vec::new());
+        push_vsock_endpoint(&mut spec, forward_endpoint(4100, None));
 
         let runtime = resolve_guest_runtime_config(&spec, &RuntimeNetwork::None)
             .expect("runtime config should resolve");
@@ -707,22 +747,25 @@ mod tests {
 
     #[test]
     fn guest_runtime_injects_forward_uds_guest_paths() {
-        let mut spec = sample_spec(Vec::new(), true);
-        spec.vsock_endpoints.push(forward_endpoint(
-            4100,
-            Some(json!({
-                "tcp": {
-                    "auto_discover": true,
-                    "ports": [
-                        { "guest_port": 8080, "host_port": 8080 }
+        let mut spec = sample_spec(Vec::new());
+        push_vsock_endpoint(
+            &mut spec,
+            forward_endpoint(
+                4100,
+                Some(json!({
+                    "tcp": {
+                        "auto_discover": true,
+                        "ports": [
+                            { "guest_port": 8080, "host_port": 8080 }
+                        ]
+                    },
+                    "uds": [
+                        { "guest_path": "/var/run/docker.sock", "host_path": "docker.sock" },
+                        { "guest_path": "/tmp/app.sock", "host_path": "app.sock" }
                     ]
-                },
-                "uds": [
-                    { "guest_path": "/var/run/docker.sock", "host_path": "docker.sock" },
-                    { "guest_path": "/tmp/app.sock", "host_path": "app.sock" }
-                ]
-            })),
-        ));
+                })),
+            ),
+        );
 
         let runtime = resolve_guest_runtime_config(&spec, &RuntimeNetwork::None)
             .expect("runtime config should resolve");
@@ -739,26 +782,13 @@ mod tests {
     }
 
     #[test]
-    fn guest_runtime_ignores_forward_endpoint_when_guest_is_disabled() {
-        let mut spec = sample_spec(Vec::new(), false);
-        spec.vsock_endpoints.push(forward_endpoint(4100, None));
-
-        let runtime = resolve_guest_runtime_config(&spec, &RuntimeNetwork::None)
-            .expect("runtime config should resolve");
-
-        assert!(!runtime.forward.enabled);
-        assert_eq!(runtime.forward.port, 0);
-        assert!(runtime.forward.uds.is_empty());
-    }
-
-    #[test]
     fn runtime_initramfs_selects_no_agent_static_asset_without_agent() {
         let temp = tempfile::tempdir().expect("create temp dir");
         let data_dir = temp.path().join("bento");
         write_asset(&data_dir, "initramfs-no-agent", b"initramfs");
         let instance_dir = temp.path().join("instance");
         fs::create_dir_all(&instance_dir).expect("create instance dir");
-        let mut spec = sample_spec(Vec::new(), false);
+        let mut spec = sample_spec(Vec::new());
 
         prepare_runtime_initramfs(
             &Layout::new(&data_dir),
@@ -766,15 +796,19 @@ mod tests {
             "demo",
             &mut spec,
             &RuntimeNetwork::None,
+            false,
         )
         .expect("prepare runtime initramfs");
 
         assert_eq!(
-            spec.boot.initramfs,
-            Some(data_dir.join("assets").join("initramfs-no-agent"))
+            spec.boot
+                .as_ref()
+                .and_then(|boot| boot.kernel.as_ref())
+                .and_then(|kernel| kernel.initramfs.as_ref()),
+            Some(data_dir.join("assets").join("initramfs-no-agent")).as_ref()
         );
-        assert!(!instance_dir.join("initramfs").exists());
-        assert!(spec.storage.disks.is_empty());
+        assert!(!instance_dir.join("agent.json").exists());
+        assert!(spec.storage.as_ref().expect("storage").disks.is_empty());
     }
 
     #[test]
@@ -783,8 +817,8 @@ mod tests {
         let data_dir = temp.path().join("bento");
         let instance_dir = temp.path().join("instance");
         fs::create_dir_all(&instance_dir).expect("create instance dir");
-        let mut spec = sample_spec(Vec::new(), false);
-        spec.boot.initramfs = Some(PathBuf::from("custom-initramfs"));
+        let mut spec = sample_spec(Vec::new());
+        spec_kernel_mut(&mut spec).initramfs = Some(PathBuf::from("custom-initramfs"));
 
         prepare_runtime_initramfs(
             &Layout::new(&data_dir),
@@ -792,11 +826,18 @@ mod tests {
             "demo",
             &mut spec,
             &RuntimeNetwork::None,
+            false,
         )
         .expect("explicit initramfs should be accepted with agent disabled");
 
-        assert_eq!(spec.boot.initramfs, Some(PathBuf::from("custom-initramfs")));
-        assert!(!instance_dir.join("initramfs").exists());
+        assert_eq!(
+            spec.boot
+                .as_ref()
+                .and_then(|boot| boot.kernel.as_ref())
+                .and_then(|kernel| kernel.initramfs.as_ref()),
+            Some(&PathBuf::from("custom-initramfs"))
+        );
+        assert!(!instance_dir.join("agent.json").exists());
     }
 
     fn write_asset(data_dir: &std::path::Path, name: &str, contents: &[u8]) {

@@ -2,9 +2,9 @@ use clap::Args;
 use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bento_core::VmSpec;
 use bento_libvm::{LibVm, MachineRef, MachineRuntimeState};
 use bento_protocol::v1::LifecycleState;
+use bento_vm_spec::VmSpec;
 
 use crate::constants::PROFILE_METADATA_KEY;
 
@@ -62,7 +62,10 @@ impl Cmd {
         print_process(machine.state, machine.started_at);
 
         if !machine.is_running() {
-            print_guest(None, guest_config_status(&machine.spec, &machine.dir));
+            print_guest(
+                None,
+                guest_config_status(&machine.spec, machine.agent_enabled(), &machine.dir),
+            );
             println!("ready: no");
             return Ok(());
         }
@@ -72,7 +75,7 @@ impl Cmd {
         println!("vm: {}", lifecycle_label(status.vm_state));
         print_guest(
             Some((lifecycle_label(status.guest_state), status.ready)),
-            guest_config_status(&machine.spec, &machine.dir),
+            guest_config_status(&machine.spec, machine.agent_enabled(), &machine.dir),
         );
         println!("ready: {}", if status.ready { "yes" } else { "no" });
         if !status.summary.is_empty() {
@@ -83,16 +86,29 @@ impl Cmd {
     }
 }
 
-fn guest_config_status(spec: &VmSpec, machine_dir: &std::path::Path) -> GuestConfigStatus {
+fn guest_config_status(
+    spec: &VmSpec,
+    agent_enabled: bool,
+    machine_dir: &std::path::Path,
+) -> GuestConfigStatus {
     GuestConfigStatus {
-        enabled: spec.settings.agent.enabled,
-        bootstrap: spec.boot.bootstrap.is_some(),
+        enabled: agent_enabled,
+        bootstrap: spec
+            .boot
+            .as_ref()
+            .and_then(|boot| boot.userdata.as_deref())
+            .is_some(),
         initramfs_present: initramfs_path_exists(spec, machine_dir),
     }
 }
 
 fn initramfs_path_exists(spec: &VmSpec, machine_dir: &std::path::Path) -> bool {
-    let Some(initramfs) = spec.boot.initramfs.as_deref() else {
+    let Some(initramfs) = spec
+        .boot
+        .as_ref()
+        .and_then(|boot| boot.kernel.as_ref())
+        .and_then(|kernel| kernel.initramfs.as_deref())
+    else {
         return false;
     };
 
@@ -236,41 +252,32 @@ mod tests {
     use super::{
         guest_config_status, now_unix, process_started_at, process_status_label, relative_time,
     };
-    use bento_core::{
-        AgentSettings, Architecture, Boot, GuestOs, Platform, Resources, Settings, Storage, VmSpec,
-    };
     use bento_libvm::MachineRuntimeState;
+    use bento_vm_spec::{Boot, Guest, GuestOs, Hardware, Kernel, Storage, VmSpec};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn sample_spec(agent: bool, bootstrap: bool) -> VmSpec {
+    fn sample_spec(initramfs: bool, bootstrap: bool) -> VmSpec {
         VmSpec {
-            version: 1,
-            platform: Platform {
-                guest_os: GuestOs::Linux,
-                architecture: Architecture::Aarch64,
-            },
-            resources: Resources {
-                cpus: 2,
-                memory_mib: 1024,
-            },
-            boot: Boot {
-                kernel: None,
-                initramfs: agent.then_some(std::path::PathBuf::from("initramfs")),
-                kernel_cmdline: Vec::new(),
-                bootstrap: bootstrap.then_some(bento_core::Bootstrap { userdata: None }),
-            },
-            storage: Storage { disks: Vec::new() },
-            mounts: Vec::new(),
-            vsock_endpoints: Vec::new(),
-            settings: Settings {
-                nested_virtualization: false,
-                rosetta: false,
-                agent: AgentSettings {
-                    enabled: agent,
-                    ..AgentSettings::default()
-                },
-            },
+            guest: Some(Guest {
+                os: Some(GuestOs::Linux),
+            }),
+            boot: Some(Boot {
+                kernel: Some(Kernel {
+                    path: None,
+                    cmdline: Vec::new(),
+                    initramfs: initramfs.then_some(std::path::PathBuf::from("initramfs")),
+                }),
+                userdata: bootstrap.then_some("#!/bin/sh\n".to_string()),
+            }),
+            hardware: Some(Hardware {
+                cpus: Some(2),
+                memory: Some(1024),
+                nested_virtualization: Some(false),
+                rosetta: Some(false),
+            }),
+            storage: Some(Storage { disks: Vec::new() }),
+            ..VmSpec::current()
         }
     }
 
@@ -287,7 +294,7 @@ mod tests {
         let dir = temp_dir("disabled");
         fs::create_dir_all(&dir).expect("create temp dir");
 
-        let config = guest_config_status(&sample_spec(false, false), &dir);
+        let config = guest_config_status(&sample_spec(false, false), false, &dir);
 
         assert!(!config.enabled);
         assert!(!config.initramfs_present);
@@ -301,7 +308,7 @@ mod tests {
         fs::create_dir_all(&dir).expect("create temp dir");
         fs::write(dir.join("initramfs"), b"initramfs").expect("write initramfs marker");
 
-        let config = guest_config_status(&sample_spec(true, false), &dir);
+        let config = guest_config_status(&sample_spec(true, false), true, &dir);
 
         assert!(config.enabled);
         assert!(config.initramfs_present);

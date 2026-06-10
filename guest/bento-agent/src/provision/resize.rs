@@ -1,4 +1,4 @@
-use bento_core::agent::ResizeRootfsConfig;
+use bento_agent_spec::ResizeRootfsConfig;
 use eyre::{eyre, Context};
 
 use crate::provision::{command_exists, command_output, run_command};

@@ -346,14 +346,7 @@ fn build_vm(spec: &VmConfig) -> Result<(VirtualMachine, SerialPortConfiguration)
         NetworkMode::UnixStream { .. } | NetworkMode::Tap { .. } => {}
     }
 
-    if let Some(root_disk) = spec.root_disk.as_ref() {
-        builder = builder.add_storage_device(
-            StorageDeviceConfiguration::new(root_disk.path.clone(), root_disk.read_only)
-                .map_err(vz_error)?,
-        );
-    }
-
-    for disk in &spec.data_disks {
+    for disk in &spec.disks {
         builder = builder.add_storage_device(
             StorageDeviceConfiguration::new(disk.path.clone(), disk.read_only).map_err(vz_error)?,
         );
@@ -387,20 +380,13 @@ fn build_platform(spec: &VmConfig) -> Result<GenericPlatform, VirtError> {
 
 fn build_boot_loader(spec: &VmConfig) -> Result<LinuxBootLoader, VirtError> {
     let kernel_path = required_path(&spec.name, spec.kernel_path.as_ref(), "kernel_path")?;
-    let initramfs_path = required_path(&spec.name, spec.initramfs_path.as_ref(), "initramfs_path")?;
 
     let mut boot_loader = LinuxBootLoader::new(kernel_path);
-    boot_loader.set_initial_ramdisk(initramfs_path);
-
-    let mut args = vec![
-        "console=hvc0".to_string(),
-        "rd.break=initqueue".to_string(),
-        "selinux=1".to_string(),
-        "enforcing=0".to_string(),
-    ];
-    if spec.root_disk.is_some() {
-        args.push("root=/dev/vda".to_string());
+    if let Some(initramfs_path) = spec.initramfs_path.as_ref() {
+        boot_loader.set_initial_ramdisk(initramfs_path);
     }
+
+    let mut args = vec!["console=hvc0".to_string(), "rd.break=initqueue".to_string()];
     args.extend(spec.kernel_cmdline.iter().cloned());
     let command_line = args.join(" ");
     boot_loader.set_command_line(&command_line);
@@ -444,7 +430,6 @@ fn validate_machine_config(spec: &VmConfig) -> Result<(), VirtError> {
     }
 
     let _ = required_path(&spec.name, spec.kernel_path.as_ref(), "kernel_path")?;
-    let _ = required_path(&spec.name, spec.initramfs_path.as_ref(), "initramfs_path")?;
 
     if let Some(machine_identifier) = spec.machine_identifier.as_ref() {
         validate_machine_identifier(&spec.name, machine_identifier)?;

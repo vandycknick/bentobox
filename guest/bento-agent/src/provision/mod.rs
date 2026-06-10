@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use bento_core::agent::ProvisionConfig;
+use bento_agent_spec::ProvisionConfig;
 use eyre::{eyre, Context};
 
 mod ca;

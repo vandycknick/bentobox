@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::io;
 use std::sync::Arc;
 
-use bento_core::agent::{
+use bento_agent_spec::{
     AgentForwardConfig, ForwardApiRequest, ForwardApiResponse, ForwardStreamRequest,
 };
 use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

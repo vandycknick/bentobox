@@ -54,10 +54,8 @@ mod tests {
     use crate::network::core::{NetworkDriver, NetworkDriverContext, NetworkRequest, NetworkScope};
     use crate::network::RuntimeNetwork;
     use crate::store::{Database, Sqlite};
-    use crate::Layout;
-    use bento_core::{
-        Architecture, Boot, GuestOs, MachineId, Platform, Resources, Settings, Storage, VmSpec,
-    };
+    use crate::{Layout, MachineId};
+    use bento_vm_spec::VmSpec;
 
     use crate::NetworkPolicyRef;
 
@@ -78,31 +76,7 @@ mod tests {
     }
 
     fn sample_vm_spec() -> VmSpec {
-        VmSpec {
-            version: 1,
-            platform: Platform {
-                guest_os: GuestOs::Linux,
-                architecture: Architecture::Aarch64,
-            },
-            resources: Resources {
-                cpus: 2,
-                memory_mib: 1024,
-            },
-            boot: Boot {
-                kernel: None,
-                initramfs: None,
-                kernel_cmdline: Vec::new(),
-                bootstrap: None,
-            },
-            storage: Storage { disks: Vec::new() },
-            mounts: Vec::new(),
-            vsock_endpoints: Vec::new(),
-            settings: Settings {
-                agent: bento_core::AgentSettings::default(),
-                nested_virtualization: false,
-                rosetta: false,
-            },
-        }
+        VmSpec::current()
     }
 
     #[test]
@@ -153,7 +127,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("create temp dir");
         let layout = Layout::new(dir.path());
         let db = Sqlite::new(&layout).await.expect("open db");
-        let machine_id = bento_core::MachineId::new();
+        let machine_id = MachineId::new();
         let metadata = machine_from_path(
             machine_id,
             "devbox".to_string(),

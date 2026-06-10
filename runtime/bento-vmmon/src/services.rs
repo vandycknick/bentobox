@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bento_core::agent::SSH_VSOCK_PORT;
+use bento_agent_spec::{DEFAULT_AGENT_TIMEOUT_SECONDS, SSH_VSOCK_PORT};
 use bento_protocol::negotiate::Upgrade;
 use bento_protocol::v1::vm_monitor_service_server::{VmMonitorService, VmMonitorServiceServer};
 use bento_protocol::v1::{
@@ -120,14 +120,14 @@ pub async fn start_services(
         }
     });
 
-    let guest_monitor = if ctx.spec.settings.agent.enabled {
+    let guest_monitor = if let Some(agent_config) = ctx.agent_config.as_ref() {
         ctx.store.dispatch(Action::guest_starting());
         Some(
             spawn_agent_control_service(
                 &ctx.machine,
                 ctx.store.clone(),
-                ctx.spec.settings.agent.config.clone(),
-                Duration::from_secs(ctx.spec.settings.agent.timeout_seconds),
+                agent_config.clone(),
+                Duration::from_secs(DEFAULT_AGENT_TIMEOUT_SECONDS),
                 ctx.shutdown.clone(),
             )
             .await?,

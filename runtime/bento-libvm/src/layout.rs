@@ -1,13 +1,12 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use bento_core::MachineId;
-
 use crate::InstanceFile;
 use crate::LibVmError;
+use crate::MachineId;
 
 pub const STATE_DB_FILE_NAME: &str = "state.db";
-pub const CONFIG_FILE_NAME: &str = "config.yaml";
+pub const CONFIG_FILE_NAME: &str = "config.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
@@ -155,9 +154,8 @@ fn absolute_path(name: &'static str, value: OsString) -> Result<PathBuf, LibVmEr
 #[cfg(test)]
 mod tests {
     use super::{resolve_data_dir_from, Layout};
-    use bento_core::MachineId;
 
-    use crate::InstanceFile;
+    use crate::{InstanceFile, MachineId};
     use std::path::PathBuf;
 
     #[test]

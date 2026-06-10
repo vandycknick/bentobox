@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "app/bentoctl",
-    "common/bento-core",
     "common/bento-ext4",
     "common/bento-initramfs",
     "common/bento-utils",
@@ -16,7 +15,9 @@ members = [
     "virt/bento-krun-sys",
     "virt/bento-virt",
     "virt/bento-vz",
-    "wire/bento-protocol",
+    "specs/bento-agent-spec",
+    "specs/bento-protocol",
+    "specs/bento-vm-spec",
 ]
 default-members = ["app/bentoctl", "runtime/bento-vmmon"]
 resolver = "2"

@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use bento_core::agent::AgentRosettaConfig;
+use bento_agent_spec::AgentRosettaConfig;
 use eyre::Context;
 
 use crate::provision::{command_exists, run_command, ProvisionContext};

@@ -103,7 +103,7 @@ pub fn looks_like_id_prefix(input: &str) -> bool {
 mod tests {
     use crate::machine_id::looks_like_id_prefix;
 
-    use super::MachineId;
+    use crate::MachineId;
 
     #[test]
     fn machine_id_round_trips_through_string() {
@@ -136,7 +136,6 @@ mod tests {
         let json = serde_json::to_string(&id).expect("serialize");
         let parsed: MachineId = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, id);
-        // Should serialize as simple hex string
         assert!(
             !json.contains('-'),
             "json should not contain dashes: {json}"
@@ -162,10 +161,9 @@ mod tests {
     #[test]
     fn looks_like_id_prefix_rejects_non_hex() {
         assert!(!looks_like_id_prefix(""));
-        assert!(!looks_like_id_prefix("ab")); // too short
+        assert!(!looks_like_id_prefix("ab"));
         assert!(!looks_like_id_prefix("devbox"));
         assert!(!looks_like_id_prefix("test-vm"));
-        // 33 chars is too long
         assert!(!looks_like_id_prefix("0123456789abcdef0123456789abcdef0"));
     }
 }

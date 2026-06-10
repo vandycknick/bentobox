@@ -25,7 +25,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 #[cfg(target_os = "linux")]
-use bento_core::agent::{AgentConfig, SSH_VSOCK_PORT};
+use bento_agent_spec::{AgentConfig, SSH_VSOCK_PORT};
 #[cfg(target_os = "linux")]
 use eyre::Context;
 #[cfg(target_os = "linux")]

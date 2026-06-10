@@ -7,18 +7,20 @@ pub enum InstanceFile {
     SerialLog,
     RootDisk,
     Initramfs,
+    AgentConfig,
 }
 
 impl InstanceFile {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Config => "config.yaml",
+            Self::Config => "config.json",
             Self::VmmonPid => "vm.pid",
             Self::VmmonSocket => "vm.sock",
             Self::VmmonTraceLog => "vm.trace.log",
             Self::SerialLog => "serial.log",
             Self::RootDisk => "rootfs.img",
             Self::Initramfs => "initramfs",
+            Self::AgentConfig => "agent.json",
         }
     }
 }

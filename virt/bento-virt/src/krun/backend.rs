@@ -71,9 +71,6 @@ fn validate(config: &VmConfig) -> Result<(), VirtError> {
     if config.kernel_path.is_none() {
         return invalid_config(config, "krun requires a kernel image path");
     }
-    if config.initramfs_path.is_none() {
-        return invalid_config(config, "krun requires an initramfs path");
-    }
     if config.machine_identifier.is_some() {
         return invalid_config(
             config,
@@ -137,19 +134,11 @@ fn prepare(config: &VmConfig) -> Result<(), VirtError> {
             .expect("validated kernel missing"),
         "kernel image",
     )?;
-    ensure_path_exists(
-        config,
-        config
-            .initramfs_path
-            .as_ref()
-            .expect("validated initramfs missing"),
-        "initramfs",
-    )?;
-    if let Some(root_disk) = config.root_disk.as_ref() {
-        ensure_path_exists(config, &root_disk.path, "root disk")?;
+    if let Some(initramfs) = config.initramfs_path.as_ref() {
+        ensure_path_exists(config, initramfs, "initramfs")?;
     }
-    for (index, disk) in config.data_disks.iter().enumerate() {
-        ensure_path_exists(config, &disk.path, &format!("data disk #{index}"))?;
+    for (index, disk) in config.disks.iter().enumerate() {
+        ensure_path_exists(config, &disk.path, &format!("disk #{index}"))?;
     }
     for mount in &config.mounts {
         ensure_path_exists(config, &mount.host_path, &format!("mount {}", mount.tag))?;
@@ -391,28 +380,19 @@ fn build_krun_vm(krun_bin: &Path, config: &VmConfig) -> Result<VirtualMachineBui
             name: config.name.clone(),
             reason: "krun requires a kernel image path".to_string(),
         })?;
-    let initramfs = config
-        .initramfs_path
-        .as_ref()
-        .ok_or_else(|| VirtError::InvalidConfig {
-            name: config.name.clone(),
-            reason: "krun requires an initramfs path".to_string(),
-        })?;
-
     let mut builder = VirtualMachineBuilder::new(krun_bin)
         .id(config.vm_id.clone())
         .cpus(cpus)
         .memory_mib(memory_mib)
         .kernel(kernel)
-        .initramfs(initramfs)
         .cmdline(build_boot_args(config))
         .stdio_console(true);
 
-    if let Some(root_disk) = config.root_disk.as_ref() {
-        builder = builder.disk(krun_disk("root".to_string(), root_disk));
+    if let Some(initramfs) = config.initramfs_path.as_ref() {
+        builder = builder.initramfs(initramfs);
     }
-    for (index, disk) in config.data_disks.iter().enumerate() {
-        builder = builder.disk(krun_disk(format!("disk{}", index + 1), disk));
+    for (index, disk) in config.disks.iter().enumerate() {
+        builder = builder.disk(krun_disk(format!("disk{index}"), disk));
     }
     for mount in &config.mounts {
         builder = builder.mount(krun_mount(mount));

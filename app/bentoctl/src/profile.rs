@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use bento_core::Mount;
 use bento_libvm::{NetworkPolicyRef, RequestedNetwork};
 use bento_utils::HumanSize;
+use bento_vm_spec::Mount;
 use eyre::{bail, Context};
 use serde::{Deserialize, Serialize};
 

@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::fs;
 
-use bento_core::agent::UserConfig;
+use bento_agent_spec::UserConfig;
 use eyre::{eyre, Context};
 
 use crate::provision::{

@@ -1,3 +1,4 @@
+use bento_agent_spec::DEFAULT_AGENT_TIMEOUT_SECONDS;
 use bento_libvm::{LibVm, MachineRecord, MachineRef};
 use clap::Args;
 use std::fmt::{Display, Formatter};
@@ -26,7 +27,7 @@ impl Cmd {
             libvm
                 .wait_for_guest_running(
                     &MachineRef::Id(machine.id),
-                    Duration::from_secs(machine.spec.settings.agent.timeout_seconds),
+                    Duration::from_secs(DEFAULT_AGENT_TIMEOUT_SECONDS),
                 )
                 .await
                 .map_err(|err| eyre::eyre!("guest readiness check failed: {err}"))?;
@@ -37,5 +38,5 @@ impl Cmd {
 }
 
 fn requires_guest_readiness(machine: &MachineRecord) -> bool {
-    machine.spec.settings.agent.enabled
+    machine.agent_enabled()
 }

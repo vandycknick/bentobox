@@ -9,11 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::launch::prepare_instance_runtime;
 use crate::root_disk::{clone_or_copy_root_disk, resize_raw_disk};
 use crate::InstanceFile;
-use bento_core::{
-    AgentSettings, Architecture, Boot, Bootstrap, Disk, DiskKind, GuestOs, MachineId, Mount,
-    Platform, Resources, Settings, Storage, VmSpec,
-};
 use bento_protocol::v1::InspectResponse;
+use bento_vm_spec::{Boot, Disk, Guest, GuestOs, Hardware, Kernel, Mount, Storage, VmSpec};
 use nix::{
     errno::Errno,
     sys::signal::{kill, Signal},
@@ -29,10 +26,12 @@ use crate::monitor;
 use crate::network::{prepare_network_runtime, reconcile_network_runtime, RuntimeNetwork};
 use crate::store::{Database, Sqlite};
 use crate::vm_lock::VmLock;
-use crate::{Layout, LibVmError};
+use crate::{Layout, LibVmError, MachineId};
 
 const DEFAULT_IMAGE_CPUS: u8 = 1;
 const DEFAULT_IMAGE_MEMORY_MIB: u32 = 512;
+const ROOT_DISK_KERNEL_ARG: &str = "root=/dev/vda";
+const AGENT_ENABLED_METADATA_KEY: &str = "io.bentobox.agent.enabled";
 const ENV_VM_STARTPIPE: &str = "_VM_STARTPIPE";
 const ENV_VM_SYNCPIPE: &str = "_VM_SYNCPIPE";
 
@@ -77,6 +76,10 @@ pub struct MachineRecord {
 impl MachineRecord {
     pub fn is_running(&self) -> bool {
         self.state.is_running()
+    }
+
+    pub fn agent_enabled(&self) -> bool {
+        metadata_agent_enabled(&self.metadata)
     }
 }
 
@@ -181,56 +184,46 @@ impl LibVm {
         let userdata = request.userdata;
         let disk_paths = canonicalize_existing_paths(&request.disks, "disk")?;
 
-        let bootstrap = userdata.is_some().then_some(Bootstrap { userdata });
-
         let resolved_cpus = request.cpus.unwrap_or(DEFAULT_IMAGE_CPUS);
         let resolved_memory = request.memory_mib.unwrap_or(DEFAULT_IMAGE_MEMORY_MIB);
 
         let mounts = assign_mount_tags(request.mounts);
+        let disks = std::iter::once(Disk {
+            path: PathBuf::from(InstanceFile::RootDisk.as_str()),
+            read_only: false,
+        })
+        .chain(disk_paths.into_iter().map(|path| Disk {
+            path,
+            read_only: false,
+        }))
+        .collect();
 
         let spec = VmSpec {
-            version: 1,
-            platform: Platform {
-                guest_os: GuestOs::Linux,
-                architecture: host_architecture()?,
-            },
-            resources: Resources {
-                cpus: resolved_cpus,
-                memory_mib: resolved_memory,
-            },
-            boot: Boot {
-                kernel: kernel_path,
-                initramfs: initramfs_path,
-                kernel_cmdline: Vec::new(),
-                bootstrap,
-            },
-            storage: Storage {
-                disks: std::iter::once(Disk {
-                    path: PathBuf::from(InstanceFile::RootDisk.as_str()),
-                    kind: DiskKind::Root,
-                    read_only: false,
-                })
-                .chain(disk_paths.into_iter().map(|path| Disk {
-                    path,
-                    kind: DiskKind::Data,
-                    read_only: false,
-                }))
-                .collect(),
-            },
+            guest: Some(Guest {
+                os: Some(GuestOs::Linux),
+            }),
+            boot: Some(Boot {
+                kernel: Some(Kernel {
+                    path: kernel_path,
+                    cmdline: vec![ROOT_DISK_KERNEL_ARG.to_string()],
+                    initramfs: initramfs_path,
+                }),
+                userdata,
+            }),
+            hardware: Some(Hardware {
+                cpus: Some(resolved_cpus),
+                memory: Some(resolved_memory),
+                nested_virtualization: Some(request.nested_virtualization),
+                rosetta: Some(request.rosetta),
+            }),
+            storage: Some(Storage { disks }),
             mounts,
-            vsock_endpoints: Vec::new(),
-            settings: Settings {
-                nested_virtualization: request.nested_virtualization,
-                rosetta: request.rosetta,
-                agent: AgentSettings {
-                    enabled: request.agent,
-                    ..AgentSettings::default()
-                },
-            },
+            ..VmSpec::current()
         };
 
         let network = request.network.unwrap_or_default();
         self.validate_requested_network(&network).await?;
+        let metadata = metadata_with_agent_flag(request.metadata, request.agent);
 
         let pending = self
             .create_pending(
@@ -238,7 +231,7 @@ impl LibVm {
                 spec,
                 request.image_ref.clone(),
                 request.labels,
-                request.metadata,
+                metadata,
                 network,
             )
             .await?;
@@ -416,12 +409,14 @@ impl LibVm {
 
         let resolved_network = prepare_network_runtime(&self.layout, &self.db, &metadata).await?;
         let mut spec = metadata.config.clone();
+        let agent_enabled = metadata_agent_enabled(&metadata.metadata);
         prepare_instance_runtime(
             &self.layout,
             Path::new(&metadata.instance_dir),
             &metadata.name,
             &mut spec,
             &resolved_network,
+            agent_enabled,
         )
         .map_err(|err| LibVmError::InstancePreparationFailed {
             reference: metadata.name.clone(),
@@ -436,6 +431,8 @@ impl LibVm {
         let socket_path = self.layout.monitor_socket_path(metadata.id);
         let trace_path = self.layout.monitor_trace_path(metadata.id);
         let serial_log_path = self.layout.monitor_serial_log_path(metadata.id);
+        let agent_config_path = agent_enabled
+            .then(|| Path::new(&metadata.instance_dir).join(InstanceFile::AgentConfig.as_str()));
         let launch = VmmonLaunch {
             machine_id: metadata.id,
             name: &metadata.name,
@@ -446,6 +443,7 @@ impl LibVm {
             serial_log: &serial_log_path,
             trace_log: &trace_path,
             network: &resolved_network,
+            agent_config: agent_config_path.as_deref(),
         };
         let handshake = match spawn_vmmon(&launch) {
             Ok(handshake) => handshake,
@@ -591,14 +589,11 @@ impl LibVm {
 
         if wait_for_guest_readiness {
             let machine_record = self.machine_record(metadata.clone())?;
-            let should_wait = machine_record.spec.settings.agent.enabled;
 
-            if should_wait {
+            if machine_record.agent_enabled() {
                 monitor::wait_for_shell_with_timeout(
                     &socket_path,
-                    std::time::Duration::from_secs(
-                        machine_record.spec.settings.agent.timeout_seconds,
-                    ),
+                    std::time::Duration::from_secs(bento_agent_spec::DEFAULT_AGENT_TIMEOUT_SECONDS),
                     std::time::Duration::from_secs(1),
                 )
                 .await
@@ -824,12 +819,30 @@ impl LibVm {
 
 fn write_machine_config(instance_dir: &Path, name: &str, spec: &VmSpec) -> Result<(), LibVmError> {
     let config =
-        serde_yaml_ng::to_string(spec).map_err(|source| LibVmError::VmSpecSerializeFailed {
+        serde_json::to_string_pretty(spec).map_err(|source| LibVmError::VmSpecSerializeFailed {
             name: name.to_string(),
             source,
         })?;
     fs::write(instance_dir.join(CONFIG_FILE_NAME), config)?;
     Ok(())
+}
+
+fn metadata_with_agent_flag(
+    mut metadata: BTreeMap<String, String>,
+    agent_enabled: bool,
+) -> BTreeMap<String, String> {
+    if agent_enabled {
+        metadata.insert(AGENT_ENABLED_METADATA_KEY.to_string(), "true".to_string());
+    } else {
+        metadata.remove(AGENT_ENABLED_METADATA_KEY);
+    }
+    metadata
+}
+
+fn metadata_agent_enabled(metadata: &BTreeMap<String, String>) -> bool {
+    metadata
+        .get(AGENT_ENABLED_METADATA_KEY)
+        .is_some_and(|value| value == "true")
 }
 
 fn assign_mount_tags(mounts: Vec<Mount>) -> Vec<Mount> {
@@ -843,17 +856,6 @@ fn assign_mount_tags(mounts: Vec<Mount>) -> Vec<Mount> {
             mount
         })
         .collect()
-}
-
-fn host_architecture() -> Result<Architecture, LibVmError> {
-    let arch = std::env::consts::ARCH;
-    match arch {
-        "arm64" | "aarch64" => Ok(Architecture::Aarch64),
-        "amd64" | "x86_64" => Ok(Architecture::X86_64),
-        other => Err(LibVmError::UnsupportedHostArchitecture {
-            arch: other.to_string(),
-        }),
-    }
 }
 
 fn canonicalize_optional_existing_path(
@@ -902,6 +904,7 @@ struct VmmonLaunch<'a> {
     serial_log: &'a Path,
     trace_log: &'a Path,
     network: &'a RuntimeNetwork,
+    agent_config: Option<&'a Path>,
 }
 
 fn spawn_vmmon(launch: &VmmonLaunch<'_>) -> Result<VmmonHandshake, LibVmError> {
@@ -928,6 +931,9 @@ fn spawn_vmmon(launch: &VmmonLaunch<'_>) -> Result<VmmonHandshake, LibVmError> {
         .arg(launch.trace_log)
         .arg("--network")
         .arg(launch.network.to_vmmon_arg());
+    if let Some(path) = launch.agent_config {
+        command.arg("--agent-config").arg(path);
+    }
     command
         .env(ENV_VM_STARTPIPE, start_read.as_raw_fd().to_string())
         .env(ENV_VM_SYNCPIPE, sync_write.as_raw_fd().to_string());
@@ -1210,53 +1216,74 @@ fn create_staging_dir(layout: &Layout) -> Result<PathBuf, LibVmError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{assign_mount_tags, read_syncpipe, release_startpipe, LibVm, StartupResult};
+    use crate::engine::{
+        assign_mount_tags, read_syncpipe, release_startpipe, LibVm, PendingMachine, StartupResult,
+        ROOT_DISK_KERNEL_ARG,
+    };
     use crate::{
         CreateMachineRequest, InstanceFile, Layout, LibVmError, MachineRef, MachineRuntimeState,
     };
-    use bento_core::{
-        AgentSettings, Architecture, Boot, GuestOs, Mount, Platform, Resources, Settings, Storage,
-        VmSpec,
-    };
+    use bento_vm_spec::{Boot, Guest, GuestOs, Hardware, Kernel, Mount, Storage, VmSpec};
     use nix::unistd::pipe;
     use std::io::{Read, Write};
     use std::path::PathBuf;
 
     fn sample_vm_spec() -> VmSpec {
         VmSpec {
-            version: 1,
-            platform: Platform {
-                guest_os: GuestOs::Linux,
-                architecture: Architecture::Aarch64,
-            },
-            resources: Resources {
-                cpus: 4,
-                memory_mib: 4096,
-            },
-            boot: Boot {
-                kernel: None,
-                initramfs: None,
-                kernel_cmdline: Vec::new(),
-                bootstrap: None,
-            },
-            storage: Storage { disks: Vec::new() },
-            mounts: Vec::new(),
-            vsock_endpoints: Vec::new(),
-            settings: Settings {
-                nested_virtualization: false,
-                rosetta: false,
-                agent: AgentSettings {
-                    enabled: true,
-                    ..AgentSettings::default()
-                },
-            },
+            guest: Some(Guest {
+                os: Some(GuestOs::Linux),
+            }),
+            boot: Some(Boot {
+                kernel: Some(Kernel {
+                    path: None,
+                    cmdline: Vec::new(),
+                    initramfs: None,
+                }),
+                userdata: None,
+            }),
+            hardware: Some(Hardware {
+                cpus: Some(4),
+                memory: Some(4096),
+                nested_virtualization: Some(false),
+                rosetta: Some(false),
+            }),
+            ..VmSpec::current()
         }
+    }
+
+    fn spec_kernel(spec: &VmSpec) -> &Kernel {
+        spec.boot
+            .as_ref()
+            .and_then(|boot| boot.kernel.as_ref())
+            .expect("spec should have kernel section")
+    }
+
+    fn spec_hardware(spec: &VmSpec) -> &Hardware {
+        spec.hardware
+            .as_ref()
+            .expect("spec should have hardware section")
+    }
+
+    fn spec_hardware_mut(spec: &mut VmSpec) -> &mut Hardware {
+        spec.hardware
+            .as_mut()
+            .expect("spec should have hardware section")
+    }
+
+    fn spec_storage(spec: &VmSpec) -> &Storage {
+        spec.storage
+            .as_ref()
+            .expect("spec should have storage section")
+    }
+
+    fn spec_userdata(spec: &VmSpec) -> Option<&str> {
+        spec.boot.as_ref().and_then(|boot| boot.userdata.as_deref())
     }
 
     async fn create_pending_sample(
         libvm: &LibVm,
         name: &str,
-    ) -> Result<super::PendingMachine, LibVmError> {
+    ) -> Result<PendingMachine, LibVmError> {
         libvm
             .create_pending(
                 name.to_string(),
@@ -1320,15 +1347,20 @@ mod tests {
             std::fs::read(root_disk).expect("root disk should exist"),
             b"disk"
         );
-        assert_eq!(machine.spec.resources.cpus, 1);
-        assert_eq!(machine.spec.resources.memory_mib, 512);
-        let bootstrap = machine
-            .spec
-            .boot
-            .bootstrap
-            .expect("inline userdata should enable bootstrap");
+        assert_eq!(spec_hardware(&machine.spec).cpus, Some(1));
+        assert_eq!(spec_hardware(&machine.spec).memory, Some(512));
         assert_eq!(
-            bootstrap.userdata.as_deref(),
+            spec_kernel(&machine.spec).cmdline,
+            vec![ROOT_DISK_KERNEL_ARG.to_string()]
+        );
+        assert_eq!(spec_storage(&machine.spec).disks.len(), 1);
+        assert_eq!(
+            spec_storage(&machine.spec).disks[0].path,
+            PathBuf::from(InstanceFile::RootDisk.as_str())
+        );
+        assert!(!spec_storage(&machine.spec).disks[0].read_only);
+        assert_eq!(
+            spec_userdata(&machine.spec),
             Some("#!/bin/sh\necho profile\n")
         );
     }
@@ -1347,7 +1379,7 @@ mod tests {
             .await
             .expect("create from image");
 
-        assert_eq!(machine.spec.boot.initramfs, None);
+        assert_eq!(spec_kernel(&machine.spec).initramfs, None);
         assert!(!machine.dir.join(InstanceFile::Initramfs.as_str()).exists());
     }
 
@@ -1370,7 +1402,7 @@ mod tests {
             .expect("create from image");
 
         assert_eq!(
-            machine.spec.boot.initramfs,
+            spec_kernel(&machine.spec).initramfs,
             Some(std::fs::canonicalize(explicit).expect("canonicalize explicit"))
         );
         assert!(!machine.dir.join(InstanceFile::Initramfs.as_str()).exists());
@@ -1390,7 +1422,7 @@ mod tests {
             .await
             .expect("create without boot assets");
 
-        assert_eq!(machine.spec.boot.initramfs, None);
+        assert_eq!(spec_kernel(&machine.spec).initramfs, None);
         assert!(!machine.dir.join(InstanceFile::Initramfs.as_str()).exists());
     }
 
@@ -1535,7 +1567,7 @@ mod tests {
             .await
             .expect("commit machine");
         let mut updated = machine.spec.clone();
-        updated.resources.cpus = 6;
+        spec_hardware_mut(&mut updated).cpus = Some(6);
 
         let edited = libvm
             .replace_config(
@@ -1545,16 +1577,16 @@ mod tests {
             .await
             .expect("replace config");
 
-        assert_eq!(edited.spec.resources.cpus, 6);
+        assert_eq!(spec_hardware(&edited.spec).cpus, Some(6));
         assert_eq!(
             libvm
                 .inspect(&MachineRef::parse(machine.id.to_string()).expect("parse machine ref"))
                 .await
                 .expect("inspect")
                 .spec
-                .resources
-                .cpus,
-            6
+                .hardware
+                .and_then(|hardware| hardware.cpus),
+            Some(6)
         );
     }
 
