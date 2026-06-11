@@ -457,3 +457,105 @@ nohz_full=1-N rcu_nocbs=1-N
 
 - That example means "leave CPU 0 for housekeeping, try to keep the rest quieter".
 - This is useful for dedicated low-jitter or pinned workloads. It is not a great default for ordinary devbox-style guests.
+
+## 17) k3s, kube-proxy, and Istio guest networking support
+
+### Required config changes
+
+- Container runtime and cgroup v2 support:
+    - `CONFIG_BPF_JIT=y`
+    - `CONFIG_CFS_BANDWIDTH=y`
+    - `CONFIG_CGROUP_PERF=y`
+    - `CONFIG_CGROUP_HUGETLB=y`
+    - `CONFIG_CHECKPOINT_RESTORE=y`
+    - `CONFIG_PERF_EVENTS=y`
+    - `CONFIG_BLK_DEV_THROTTLING=y`
+    - `CONFIG_HUGETLBFS=y`
+    - `CONFIG_HUGETLB_PAGE=y`
+- Flannel VXLAN and traffic-control support:
+    - `CONFIG_VXLAN=y`
+    - `CONFIG_NET_SCHED=y`
+    - `CONFIG_NET_CLS=y`
+    - `CONFIG_NET_CLS_CGROUP=y`
+    - `CONFIG_CGROUP_NET_PRIO=y`
+    - `CONFIG_CGROUP_NET_CLASSID=y`
+- nftables and `iptables-nft` compatibility:
+    - `CONFIG_NF_TABLES_INET=y`
+    - `CONFIG_NFT_CT=y`
+    - `CONFIG_NFT_COUNTER=y`
+    - `CONFIG_NFT_LOG=y`
+    - `CONFIG_NFT_LIMIT=y`
+    - `CONFIG_NFT_REJECT=y`
+    - `CONFIG_NFT_FIB=y`
+    - `CONFIG_NFT_FIB_IPV4=y`
+    - `CONFIG_NFT_FIB_IPV6=y`
+    - `CONFIG_NFT_CHAIN_NAT=y`
+    - `CONFIG_NFT_MASQ=y`
+- xtables matches and targets used by kube-proxy, k3s network policy, and Istio init rules:
+    - `CONFIG_NETFILTER_XT_TARGET_CHECKSUM=y`
+    - `CONFIG_NETFILTER_XT_TARGET_CT=y`
+    - `CONFIG_NETFILTER_XT_TARGET_LOG=y`
+    - `CONFIG_NETFILTER_XT_TARGET_MARK=y`
+    - `CONFIG_NETFILTER_XT_TARGET_REDIRECT=y`
+    - `CONFIG_NETFILTER_XT_MATCH_COMMENT=y`
+    - `CONFIG_NETFILTER_XT_MATCH_MARK=y`
+    - `CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y`
+    - `CONFIG_NETFILTER_XT_MATCH_NFACCT=y`
+    - `CONFIG_NETFILTER_XT_MATCH_OWNER=y`
+    - `CONFIG_NETFILTER_XT_MATCH_PHYSDEV=y`
+    - `CONFIG_NETFILTER_XT_MATCH_RECENT=y`
+    - `CONFIG_NETFILTER_XT_MATCH_STATE=y`
+    - `CONFIG_NETFILTER_XT_MATCH_STATISTIC=y`
+    - `CONFIG_NETFILTER_XT_SET=y`
+    - `CONFIG_IP_NF_TARGET_REDIRECT=y`
+- ipset support for k3s network policy:
+    - `CONFIG_IP_SET=y`
+    - `CONFIG_IP_SET_BITMAP_IP=y`
+    - `CONFIG_IP_SET_BITMAP_IPMAC=y`
+    - `CONFIG_IP_SET_BITMAP_PORT=y`
+    - `CONFIG_IP_SET_HASH_IP=y`
+    - `CONFIG_IP_SET_HASH_IPMARK=y`
+    - `CONFIG_IP_SET_HASH_IPPORT=y`
+    - `CONFIG_IP_SET_HASH_IPPORTIP=y`
+    - `CONFIG_IP_SET_HASH_IPPORTNET=y`
+    - `CONFIG_IP_SET_HASH_IPMAC=y`
+    - `CONFIG_IP_SET_HASH_MAC=y`
+    - `CONFIG_IP_SET_HASH_NETPORTNET=y`
+    - `CONFIG_IP_SET_HASH_NET=y`
+    - `CONFIG_IP_SET_HASH_NETNET=y`
+    - `CONFIG_IP_SET_HASH_NETPORT=y`
+    - `CONFIG_IP_SET_HASH_NETIFACE=y`
+    - `CONFIG_IP_SET_LIST_SET=y`
+
+### What this enables
+
+- `containerd` and `runc` running Kubernetes workloads against the unified cgroup v2 hierarchy.
+- Flannel's default VXLAN backend and the pod network routes it needs to write `/run/flannel/subnet.env`.
+- kube-proxy running through the distro `iptables` command when it is backed by nftables.
+- k3s network policy rules that rely on ipset and xtables matches.
+- Istio init-container and sidecar iptables rules that match by process owner before redirecting traffic to Envoy.
+
+### Why this is needed
+
+- Fixes container startup failures where `runc` cannot set cgroup v2 CPU quota because `/sys/fs/cgroup/.../cpu.max` is missing.
+- Fixes flannel startup failures where the default VXLAN backend never creates the pod-network subnet state.
+- Fixes kube-proxy `iptables-restore` failures caused by missing nftables and xtables compatibility expressions.
+- Fixes k3s network policy startup failures where `ipset save` returns `Kernel error received: Invalid argument`.
+- Fixes Istio iptables setup failures where the `owner` match is unavailable.
+
+### Observed failure modes
+
+- `runc create failed: error setting cgroup config for procHooks process: openat2 /sys/fs/cgroup/.../cpu.max: no such file or directory`
+- `failed to set up sandbox container ... /run/flannel/subnet.env: no such file or directory`
+- `Failed to load kernel module nft-expr-counter with modprobe`
+- `Failed to load kernel module nft-chain-2-nat with modprobe`
+- `Skipping network policy controller start, ipset save failed: ipset ... Kernel error received: Invalid argument`
+- `Warning: Extension physdev revision 0 not supported, missing kernel module?`
+- `Warning: Extension nfacct revision 0 not supported, missing kernel module?`
+- `Warning: Extension owner revision 0 not supported, missing kernel module?`
+
+### Notes
+
+- Bento's current arm64 kernel profile builds these features in instead of relying on loadable modules.
+- Some k3s startup logs still say `Failed to load kernel module ...` when a feature is built in. Treat those as actionable only when the matching kernel config is missing or userspace reports the extension is unsupported.
+- The generated kernel config under `target/kernels/<track>-<arch>-<version>/.config` can stay stale until `make kernel TRACK=<track> ARCH=<arch>` rebuilds the kernel.
