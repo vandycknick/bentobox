@@ -1,6 +1,7 @@
 mod error;
 pub mod host;
 mod launch;
+mod lock_manager;
 mod machine;
 mod models;
 mod monitor;
@@ -11,7 +12,6 @@ mod paths;
 mod root_disk;
 mod runtime;
 mod store;
-mod vm_lock;
 
 pub use crate::error::LibVmError;
 pub use crate::host::{ensure_certificate_authority, CertificateAuthority};

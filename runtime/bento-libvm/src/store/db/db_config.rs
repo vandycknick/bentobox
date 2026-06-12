@@ -16,22 +16,19 @@ pub(super) async fn validate(
     let now = now_unix();
     sqlx::query(
         "INSERT INTO db_config
-            (id, schema_version, data_dir, state_db_path, instances_dir, images_dir, net_dir, created_at, modified_at)
-         SELECT 1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7
+            (id, schema_version, data_dir, state_db_path, created_at, modified_at)
+         SELECT 1, ?1, ?2, ?3, ?4, ?4
          WHERE NOT EXISTS (SELECT 1 FROM db_config)",
     )
     .bind(expected.schema_version)
     .bind(&expected.data_dir)
     .bind(&expected.state_db_path)
-    .bind(&expected.instances_dir)
-    .bind(&expected.images_dir)
-    .bind(&expected.net_dir)
     .bind(now)
     .execute(pool)
     .await?;
 
     let rows = sqlx::query(
-        "SELECT schema_version, data_dir, state_db_path, instances_dir, images_dir, net_dir
+        "SELECT schema_version, data_dir, state_db_path
          FROM db_config",
     )
     .fetch_all(pool)
@@ -50,9 +47,6 @@ pub(super) async fn validate(
         schema_version: row.try_get("schema_version")?,
         data_dir: row.try_get("data_dir")?,
         state_db_path: row.try_get("state_db_path")?,
-        instances_dir: row.try_get("instances_dir")?,
-        images_dir: row.try_get("images_dir")?,
-        net_dir: row.try_get("net_dir")?,
     };
 
     compare_i64(
@@ -66,20 +60,9 @@ pub(super) async fn validate(
         &expected.state_db_path,
         &actual.state_db_path,
     )?;
-    compare_str(
-        "instances_dir",
-        &expected.instances_dir,
-        &actual.instances_dir,
-    )?;
-    compare_str("images_dir", &expected.images_dir, &actual.images_dir)?;
-    compare_str("net_dir", &expected.net_dir, &actual.net_dir)?;
-
-    Ok(LocalRoots::from_parts(
+    Ok(LocalRoots::with_state_db_path(
         actual.data_dir,
         actual.state_db_path,
-        actual.instances_dir,
-        actual.images_dir,
-        actual.net_dir,
     ))
 }
 
@@ -87,18 +70,12 @@ struct ExpectedDbConfig {
     schema_version: i64,
     data_dir: String,
     state_db_path: String,
-    instances_dir: String,
-    images_dir: String,
-    net_dir: String,
 }
 
 struct StoredDbConfig {
     schema_version: i64,
     data_dir: String,
     state_db_path: String,
-    instances_dir: String,
-    images_dir: String,
-    net_dir: String,
 }
 
 impl ExpectedDbConfig {
@@ -107,9 +84,6 @@ impl ExpectedDbConfig {
             schema_version: STATE_SCHEMA_VERSION,
             data_dir: path_to_db_string(roots.data_dir()),
             state_db_path: path_to_db_string(roots.state_db_path()),
-            instances_dir: path_to_db_string(roots.instances_dir()),
-            images_dir: path_to_db_string(roots.images_dir()),
-            net_dir: path_to_db_string(roots.net_dir()),
         }
     }
 }

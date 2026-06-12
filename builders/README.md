@@ -68,7 +68,7 @@ Register the resulting root disk
 
 ```sh
 mkdir -p ~/.local/share/bento/images/sha256-abc123
-cp ~/.local/share/bento/instances/<archboot-id>/rootfs.img ~/.local/share/bento/images/sha256-abc123/rootfs.img
+cp ~/.local/share/bento/machines/<archboot-id>/rootfs.img ~/.local/share/bento/images/sha256-abc123/rootfs.img
 
 cat > ~/.local/share/bento/images/registry.json <<'JSON'
 {

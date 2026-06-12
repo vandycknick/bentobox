@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use bento_vm_spec::VmSpec;
 use serde::{Deserialize, Serialize};
 
+use crate::lock_manager::LockId;
+
 use super::{MachineId, RequestedNetwork};
 
 #[non_exhaustive]
@@ -11,6 +13,7 @@ use super::{MachineId, RequestedNetwork};
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MachineConfig {
     pub id: MachineId,
+    pub lock_id: LockId,
     pub name: String,
     pub spec: VmSpec,
     pub instance_dir: PathBuf,

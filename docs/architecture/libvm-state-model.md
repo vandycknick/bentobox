@@ -76,9 +76,6 @@ erDiagram
         integer schema_version
         text data_dir
         text state_db_path
-        text instances_dir
-        text images_dir
-        text net_dir
         integer created_at
         integer modified_at
     }

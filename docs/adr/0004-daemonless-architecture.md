@@ -189,7 +189,7 @@ It does not own:
 - UUID to name mapping,
 - name to UUID mapping,
 - creation time,
-- instance directory path.
+- machine directory path.
 
 SQLite does not replace `config.yaml` as the canonical VM boot contract.
 
@@ -205,7 +205,7 @@ The current canonical layout is:
 ```text
 ~/.local/share/bento/
   state.db
-  instances/
+  machines/
     <uuid>/
       config.yaml
       vm.pid

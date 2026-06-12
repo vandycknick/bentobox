@@ -3,9 +3,6 @@ CREATE TABLE IF NOT EXISTS db_config (
     schema_version      INTEGER NOT NULL,
     data_dir            TEXT NOT NULL,
     state_db_path       TEXT NOT NULL,
-    instances_dir       TEXT NOT NULL,
-    images_dir          TEXT NOT NULL,
-    net_dir             TEXT NOT NULL,
     created_at          INTEGER NOT NULL,
     modified_at         INTEGER NOT NULL
 );

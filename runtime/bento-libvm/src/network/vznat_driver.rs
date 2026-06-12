@@ -49,6 +49,7 @@ mod tests {
     use std::path::Path;
 
     use super::VzNatDriver;
+    use crate::lock_manager::LockId;
     use crate::models::{MachineConfig, RequestedNetwork};
     use crate::network::core::{NetworkDriver, NetworkDriverContext, NetworkRequest, NetworkScope};
     use crate::network::NetworkDriverKind;
@@ -64,6 +65,7 @@ mod tests {
         let spec = sample_vm_spec();
         MachineConfig {
             id,
+            lock_id: LockId::from(0),
             name,
             spec,
             instance_dir: instance_dir.to_path_buf(),

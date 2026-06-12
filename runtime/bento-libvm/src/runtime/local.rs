@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::launch::prepare_instance_runtime;
+use crate::lock_manager::{LockGuard, LockId, LockManager, ManagedLock};
 use crate::paths::{root_disk_relative_path, vm_spec_path_in, LocalPaths, MachinePaths};
 use crate::root_disk::{clone_or_copy_root_disk, resize_raw_disk};
 use crate::runtime::RuntimeNetworkingConfig;
@@ -30,7 +31,6 @@ use crate::network::{
     prepare_network_runtime, reconcile_network_runtime, RequestedNetwork, RuntimeNetwork,
 };
 use crate::store::{Database, Sqlite};
-use crate::vm_lock::VmLock;
 use crate::{LibVmError, MachineId};
 
 const DEFAULT_IMAGE_CPUS: u8 = 1;
@@ -73,6 +73,7 @@ impl RuntimeStatus {
 pub(crate) struct LocalRuntime {
     paths: LocalPaths,
     db: Sqlite,
+    lock_manager: LockManager,
     networking: RuntimeNetworkingConfig,
 }
 
@@ -95,6 +96,11 @@ struct ObservedRuntime {
     started_at: Option<i64>,
     last_error: Option<String>,
     needs_writeback: bool,
+}
+
+struct LockedMachine {
+    _lock: LockGuard,
+    config: MachineConfig,
 }
 
 impl ObservedRuntime {
@@ -124,9 +130,11 @@ impl LocalRuntime {
     ) -> Result<Self, LibVmError> {
         let db = Sqlite::new(&paths).await?;
         let paths = LocalPaths::from_roots(db.roots().clone());
+        let lock_manager = LockManager::open(paths.locks_dir().to_path_buf())?;
         Ok(Self {
             paths,
             db,
+            lock_manager,
             networking,
         })
     }
@@ -319,10 +327,8 @@ impl LocalRuntime {
     ) -> Result<MachineInspect, LibVmError> {
         let network = network.into_model();
         self.validate_requested_network(&network).await?;
-        let mut config = self
-            .resolve_machine_config(&MachineRef::id(machine_id))
-            .await?;
-        let _lock = self.acquire_machine_lock(config.id)?;
+        let LockedMachine { _lock, mut config } =
+            self.lock_machine_config_by_id(machine_id).await?;
         let status = self.reconcile_machine_runtime_locked(&config).await?;
         if status.is_active() {
             return Err(LibVmError::MachineAlreadyRunning {
@@ -340,10 +346,8 @@ impl LocalRuntime {
         machine_id: MachineId,
         spec: VmSpec,
     ) -> Result<MachineInspect, LibVmError> {
-        let mut config = self
-            .resolve_machine_config(&MachineRef::id(machine_id))
-            .await?;
-        let _lock = self.acquire_machine_lock(config.id)?;
+        let LockedMachine { _lock, mut config } =
+            self.lock_machine_config_by_id(machine_id).await?;
         let status = self.reconcile_machine_runtime_locked(&config).await?;
         if status.is_active() {
             return Err(LibVmError::MachineAlreadyRunning {
@@ -362,10 +366,7 @@ impl LocalRuntime {
     }
 
     pub(crate) async fn remove_by_id(&self, machine_id: MachineId) -> Result<(), LibVmError> {
-        let config = self
-            .resolve_machine_config(&MachineRef::id(machine_id))
-            .await?;
-        let _lock = self.acquire_machine_lock(config.id)?;
+        let LockedMachine { _lock, config } = self.lock_machine_config_by_id(machine_id).await?;
         let status = self.reconcile_machine_runtime_locked(&config).await?;
         reconcile_network_runtime(&self.paths, &self.db, &config, status.is_active()).await?;
 
@@ -382,26 +383,26 @@ impl LocalRuntime {
         }
 
         self.db.remove_machine_state(config.id).await?;
-        self.db.remove_machine_config(&config).await
+        self.db.remove_machine_config(&config).await?;
+        self.lock_manager.free(config.lock_id)?;
+        Ok(())
     }
 
     pub(crate) async fn start_by_id(
         &self,
         machine_id: MachineId,
     ) -> Result<MachineInspect, LibVmError> {
-        let config = self
-            .resolve_machine_config(&MachineRef::id(machine_id))
-            .await?;
-        let machine_paths = self.paths.machine(config.id);
-        let pid_path = machine_paths.vmmon_pid_path();
-        let config_path = machine_paths.vm_spec_path();
-        let socket_path = machine_paths.vmmon_socket_path();
-        let trace_path = machine_paths.vmmon_trace_log_path();
-        let serial_log_path = machine_paths.serial_log_path();
-        let metadata_config_path = machine_paths.metadata_config_path();
+        let (config, pid_path, trace_path, sync_read) = {
+            let LockedMachine { _lock, config } =
+                self.lock_machine_config_by_id(machine_id).await?;
+            let machine_paths = self.paths.machine(config.id);
+            let pid_path = machine_paths.vmmon_pid_path();
+            let config_path = machine_paths.vm_spec_path();
+            let socket_path = machine_paths.vmmon_socket_path();
+            let trace_path = machine_paths.vmmon_trace_log_path();
+            let serial_log_path = machine_paths.serial_log_path();
+            let metadata_config_path = machine_paths.metadata_config_path();
 
-        let sync_read = {
-            let _lock = self.acquire_machine_lock(config.id)?;
             let status = self.reconcile_machine_runtime_locked(&config).await?;
             reconcile_network_runtime(&self.paths, &self.db, &config, status.is_active()).await?;
 
@@ -460,18 +461,18 @@ impl LocalRuntime {
                 return Err(err.into());
             }
 
-            sync_read
+            (config, pid_path, trace_path, sync_read)
         };
 
         if let Err(err) = wait_for_monitor_start(sync_read, &trace_path).await {
-            let _lock = self.acquire_machine_lock(config.id)?;
+            let _lock = self.acquire_machine_lock(config.lock_id).await?;
             self.mark_machine_stopped(config.id, Some(err.to_string()))
                 .await?;
             return Err(err);
         }
 
         {
-            let _lock = self.acquire_machine_lock(config.id)?;
+            let _lock = self.acquire_machine_lock(config.lock_id).await?;
             let pid = read_monitor_pid(&pid_path)?;
             if !process_is_alive(pid)? {
                 return Err(LibVmError::MonitorConnection {
@@ -510,12 +511,10 @@ impl LocalRuntime {
         &self,
         machine_id: MachineId,
     ) -> Result<MachineInspect, LibVmError> {
-        let config = self
-            .resolve_machine_config(&MachineRef::id(machine_id))
-            .await?;
-        let pid_path = self.paths.machine(config.id).vmmon_pid_path();
-        {
-            let _lock = self.acquire_machine_lock(config.id)?;
+        let (config, pid_path) = {
+            let LockedMachine { _lock, config } =
+                self.lock_machine_config_by_id(machine_id).await?;
+            let pid_path = self.paths.machine(config.id).vmmon_pid_path();
             let status = self.reconcile_machine_runtime_locked(&config).await?;
             if !status.is_running() {
                 return Err(LibVmError::MachineNotRunning {
@@ -535,11 +534,13 @@ impl LocalRuntime {
 
             kill(Pid::from_raw(pid), Some(Signal::SIGINT))
                 .map_err(|err| io::Error::other(err.to_string()))?;
-        }
+
+            (config, pid_path)
+        };
 
         wait_for_monitor_stop(&pid_path, &config.name).await?;
         {
-            let _lock = self.acquire_machine_lock(config.id)?;
+            let _lock = self.acquire_machine_lock(config.lock_id).await?;
             self.mark_machine_stopped(config.id, None).await?;
             reconcile_network_runtime(&self.paths, &self.db, &config, false).await?;
         }
@@ -668,19 +669,43 @@ impl LocalRuntime {
         }
     }
 
-    fn acquire_machine_lock(&self, machine_id: MachineId) -> Result<VmLock, LibVmError> {
-        Ok(VmLock::acquire(
-            &self.paths.machine(machine_id).lock_path(),
-        )?)
-    }
-
-    fn try_acquire_machine_lock(
+    async fn lock_machine_config_by_id(
         &self,
         machine_id: MachineId,
-    ) -> Result<Option<VmLock>, LibVmError> {
-        Ok(VmLock::try_acquire(
-            &self.paths.machine(machine_id).lock_path(),
-        )?)
+    ) -> Result<LockedMachine, LibVmError> {
+        let initial = self
+            .resolve_machine_config(&MachineRef::id(machine_id))
+            .await?;
+        let lock = self.acquire_machine_lock(initial.lock_id).await?;
+        let config = self
+            .resolve_machine_config(&MachineRef::id(machine_id))
+            .await?;
+        if config.lock_id != initial.lock_id {
+            return Err(io::Error::other(format!(
+                "machine {machine_id} lock id changed from {} to {} while acquiring lock",
+                initial.lock_id, config.lock_id
+            ))
+            .into());
+        }
+        Ok(LockedMachine {
+            _lock: lock,
+            config,
+        })
+    }
+
+    async fn acquire_machine_lock(&self, lock_id: LockId) -> Result<LockGuard, LibVmError> {
+        self.acquire_lock(self.lock_manager.retrieve(lock_id)).await
+    }
+
+    async fn acquire_lock(&self, lock: ManagedLock) -> Result<LockGuard, LibVmError> {
+        let lock = tokio::task::spawn_blocking(move || lock.lock())
+            .await
+            .map_err(|err| io::Error::other(format!("join lock task: {err}")))??;
+        Ok(lock)
+    }
+
+    fn try_acquire_machine_lock(&self, lock_id: LockId) -> Result<Option<LockGuard>, LibVmError> {
+        Ok(self.lock_manager.retrieve(lock_id).try_lock()?)
     }
 
     async fn reconcile_machine_runtime_best_effort(
@@ -689,7 +714,7 @@ impl LocalRuntime {
     ) -> Result<RuntimeStatus, LibVmError> {
         let observed = self.observe_machine_runtime(metadata).await?;
         if observed.needs_writeback {
-            let Some(_lock) = self.try_acquire_machine_lock(metadata.id)? else {
+            let Some(_lock) = self.try_acquire_machine_lock(metadata.lock_id)? else {
                 let state = self.machine_state(metadata.id).await?;
                 return Ok(RuntimeStatus::from_machine_state(&state));
             };
@@ -1157,9 +1182,18 @@ impl PendingMachine {
         }
         fs::rename(&self.staged_dir, &self.final_dir)?;
 
+        let lock = match runtime.lock_manager.allocate() {
+            Ok(lock) => lock,
+            Err(err) => {
+                let _ = fs::remove_dir_all(&self.final_dir);
+                return Err(err.into());
+            }
+        };
+
         let now = current_unix();
         let config = MachineConfig {
             id: self.id,
+            lock_id: lock.id(),
             name: self.name.clone(),
             spec: self.spec.clone(),
             instance_dir: self.final_dir.clone(),
@@ -1171,6 +1205,7 @@ impl PendingMachine {
             network: self.network.clone(),
         };
         if let Err(err) = runtime.db.insert_machine_config(&config).await {
+            let _ = lock.free();
             let _ = fs::remove_dir_all(&self.final_dir);
             return Err(err);
         }
@@ -1180,6 +1215,7 @@ impl PendingMachine {
             .await
         {
             let _ = runtime.db.remove_machine_config(&config).await;
+            let _ = lock.free();
             let _ = fs::remove_dir_all(&self.final_dir);
             return Err(err);
         }
@@ -1231,12 +1267,12 @@ fn create_staging_dir(paths: &LocalPaths) -> Result<PathBuf, LibVmError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
+    use crate::models::MachineRuntimeState;
+    use crate::paths::{root_disk_relative_path, LocalPaths};
+    use crate::runtime::local::{
         assign_mount_tags, read_syncpipe, release_startpipe, LocalRuntime, PendingMachine,
         StartupResult, ROOT_DISK_KERNEL_ARG,
     };
-    use crate::models::MachineRuntimeState;
-    use crate::paths::{root_disk_relative_path, LocalPaths};
     use crate::{LibVmError, MachineCreate, MachineRef, MachineStatus, RuntimeNetworkingConfig};
     use bento_vm_spec::{Boot, Guest, GuestOs, Hardware, Kernel, Mount, Storage, VmSpec};
     use nix::unistd::pipe;
@@ -1580,6 +1616,7 @@ mod tests {
             runtime.paths.machine(machine.id).dir()
         );
         assert!(runtime.paths.machine(machine.id).vm_spec_path().exists());
+        assert!(runtime.lock_manager.lock_path(machine.lock_id).exists());
     }
 
     #[tokio::test]
@@ -1642,7 +1679,8 @@ mod tests {
             .await
             .expect("set stale running state");
         let _lock = runtime
-            .acquire_machine_lock(machine.id)
+            .acquire_machine_lock(machine.lock_id)
+            .await
             .expect("hold machine lock");
 
         let inspected = tokio::time::timeout(
@@ -1703,7 +1741,7 @@ mod tests {
 
         wait_for_machine_state(&runtime, machine_id, MachineRuntimeState::Stopping).await;
         let lock = runtime
-            .try_acquire_machine_lock(machine_id)
+            .try_acquire_machine_lock(machine.lock_id)
             .expect("try acquire lock while stop waits")
             .expect("machine lock should be available while stop waits");
         drop(lock);
@@ -1804,6 +1842,7 @@ mod tests {
             .commit(&runtime)
             .await
             .expect("commit machine");
+        let lock_path = runtime.lock_manager.lock_path(machine.lock_id);
 
         runtime
             .remove_by_id(machine.id)
@@ -1811,6 +1850,7 @@ mod tests {
             .expect("remove machine");
 
         assert!(!machine.instance_dir.exists());
+        assert!(!lock_path.exists());
         assert!(runtime
             .list_machine_configs()
             .await
@@ -1856,5 +1896,39 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn removed_machine_lock_id_is_reused() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
+
+        let machine = create_pending_sample(&runtime, "devbox")
+            .await
+            .expect("create pending machine")
+            .commit(&runtime)
+            .await
+            .expect("commit machine");
+        let lock_id = machine.lock_id;
+        let lock_path = runtime.lock_manager.lock_path(lock_id);
+
+        runtime
+            .remove_by_id(machine.id)
+            .await
+            .expect("remove machine");
+        let next_machine = create_pending_sample(&runtime, "nextbox")
+            .await
+            .expect("create next pending machine")
+            .commit(&runtime)
+            .await
+            .expect("commit next machine");
+
+        assert_eq!(next_machine.lock_id, lock_id);
+        assert!(lock_path.exists());
     }
 }

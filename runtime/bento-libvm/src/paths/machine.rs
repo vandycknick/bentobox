@@ -7,7 +7,6 @@ const VMMON_TRACE_LOG_FILE_NAME: &str = "vm.trace.log";
 const SERIAL_LOG_FILE_NAME: &str = "serial.log";
 const ROOT_DISK_FILE_NAME: &str = "rootfs.img";
 const METADATA_CONFIG_FILE_NAME: &str = "metadata.json";
-const LOCK_FILE_NAME: &str = "vm.lock";
 const NETWORK_LINK_NAME: &str = "net";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,10 +51,6 @@ impl MachinePaths {
         self.dir.join(SERIAL_LOG_FILE_NAME)
     }
 
-    pub(crate) fn lock_path(&self) -> PathBuf {
-        self.dir.join(LOCK_FILE_NAME)
-    }
-
     pub(crate) fn network_link(&self) -> PathBuf {
         self.dir.join(NETWORK_LINK_NAME)
     }
@@ -81,47 +76,43 @@ pub(crate) fn vmmon_trace_log_path_in(dir: &Path) -> PathBuf {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{root_disk_relative_path, MachinePaths};
+    use crate::paths::{root_disk_relative_path, MachinePaths};
 
     #[test]
     fn machine_paths_use_expected_filenames() {
-        let paths = MachinePaths::new("/tmp/bento/instances/test");
+        let paths = MachinePaths::new("/tmp/bento/machines/test");
 
         assert_eq!(
             paths.vm_spec_path(),
-            PathBuf::from("/tmp/bento/instances/test/config.json")
+            PathBuf::from("/tmp/bento/machines/test/config.json")
         );
         assert_eq!(
             paths.metadata_config_path(),
-            PathBuf::from("/tmp/bento/instances/test/metadata.json")
+            PathBuf::from("/tmp/bento/machines/test/metadata.json")
         );
         assert_eq!(
             paths.root_disk_path(),
-            PathBuf::from("/tmp/bento/instances/test/rootfs.img")
+            PathBuf::from("/tmp/bento/machines/test/rootfs.img")
         );
         assert_eq!(
             paths.vmmon_pid_path(),
-            PathBuf::from("/tmp/bento/instances/test/vm.pid")
+            PathBuf::from("/tmp/bento/machines/test/vm.pid")
         );
         assert_eq!(
             paths.vmmon_socket_path(),
-            PathBuf::from("/tmp/bento/instances/test/vm.sock")
+            PathBuf::from("/tmp/bento/machines/test/vm.sock")
         );
         assert_eq!(
             paths.vmmon_trace_log_path(),
-            PathBuf::from("/tmp/bento/instances/test/vm.trace.log")
+            PathBuf::from("/tmp/bento/machines/test/vm.trace.log")
         );
         assert_eq!(
             paths.serial_log_path(),
-            PathBuf::from("/tmp/bento/instances/test/serial.log")
-        );
-        assert_eq!(
-            paths.lock_path(),
-            PathBuf::from("/tmp/bento/instances/test/vm.lock")
+            PathBuf::from("/tmp/bento/machines/test/serial.log")
         );
         assert_eq!(
             paths.network_link(),
-            PathBuf::from("/tmp/bento/instances/test/net")
+            PathBuf::from("/tmp/bento/machines/test/net")
         );
         assert_eq!(root_disk_relative_path(), PathBuf::from("rootfs.img"));
     }

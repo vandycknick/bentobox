@@ -177,6 +177,7 @@ mod tests {
 
     use bento_vm_spec::{Hardware, VmSpec};
 
+    use crate::lock_manager::LockId;
     use crate::models::{
         MachineConfig, MachineRuntimeState, MachineState, NetworkAttachment, NetworkInstance,
         RequestedNetwork,
@@ -194,6 +195,7 @@ mod tests {
     fn machine_from_path(id: MachineId, name: String, instance_dir: &Path) -> MachineConfig {
         MachineConfig {
             id,
+            lock_id: LockId::from(0),
             name,
             spec: sample_vm_spec(),
             instance_dir: instance_dir.to_path_buf(),
@@ -227,8 +229,8 @@ mod tests {
 
         let result = sqlx::query(
             "INSERT INTO db_config
-                (id, schema_version, data_dir, state_db_path, instances_dir, images_dir, net_dir, created_at, modified_at)
-             VALUES (2, 1, '/tmp/other', '/tmp/other/state.db', '/tmp/other/instances', '/tmp/other/images', '/tmp/other/net', 1, 1)",
+                (id, schema_version, data_dir, state_db_path, created_at, modified_at)
+             VALUES (2, 1, '/tmp/other', '/tmp/other/state.db', 1, 1)",
         )
         .execute(&db.pool)
         .await;
@@ -307,6 +309,7 @@ mod tests {
 
         let machine = MachineConfig {
             id,
+            lock_id: LockId::from(42),
             name: "jsonb-test".to_string(),
             spec: sample_vm_spec(),
             instance_dir: paths.machine(id).dir().to_path_buf(),
@@ -340,6 +343,14 @@ mod tests {
                 .await
                 .expect("query storage type");
         assert_eq!(storage_type, "blob");
+        let lock_id: i64 = sqlx::query_scalar(
+            "SELECT json_extract(json(config_json), '$.lockId') FROM machine_config WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .expect("query lock id");
+        assert_eq!(lock_id, 42);
     }
 
     #[tokio::test]
