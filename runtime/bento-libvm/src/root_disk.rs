@@ -2,6 +2,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use bento_utils::format_storage_size;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +23,9 @@ pub(crate) enum RootDiskError {
     BaseRootfsNotFile { path: PathBuf },
 
     #[error(
-        "refusing to shrink raw disk {path} from {current_size} bytes to {requested_size} bytes"
+        "refusing to shrink raw disk {path} from {} to {}",
+        format_storage_size(*current_size),
+        format_storage_size(*requested_size)
     )]
     RawDiskShrinkUnsupported {
         path: PathBuf,

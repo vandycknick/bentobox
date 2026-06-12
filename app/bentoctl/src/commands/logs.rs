@@ -2,15 +2,18 @@ use std::fmt::{Display, Formatter};
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Duration;
 
-use bento_libvm::{MachineRef, Runtime};
+use bento_libvm::Runtime;
 use clap::Args;
+
+use crate::commands::get_machine;
+use crate::config::GlobalConfig;
 
 #[derive(Args, Debug)]
 #[command(about = "Show VM logs")]
 pub struct Cmd {
-    /// Name or ID of the VM whose logs should be shown.
+    /// Name or ID of the VM whose logs should be shown. Defaults to the configured default VM.
     #[arg(value_name = "VM")]
-    pub name: String,
+    pub name: Option<String>,
     /// Continue streaming logs as they are written.
     #[arg(long)]
     pub follow: bool,
@@ -18,15 +21,16 @@ pub struct Cmd {
 
 impl Display for Cmd {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name)
+        match self.name.as_deref() {
+            Some(name) => f.write_str(name),
+            None => Ok(()),
+        }
     }
 }
 
 impl Cmd {
-    pub async fn run(&self, libvm: &Runtime) -> eyre::Result<()> {
-        let machine = libvm
-            .get_machine(&MachineRef::parse(self.name.clone())?)
-            .await?;
+    pub async fn run(&self, libvm: &Runtime, config: &GlobalConfig) -> eyre::Result<()> {
+        let (_name, machine) = get_machine(libvm, config, self.name.as_deref()).await?;
         let inspection = machine.inspect().await?;
         let path = inspection.trace_log_path();
         if !path.exists() {

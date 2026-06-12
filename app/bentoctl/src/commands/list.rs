@@ -1,11 +1,13 @@
 use std::fmt::{Display, Formatter};
 use std::io::Write;
 
-use bento_libvm::{MachineStatus, Runtime};
+use bento_libvm::Runtime;
 use clap::Args;
 use tabwriter::TabWriter;
 
-use crate::constants::PROFILE_METADATA_KEY;
+use crate::commands::machine_view::MachineView;
+use crate::commands::output::{human_bytes, human_memory_mib};
+use crate::config::GlobalConfig;
 
 #[derive(Args, Debug, Default)]
 #[command(about = "List VMs")]
@@ -22,75 +24,54 @@ impl Display for Cmd {
 }
 
 impl Cmd {
-    pub async fn run(&self, libvm: &Runtime) -> eyre::Result<()> {
+    pub async fn run(&self, libvm: &Runtime, config: &GlobalConfig) -> eyre::Result<()> {
         let machines = libvm.list_machines().await?;
-        let mut inspections = Vec::with_capacity(machines.len());
+        let mut views = Vec::with_capacity(machines.len());
+        let default_machine = config.default_machine();
         for machine in machines {
-            inspections.push(machine.inspect().await?);
+            let inspection = machine.inspect().await?;
+            let runtime_status = if self.json && inspection.is_running() {
+                Some(machine.get_status().await?)
+            } else {
+                None
+            };
+            views.push(MachineView::new(
+                &inspection,
+                runtime_status.as_ref(),
+                default_machine == Some(inspection.name()),
+            ));
         }
-        let host_arch = std::env::consts::ARCH;
         let now = now_unix();
 
         if self.json {
-            let values = inspections
-                .into_iter()
-                .map(|inspection| {
-                    serde_json::json!({
-                        "id": inspection.id(),
-                        "name": inspection.name(),
-                        "state": state_label(inspection.status()),
-                        "profile": inspection.metadata().get(PROFILE_METADATA_KEY).cloned(),
-                        "image": inspection.image_ref(),
-                        "created_at": inspection.created_at(),
-                    })
-                })
-                .collect::<Vec<_>>();
-            println!("{}", serde_json::to_string_pretty(&values)?);
+            println!("{}", serde_json::to_string_pretty(&views)?);
             return Ok(());
         }
 
         let mut out = TabWriter::new(std::io::stdout()).padding(2);
         writeln!(
             &mut out,
-            "ID\tNAME\tSTATE\tPROFILE\tIMAGE\tCREATED\tARCH\tCPUS\tMEMORY"
+            "ID\tNAME\tSTATE\tCPUS\tMEMORY\tDISK\tCREATED\tDEFAULT"
         )?;
 
-        for inspection in inspections {
-            let hardware = inspection.spec().hardware.as_ref();
-            let cpus = hardware
-                .and_then(|hardware| hardware.cpus)
-                .unwrap_or(1)
-                .to_string();
-            let memory = hardware
-                .and_then(|hardware| hardware.memory)
-                .unwrap_or(512)
-                .to_string();
-            let created = relative_time(inspection.created_at(), now);
-            let status = status_label(inspection.status(), inspection.started_at(), now);
-            let profile = inspection
-                .metadata()
-                .get(PROFILE_METADATA_KEY)
-                .map(String::as_str)
-                .unwrap_or("-");
-            let image = if inspection.image_ref().is_empty() {
-                "-"
-            } else {
-                inspection.image_ref()
-            };
-            let id = inspection.id();
+        for view in views {
+            let cpus = view.resources.cpus.to_string();
+            let memory = human_memory_mib(Some(view.resources.memory_mib));
+            let disk = human_bytes(view.root_disk_size);
+            let created = relative_time(view.created_at, now);
+            let default_marker = if view.default { "*" } else { "-" };
 
             writeln!(
                 &mut out,
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                short_id(&id),
-                inspection.name(),
-                status,
-                profile,
-                image,
-                created,
-                host_arch,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                short_id(&view.id),
+                &view.name,
+                view.state,
                 cpus,
                 memory,
+                disk,
+                created,
+                default_marker,
             )?;
         }
 
@@ -102,25 +83,6 @@ impl Cmd {
 
 fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
-}
-
-fn state_label(state: MachineStatus) -> &'static str {
-    if state.is_running() {
-        "running"
-    } else {
-        "stopped"
-    }
-}
-
-fn status_label(state: MachineStatus, started_at: Option<i64>, now: i64) -> String {
-    if state.is_running() {
-        let uptime = started_at
-            .map(|started_at| relative_time(started_at, now))
-            .unwrap_or_else(|| "N/A".to_string());
-        format!("Up {uptime}")
-    } else {
-        "Stopped".to_string()
-    }
 }
 
 fn now_unix() -> i64 {

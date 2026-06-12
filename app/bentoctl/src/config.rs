@@ -4,12 +4,14 @@ use std::path::PathBuf;
 use bento_libvm::{NetdRuntimeConfig, NetworkDriverKind, RuntimeNetworkingConfig};
 use eyre::Context;
 use serde::Deserialize;
+use serde_yaml_ng::{Mapping, Value};
 
 const APP_DIR_NAME: &str = "bento";
 const CONFIG_FILE_NAME: &str = "config.yaml";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct GlobalConfig {
+    pub(crate) default_machine: Option<String>,
     pub(crate) networking: RuntimeNetworkingConfig,
 }
 
@@ -39,7 +41,22 @@ impl GlobalConfig {
             policy_config_dir: Some(config_dir),
             ..RuntimeNetworkingConfig::default()
         };
-        Self { networking }
+        Self {
+            default_machine: None,
+            networking,
+        }
+    }
+
+    pub(crate) fn default_machine(&self) -> Option<&str> {
+        self.default_machine.as_deref()
+    }
+
+    pub(crate) fn write_default_machine(default_machine: Option<&str>) -> eyre::Result<()> {
+        let config_dir = resolve_default_config_dir()?;
+        std::fs::create_dir_all(&config_dir)
+            .with_context(|| format!("create global config directory {}", config_dir.display()))?;
+        let config_path = config_dir.join(CONFIG_FILE_NAME);
+        write_default_machine_to_path(&config_path, default_machine)
     }
 }
 
@@ -77,6 +94,10 @@ fn absolute_path(name: &'static str, value: OsString) -> eyre::Result<PathBuf> {
 fn parse_global_config(input: &str) -> eyre::Result<GlobalConfig> {
     let parsed: RawGlobalConfig =
         serde_yaml_ng::from_str(input).context("deserialize global config yaml")?;
+    let default_machine = parsed
+        .default_machine
+        .map(|name| validate_default_machine_name(&name).map(|()| name))
+        .transpose()?;
 
     let private_driver = parsed
         .networking
@@ -93,6 +114,7 @@ fn parse_global_config(input: &str) -> eyre::Result<GlobalConfig> {
     validate_netd_config(&netd)?;
 
     Ok(GlobalConfig {
+        default_machine,
         networking: RuntimeNetworkingConfig {
             private_driver,
             netd,
@@ -103,7 +125,55 @@ fn parse_global_config(input: &str) -> eyre::Result<GlobalConfig> {
 
 #[derive(Debug, Deserialize)]
 struct RawGlobalConfig {
+    default_machine: Option<String>,
     networking: Option<RawNetworkingConfig>,
+}
+
+fn validate_default_machine_name(name: &str) -> eyre::Result<()> {
+    if name.trim().is_empty() {
+        return Err(eyre::eyre!("default_machine cannot be empty"));
+    }
+    Ok(())
+}
+
+fn write_default_machine_to_path(
+    config_path: &std::path::Path,
+    default_machine: Option<&str>,
+) -> eyre::Result<()> {
+    let mut document = match std::fs::read_to_string(config_path) {
+        Ok(raw) => serde_yaml_ng::from_str::<Value>(&raw)
+            .with_context(|| format!("parse global config {}", config_path.display()))?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Value::Mapping(Mapping::new()),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("read global config {}", config_path.display()))
+        }
+    };
+
+    if matches!(document, Value::Null) {
+        document = Value::Mapping(Mapping::new());
+    }
+    let Some(mapping) = document.as_mapping_mut() else {
+        return Err(eyre::eyre!(
+            "global config {} must be a YAML mapping",
+            config_path.display()
+        ));
+    };
+
+    let key = Value::String("default_machine".to_string());
+    match default_machine {
+        Some(name) => {
+            validate_default_machine_name(name)?;
+            mapping.insert(key, Value::String(name.to_string()));
+        }
+        None => {
+            mapping.remove(&key);
+        }
+    }
+
+    let rendered = serde_yaml_ng::to_string(&document).context("serialize global config yaml")?;
+    std::fs::write(config_path, rendered)
+        .with_context(|| format!("write global config {}", config_path.display()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,7 +260,7 @@ fn validate_netd_config(config: &NetdRuntimeConfig) -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     use super::*;
 
@@ -198,8 +268,21 @@ mod tests {
     fn parse_global_config_reads_defaults() {
         let cfg = parse_global_config("{}").expect("parse config");
 
+        assert_eq!(cfg.default_machine, None);
         assert_eq!(cfg.networking.private_driver, NetworkDriverKind::Netd);
         assert_eq!(cfg.networking.netd, NetdRuntimeConfig::default());
+    }
+
+    #[test]
+    fn parse_global_config_reads_default_machine() {
+        let cfg = parse_global_config("default_machine: dev\n").expect("parse config");
+
+        assert_eq!(cfg.default_machine.as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn parse_global_config_rejects_empty_default_machine() {
+        assert!(parse_global_config("default_machine: '  '\n").is_err());
     }
 
     #[test]
@@ -331,5 +414,38 @@ networking:
             config.networking.policy_config_dir.as_deref(),
             Some(Path::new("/tmp/bento-config"))
         );
+    }
+
+    #[test]
+    fn write_default_machine_preserves_existing_config() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config_path = dir.path().join("config.yaml");
+        fs::write(
+            &config_path,
+            r#"
+networking:
+  private:
+    driver: vznat
+"#,
+        )
+        .expect("write config");
+
+        write_default_machine_to_path(&config_path, Some("dev")).expect("write default machine");
+        let raw = fs::read_to_string(&config_path).expect("read config");
+        let cfg = parse_global_config(&raw).expect("parse config");
+
+        assert_eq!(cfg.default_machine.as_deref(), Some("dev"));
+        assert_eq!(cfg.networking.private_driver, NetworkDriverKind::VzNat);
+
+        write_default_machine_to_path(&config_path, None).expect("unset default machine");
+        let raw = fs::read_to_string(&config_path).expect("read config");
+        let cfg = parse_global_config(&raw).expect("parse config");
+
+        assert_eq!(cfg.default_machine, None);
+        assert_eq!(cfg.networking.private_driver, NetworkDriverKind::VzNat);
+        let document = serde_yaml_ng::from_str::<Value>(&raw).expect("parse yaml value");
+        let mapping = document.as_mapping().expect("config mapping");
+        assert!(mapping.contains_key(Value::String("networking".to_string())));
+        assert!(!mapping.contains_key(Value::String("default_machine".to_string())));
     }
 }

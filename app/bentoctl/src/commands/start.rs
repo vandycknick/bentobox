@@ -1,32 +1,46 @@
-use bento_libvm::{MachineRef, Runtime, DEFAULT_GUEST_READINESS_TIMEOUT};
+use bento_libvm::{Runtime, DEFAULT_GUEST_READINESS_TIMEOUT};
 use clap::Args;
 use std::fmt::{Display, Formatter};
+
+use crate::commands::get_machine;
+use crate::config::GlobalConfig;
+use crate::progress::Progress;
 
 #[derive(Args, Debug)]
 #[command(about = "Start a persistent VM")]
 pub struct Cmd {
-    /// Name or ID of the VM to start.
+    /// Name or ID of the VM to start. Defaults to the configured default VM.
     #[arg(value_name = "VM")]
-    pub name: String,
+    pub name: Option<String>,
 }
 
 impl Display for Cmd {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name)
+        match self.name.as_deref() {
+            Some(name) => f.write_str(name),
+            None => Ok(()),
+        }
     }
 }
 
 impl Cmd {
-    pub async fn run(&self, libvm: &Runtime) -> eyre::Result<()> {
-        let machine_ref = MachineRef::parse(self.name.clone())?;
-        let machine = libvm.get_machine(&machine_ref).await?;
-        machine.start().await?;
+    pub async fn run(&self, libvm: &Runtime, config: &GlobalConfig) -> eyre::Result<()> {
+        let name = self.name.as_deref();
+        let progress = Progress::start(match name {
+            Some(name) => format!("finding {name}"),
+            None => "finding default VM".to_string(),
+        });
+        let (name, machine) = get_machine(libvm, config, name).await?;
+        progress.step(format!("starting {name}"));
+        let inspection = machine.start().await?;
 
+        progress.step(format!("waiting for guest agent in {name}"));
         machine
             .wait_for_guest_running(DEFAULT_GUEST_READINESS_TIMEOUT)
             .await
             .map_err(|err| eyre::eyre!("guest readiness check failed: {err}"))?;
 
+        progress.success(format!("{} is ready", inspection.name()));
         Ok(())
     }
 }

@@ -17,7 +17,7 @@ pub use crate::error::LibVmError;
 pub use crate::host::{ensure_certificate_authority, CertificateAuthority};
 pub use crate::machine::{
     Machine, MachineCreate, MachineInspect, MachineRef, MachineRuntimeStatus, MachineStatus,
-    RuntimeComponentStatus,
+    MachineUpdate, RuntimeComponentStatus,
 };
 pub use crate::monitor::DEFAULT_GUEST_READINESS_TIMEOUT;
 pub use crate::mount_path::resolve_mount_location;

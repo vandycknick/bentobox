@@ -80,6 +80,23 @@ impl Display for RootfsImageSource {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageProgress {
+    ResolvingManifest { image_ref: String },
+    HashingSource { image_ref: String },
+    ReadingArchive { image_ref: String },
+    CheckingCache { image_ref: String },
+    CacheHit { image_ref: String },
+    CacheMiss { image_ref: String },
+    UsingLocalDisk { image_ref: String },
+    PullingLayer { index: usize, total: usize },
+    ApplyingLayer { index: usize, total: usize },
+    WritingExt4,
+    SavingBaseImage,
+}
+
+pub type ImageProgressCallback<'a> = &'a (dyn Fn(ImageProgress) + Send + Sync + 'a);
+
 #[derive(Debug, Clone)]
 pub struct ImageStore {
     root: PathBuf,
@@ -134,15 +151,19 @@ impl ImageStore {
         &self,
         image_ref: &str,
         options: RootfsOptions,
+        progress: Option<ImageProgressCallback<'_>>,
     ) -> OciDiskResult<RootfsImage> {
         match ImageSource::parse(image_ref)? {
             ImageSource::RemoteOci(image_ref) => {
-                self.get_or_create_remote_oci(&image_ref, options).await
+                self.get_or_create_remote_oci(&image_ref, options, progress)
+                    .await
             }
-            ImageSource::LocalDisk(path) => self.local_disk(image_ref, path, options),
-            ImageSource::RootfsTar(path) => self.get_or_create_rootfs_tar(image_ref, path, options),
+            ImageSource::LocalDisk(path) => self.local_disk(image_ref, path, options, progress),
+            ImageSource::RootfsTar(path) => {
+                self.get_or_create_rootfs_tar(image_ref, path, options, progress)
+            }
             ImageSource::OciArchive(path) => {
-                self.get_or_create_oci_archive(image_ref, path, options)
+                self.get_or_create_oci_archive(image_ref, path, options, progress)
             }
         }
     }
@@ -151,22 +172,41 @@ impl ImageStore {
         &self,
         image_ref: &str,
         options: RootfsOptions,
+        progress: Option<ImageProgressCallback<'_>>,
     ) -> OciDiskResult<RootfsImage> {
         fs::create_dir_all(&self.root)?;
 
         let reference = RegistryClient::parse_reference(image_ref)?;
         let canonical_ref = reference.to_string();
         let registry = RegistryClient::new()?;
+        emit_progress(
+            progress,
+            ImageProgress::ResolvingManifest {
+                image_ref: canonical_ref.clone(),
+            },
+        );
         let resolved = registry
             .resolve_manifest(&reference, &options.platform)
             .await?;
 
+        emit_progress(
+            progress,
+            ImageProgress::CheckingCache {
+                image_ref: canonical_ref.clone(),
+            },
+        );
         if let Some(image) = self.cached_image(
             &canonical_ref,
             &resolved.manifest_digest,
             &options.platform,
             RootfsImageSource::OciRegistry,
         )? {
+            emit_progress(
+                progress,
+                ImageProgress::CacheHit {
+                    image_ref: canonical_ref.clone(),
+                },
+            );
             if reference.is_tag() {
                 self.update_tag_mapping(
                     &canonical_ref,
@@ -176,9 +216,15 @@ impl ImageStore {
             }
             return Ok(image);
         }
+        emit_progress(
+            progress,
+            ImageProgress::CacheMiss {
+                image_ref: canonical_ref.clone(),
+            },
+        );
 
         let image = self
-            .create_rootfs(&registry, &canonical_ref, &resolved, &options)
+            .create_rootfs(&registry, &canonical_ref, &resolved, &options, progress)
             .await?;
         if reference.is_tag() {
             self.update_tag_mapping(&canonical_ref, &options.platform, &resolved.manifest_digest)?;
@@ -192,6 +238,7 @@ impl ImageStore {
         image_ref: &str,
         resolved: &ResolvedManifest,
         options: &RootfsOptions,
+        progress: Option<ImageProgressCallback<'_>>,
     ) -> OciDiskResult<RootfsImage> {
         let image_id = &resolved.manifest_digest;
         let final_dir = self.image_dir(image_id, &options.platform)?;
@@ -202,6 +249,12 @@ impl ImageStore {
                 &options.platform,
                 RootfsImageSource::OciRegistry,
             )? {
+                emit_progress(
+                    progress,
+                    ImageProgress::CacheHit {
+                        image_ref: image_ref.to_string(),
+                    },
+                );
                 return Ok(image);
             }
         }
@@ -210,15 +263,34 @@ impl ImageStore {
         let stage_rootfs = staging.path().join(ROOTFS_FILE_NAME);
         let mut writer = Ext4Writer::create(&stage_rootfs, options.disk_size_bytes)?;
 
-        for layer in resolved.manifest.layers() {
+        let layers = resolved.manifest.layers();
+        let total = layers.len();
+        for (index, layer) in layers.iter().enumerate() {
+            let layer_index = index + 1;
+            emit_progress(
+                progress,
+                ImageProgress::PullingLayer {
+                    index: layer_index,
+                    total,
+                },
+            );
             let bytes = registry
                 .pull_blob(&resolved.reference, layer, image_ref)
                 .await?;
+            emit_progress(
+                progress,
+                ImageProgress::ApplyingLayer {
+                    index: layer_index,
+                    total,
+                },
+            );
             let reader = layer_reader(&layer.media_type, bytes)?;
             apply_layer(reader, &mut writer)?;
         }
 
+        emit_progress(progress, ImageProgress::WritingExt4);
         writer.finish()?;
+        emit_progress(progress, ImageProgress::SavingBaseImage);
         self.write_metadata(
             staging.path(),
             image_ref,
@@ -238,6 +310,12 @@ impl ImageStore {
                 &options.platform,
                 RootfsImageSource::OciRegistry,
             )? {
+                emit_progress(
+                    progress,
+                    ImageProgress::CacheHit {
+                        image_ref: image_ref.to_string(),
+                    },
+                );
                 return Ok(image);
             }
         }
@@ -258,7 +336,14 @@ impl ImageStore {
         image_ref: &str,
         path: PathBuf,
         options: RootfsOptions,
+        progress: Option<ImageProgressCallback<'_>>,
     ) -> OciDiskResult<RootfsImage> {
+        emit_progress(
+            progress,
+            ImageProgress::UsingLocalDisk {
+                image_ref: image_ref.to_string(),
+            },
+        );
         let path = canonical_local_file(image_ref, &path)?;
         let image_id = format!(
             "local-disk-sha256:{}",
@@ -278,28 +363,59 @@ impl ImageStore {
         image_ref: &str,
         path: PathBuf,
         options: RootfsOptions,
+        progress: Option<ImageProgressCallback<'_>>,
     ) -> OciDiskResult<RootfsImage> {
         fs::create_dir_all(&self.root)?;
         let path = canonical_local_file(image_ref, &path)?;
         reject_known_tar_compression(image_ref, &path)?;
+        emit_progress(
+            progress,
+            ImageProgress::HashingSource {
+                image_ref: image_ref.to_string(),
+            },
+        );
         let image_id = format!("tar-sha256:{}", sha256_file(&path)?);
 
+        emit_progress(
+            progress,
+            ImageProgress::CheckingCache {
+                image_ref: image_ref.to_string(),
+            },
+        );
         if let Some(image) = self.cached_image(
             image_ref,
             &image_id,
             &options.platform,
             RootfsImageSource::Tar,
         )? {
+            emit_progress(
+                progress,
+                ImageProgress::CacheHit {
+                    image_ref: image_ref.to_string(),
+                },
+            );
             return Ok(image);
         }
+        emit_progress(
+            progress,
+            ImageProgress::CacheMiss {
+                image_ref: image_ref.to_string(),
+            },
+        );
 
         let final_dir = self.image_dir(&image_id, &options.platform)?;
         let staging = StagingDir::create(&self.root)?;
         let stage_rootfs = staging.path().join(ROOTFS_FILE_NAME);
         let mut writer = Ext4Writer::create(&stage_rootfs, options.disk_size_bytes)?;
         let file = fs::File::open(&path)?;
+        emit_progress(
+            progress,
+            ImageProgress::ApplyingLayer { index: 1, total: 1 },
+        );
         apply_layer(file, &mut writer)?;
+        emit_progress(progress, ImageProgress::WritingExt4);
         writer.finish()?;
+        emit_progress(progress, ImageProgress::SavingBaseImage);
         self.write_metadata(
             staging.path(),
             image_ref,
@@ -319,6 +435,12 @@ impl ImageStore {
                 &options.platform,
                 RootfsImageSource::Tar,
             )? {
+                emit_progress(
+                    progress,
+                    ImageProgress::CacheHit {
+                        image_ref: image_ref.to_string(),
+                    },
+                );
                 return Ok(image);
             }
         }
@@ -339,30 +461,65 @@ impl ImageStore {
         image_ref: &str,
         path: PathBuf,
         options: RootfsOptions,
+        progress: Option<ImageProgressCallback<'_>>,
     ) -> OciDiskResult<RootfsImage> {
         fs::create_dir_all(&self.root)?;
         let path = canonical_local_file(image_ref, &path)?;
+        emit_progress(
+            progress,
+            ImageProgress::ReadingArchive {
+                image_ref: image_ref.to_string(),
+            },
+        );
         let archive = read_oci_archive(&path, image_ref, &options.platform)?;
         let image_id = archive.manifest_digest.clone();
 
+        emit_progress(
+            progress,
+            ImageProgress::CheckingCache {
+                image_ref: image_ref.to_string(),
+            },
+        );
         if let Some(image) = self.cached_image(
             image_ref,
             &image_id,
             &options.platform,
             RootfsImageSource::OciArchive,
         )? {
+            emit_progress(
+                progress,
+                ImageProgress::CacheHit {
+                    image_ref: image_ref.to_string(),
+                },
+            );
             return Ok(image);
         }
+        emit_progress(
+            progress,
+            ImageProgress::CacheMiss {
+                image_ref: image_ref.to_string(),
+            },
+        );
 
         let final_dir = self.image_dir(&image_id, &options.platform)?;
         let staging = StagingDir::create(&self.root)?;
         let stage_rootfs = staging.path().join(ROOTFS_FILE_NAME);
         let mut writer = Ext4Writer::create(&stage_rootfs, options.disk_size_bytes)?;
-        for layer in archive.layers {
+        let total = archive.layers.len();
+        for (index, layer) in archive.layers.into_iter().enumerate() {
+            emit_progress(
+                progress,
+                ImageProgress::ApplyingLayer {
+                    index: index + 1,
+                    total,
+                },
+            );
             let reader = layer_reader(&layer.media_type, layer.bytes)?;
             apply_layer(reader, &mut writer)?;
         }
+        emit_progress(progress, ImageProgress::WritingExt4);
         writer.finish()?;
+        emit_progress(progress, ImageProgress::SavingBaseImage);
         self.write_metadata(
             staging.path(),
             image_ref,
@@ -382,6 +539,12 @@ impl ImageStore {
                 &options.platform,
                 RootfsImageSource::OciArchive,
             )? {
+                emit_progress(
+                    progress,
+                    ImageProgress::CacheHit {
+                        image_ref: image_ref.to_string(),
+                    },
+                );
                 return Ok(image);
             }
         }
@@ -563,6 +726,12 @@ impl ImageStore {
         fs::write(&temp_path, serde_json::to_vec_pretty(index)?)?;
         fs::rename(temp_path, path)?;
         Ok(())
+    }
+}
+
+fn emit_progress(progress: Option<ImageProgressCallback<'_>>, event: ImageProgress) {
+    if let Some(progress) = progress {
+        progress(event);
     }
 }
 
@@ -758,13 +927,14 @@ fn now_unix_nanos() -> u128 {
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Read};
+    use std::sync::Mutex;
 
     use bento_ext4::Reader;
     use tar::{Builder, Header};
 
     use crate::store::{
-        image_id_path_component, sha256_bytes, ImageMetadata, ImageStore, RootfsImageSource,
-        RootfsOptions, METADATA_VERSION, ROOTFS_FILESYSTEM, ROOTFS_FILE_NAME,
+        image_id_path_component, sha256_bytes, ImageMetadata, ImageProgress, ImageStore,
+        RootfsImageSource, RootfsOptions, METADATA_VERSION, ROOTFS_FILESYSTEM, ROOTFS_FILE_NAME,
     };
     use crate::{Platform, RootfsImage};
 
@@ -910,6 +1080,7 @@ mod tests {
                 &format!("disk:{}", disk.display()),
                 disk.clone(),
                 RootfsOptions::new(Platform::linux_amd64()),
+                None,
             )
             .expect("local disk");
 
@@ -929,6 +1100,7 @@ mod tests {
                 &format!("tar:{}", tar_path.display()),
                 tar_path,
                 RootfsOptions::new(Platform::linux_amd64()).with_disk_size_bytes(64 * 1024 * 1024),
+                None,
             )
             .expect("convert tar");
 
@@ -946,6 +1118,47 @@ mod tests {
     }
 
     #[test]
+    fn rootfs_tar_reports_cache_build_progress() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let tar_path = temp.path().join("rootfs.tar");
+        std::fs::write(&tar_path, tar_file("etc/progress", b"tick")).expect("write tar");
+        let store = ImageStore::open(temp.path().join("cache")).expect("open store");
+        let events = Mutex::new(Vec::new());
+
+        {
+            let progress = |event| {
+                events
+                    .lock()
+                    .expect("record progress event")
+                    .push(progress_label(event));
+            };
+
+            store
+                .get_or_create_rootfs_tar(
+                    &format!("tar:{}", tar_path.display()),
+                    tar_path,
+                    RootfsOptions::new(Platform::linux_amd64())
+                        .with_disk_size_bytes(64 * 1024 * 1024),
+                    Some(&progress),
+                )
+                .expect("convert tar");
+        }
+
+        let events = events.into_inner().expect("progress events");
+        assert_eq!(
+            events,
+            vec![
+                "hash-source",
+                "check-cache",
+                "cache-miss",
+                "apply-layer-1/1",
+                "write-ext4",
+                "save-base-image",
+            ]
+        );
+    }
+
+    #[test]
     fn rootfs_tar_reuses_content_cache() {
         let temp = tempfile::tempdir().expect("create temp dir");
         let tar_path = temp.path().join("rootfs.tar");
@@ -959,10 +1172,16 @@ mod tests {
                 &format!("tar:{}", tar_path.display()),
                 tar_path.clone(),
                 options.clone(),
+                None,
             )
             .expect("first convert");
         let second = store
-            .get_or_create_rootfs_tar(&format!("tar:{}", tar_path.display()), tar_path, options)
+            .get_or_create_rootfs_tar(
+                &format!("tar:{}", tar_path.display()),
+                tar_path,
+                options,
+                None,
+            )
             .expect("second convert");
 
         assert_eq!(first.path, second.path);
@@ -980,7 +1199,12 @@ mod tests {
             RootfsOptions::new(Platform::linux_amd64()).with_disk_size_bytes(8 * 1024 * 1024);
 
         let image = store
-            .get_or_create_rootfs_tar(&format!("tar:{}", tar_path.display()), tar_path, options)
+            .get_or_create_rootfs_tar(
+                &format!("tar:{}", tar_path.display()),
+                tar_path,
+                options,
+                None,
+            )
             .expect("convert oversized tar");
 
         let mut reader = Reader::new(&image.path).expect("open grown ext4");
@@ -1002,6 +1226,7 @@ mod tests {
                 &format!("tar:{}", tar_path.display()),
                 tar_path,
                 RootfsOptions::new(Platform::linux_amd64()),
+                None,
             )
             .expect_err("compressed tar should fail");
 
@@ -1019,6 +1244,7 @@ mod tests {
                 &format!("oci:{}", archive_path.display()),
                 archive_path,
                 RootfsOptions::new(Platform::linux_amd64()).with_disk_size_bytes(64 * 1024 * 1024),
+                None,
             )
             .expect("convert oci archive");
 
@@ -1106,5 +1332,25 @@ mod tests {
         builder
             .append(&header, Cursor::new(data.to_vec()))
             .expect("append archive file");
+    }
+
+    fn progress_label(event: ImageProgress) -> String {
+        match event {
+            ImageProgress::ResolvingManifest { .. } => "resolve-manifest".to_string(),
+            ImageProgress::HashingSource { .. } => "hash-source".to_string(),
+            ImageProgress::ReadingArchive { .. } => "read-archive".to_string(),
+            ImageProgress::CheckingCache { .. } => "check-cache".to_string(),
+            ImageProgress::CacheHit { .. } => "cache-hit".to_string(),
+            ImageProgress::CacheMiss { .. } => "cache-miss".to_string(),
+            ImageProgress::UsingLocalDisk { .. } => "use-local-disk".to_string(),
+            ImageProgress::PullingLayer { index, total } => {
+                format!("pull-layer-{index}/{total}")
+            }
+            ImageProgress::ApplyingLayer { index, total } => {
+                format!("apply-layer-{index}/{total}")
+            }
+            ImageProgress::WritingExt4 => "write-ext4".to_string(),
+            ImageProgress::SavingBaseImage => "save-base-image".to_string(),
+        }
     }
 }

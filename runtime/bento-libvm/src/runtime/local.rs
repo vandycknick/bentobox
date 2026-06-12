@@ -11,6 +11,7 @@ use crate::lock_manager::{LockGuard, LockId, LockManager, ManagedLock};
 use crate::paths::{root_disk_relative_path, vm_spec_path_in, LocalPaths, MachinePaths};
 use crate::root_disk::{clone_or_copy_root_disk, resize_raw_disk};
 use crate::runtime::RuntimeNetworkingConfig;
+use bento_utils::format_storage_size;
 use bento_vm_spec::{Boot, Disk, Guest, GuestOs, Hardware, Kernel, Mount, Storage, VmSpec};
 use nix::{
     errno::Errno,
@@ -20,7 +21,7 @@ use nix::{
 
 use crate::machine::{
     validate_machine_name, MachineCreate, MachineInspect, MachineRef, MachineRefKind,
-    MachineRuntimeStatus,
+    MachineRuntimeStatus, MachineUpdate,
 };
 use crate::models::{
     MachineConfig, MachineRuntimeState, MachineState, NetworkDefinition as ModelNetworkDefinition,
@@ -84,10 +85,21 @@ struct PendingMachine {
     staged_dir: PathBuf,
     final_dir: PathBuf,
     image_ref: String,
+    root_disk_size: Option<u64>,
     labels: BTreeMap<String, String>,
     metadata: BTreeMap<String, String>,
     network: ModelRequestedNetwork,
     committed: bool,
+}
+
+struct PendingMachineRequest {
+    name: String,
+    spec: VmSpec,
+    image_ref: String,
+    root_disk_size: Option<u64>,
+    labels: BTreeMap<String, String>,
+    metadata: BTreeMap<String, String>,
+    network: ModelRequestedNetwork,
 }
 
 struct ObservedRuntime {
@@ -156,6 +168,17 @@ impl LocalRuntime {
 
         let base_rootfs_path =
             canonicalize_existing_path(&request.base_rootfs_path, "base rootfs")?;
+        let root_disk_size = request.disk_size_bytes.or_else(|| {
+            fs::metadata(&base_rootfs_path)
+                .ok()
+                .map(|metadata| metadata.len())
+        });
+        if matches!(root_disk_size, Some(0)) {
+            return Err(LibVmError::InvalidCreateRequest {
+                name: request.name,
+                reason: "root disk size must be greater than 0".to_string(),
+            });
+        }
         let kernel_path = canonicalize_optional_existing_path(request.kernel.as_deref(), "kernel")?;
         let initramfs_path =
             canonicalize_optional_existing_path(request.initramfs.as_deref(), "initramfs")?;
@@ -210,14 +233,15 @@ impl LocalRuntime {
         let network = request.network.unwrap_or_default().into_model();
         self.validate_requested_network(&network).await?;
         let pending = self
-            .create_pending(
-                request.name.clone(),
+            .create_pending(PendingMachineRequest {
+                name: request.name.clone(),
                 spec,
-                request.image_ref.clone(),
-                request.labels,
-                request.metadata,
+                image_ref: request.image_ref.clone(),
+                root_disk_size,
+                labels: request.labels,
+                metadata: request.metadata,
                 network,
-            )
+            })
             .await?;
         let rootfs_path = MachinePaths::new(pending.dir()).root_disk_path();
         clone_or_copy_root_disk(&base_rootfs_path, &rootfs_path)?;
@@ -231,13 +255,17 @@ impl LocalRuntime {
 
     async fn create_pending(
         &self,
-        name: String,
-        spec: VmSpec,
-        image_ref: String,
-        labels: BTreeMap<String, String>,
-        metadata: BTreeMap<String, String>,
-        network: ModelRequestedNetwork,
+        request: PendingMachineRequest,
     ) -> Result<PendingMachine, LibVmError> {
+        let PendingMachineRequest {
+            name,
+            spec,
+            image_ref,
+            root_disk_size,
+            labels,
+            metadata,
+            network,
+        } = request;
         validate_machine_name(&name)?;
 
         if self
@@ -265,6 +293,7 @@ impl LocalRuntime {
             staged_dir,
             final_dir,
             image_ref,
+            root_disk_size,
             labels,
             metadata,
             network,
@@ -365,6 +394,111 @@ impl LocalRuntime {
         self.machine_inspect(config).await
     }
 
+    pub(crate) async fn update_by_id(
+        &self,
+        machine_id: MachineId,
+        update: MachineUpdate,
+    ) -> Result<MachineInspect, LibVmError> {
+        let network = update.network.clone().map(RequestedNetwork::into_model);
+        if let Some(network) = &network {
+            self.validate_requested_network(network).await?;
+        }
+        if let Some(name) = update.name.as_deref() {
+            validate_machine_name(name)?;
+        }
+
+        if update.is_empty() {
+            return Err(LibVmError::InvalidMachineUpdate {
+                reference: machine_id.to_string(),
+                reason: "at least one setting is required".to_string(),
+            });
+        }
+        if matches!(update.cpus, Some(0)) {
+            return Err(LibVmError::InvalidMachineUpdate {
+                reference: machine_id.to_string(),
+                reason: "cpus must be greater than 0".to_string(),
+            });
+        }
+        if matches!(update.memory_mib, Some(0)) {
+            return Err(LibVmError::InvalidMachineUpdate {
+                reference: machine_id.to_string(),
+                reason: "memory must be greater than 0".to_string(),
+            });
+        }
+        if matches!(update.root_disk_size, Some(0)) {
+            return Err(LibVmError::InvalidMachineUpdate {
+                reference: machine_id.to_string(),
+                reason: "root disk size must be greater than 0".to_string(),
+            });
+        }
+
+        let LockedMachine { _lock, mut config } =
+            self.lock_machine_config_by_id(machine_id).await?;
+        let status = self.reconcile_machine_runtime_locked(&config).await?;
+        if status.is_active() {
+            return Err(LibVmError::MachineAlreadyRunning {
+                reference: config.name.clone(),
+            });
+        }
+
+        if let Some(new_name) = update.name {
+            if new_name != config.name {
+                if let Some(existing) = self.db.get_machine_config_by_name(&new_name).await? {
+                    if existing.id != machine_id {
+                        return Err(LibVmError::InvalidMachineUpdate {
+                            reference: config.name.clone(),
+                            reason: format!("machine name {new_name:?} already exists"),
+                        });
+                    }
+                }
+                config.name = new_name;
+            }
+        }
+
+        if let Some(size_bytes) = update.root_disk_size {
+            validate_root_disk_growth(&config, size_bytes)?;
+            config.root_disk_size = Some(size_bytes);
+        }
+
+        let previous_spec = config.spec.clone();
+        let mut spec_changed = false;
+        if update.cpus.is_some()
+            || update.memory_mib.is_some()
+            || update.nested_virtualization.is_some()
+            || update.rosetta.is_some()
+        {
+            let hardware = config.spec.hardware.get_or_insert_with(empty_hardware);
+            if let Some(cpus) = update.cpus {
+                hardware.cpus = Some(cpus);
+            }
+            if let Some(memory_mib) = update.memory_mib {
+                hardware.memory = Some(memory_mib);
+            }
+            if let Some(nested_virtualization) = update.nested_virtualization {
+                hardware.nested_virtualization = Some(nested_virtualization);
+            }
+            if let Some(rosetta) = update.rosetta {
+                hardware.rosetta = Some(rosetta);
+            }
+            spec_changed = true;
+        }
+        if let Some(network) = network {
+            config.network = network;
+        }
+
+        config.modified_at = current_unix();
+        if spec_changed {
+            write_machine_config(&config.instance_dir, &config.name, &config.spec)?;
+        }
+        if let Err(err) = self.db.update_machine_config(&config).await {
+            if spec_changed {
+                let _ = write_machine_config(&config.instance_dir, &config.name, &previous_spec);
+            }
+            return Err(err);
+        }
+        self.machine_inspect(config).await
+    }
+
     pub(crate) async fn remove_by_id(&self, machine_id: MachineId) -> Result<(), LibVmError> {
         let LockedMachine { _lock, config } = self.lock_machine_config_by_id(machine_id).await?;
         let status = self.reconcile_machine_runtime_locked(&config).await?;
@@ -411,6 +545,8 @@ impl LocalRuntime {
                     reference: config.name.clone(),
                 });
             }
+
+            reconcile_root_disk_size(&config)?;
 
             let resolved_network =
                 prepare_network_runtime(&self.paths, &self.db, &config, &self.networking).await?;
@@ -880,6 +1016,41 @@ fn write_machine_config(instance_dir: &Path, name: &str, spec: &VmSpec) -> Resul
     Ok(())
 }
 
+fn empty_hardware() -> Hardware {
+    Hardware {
+        cpus: None,
+        memory: None,
+        nested_virtualization: None,
+        rosetta: None,
+    }
+}
+
+fn validate_root_disk_growth(config: &MachineConfig, desired_size: u64) -> Result<(), LibVmError> {
+    let root_disk_path = MachinePaths::new(&config.instance_dir).root_disk_path();
+    let current_size = fs::metadata(&root_disk_path)?.len();
+    if desired_size < current_size {
+        return Err(LibVmError::InvalidMachineUpdate {
+            reference: config.name.clone(),
+            reason: format!(
+                "root disk cannot be shrunk from {} to {}",
+                format_storage_size(current_size),
+                format_storage_size(desired_size)
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn reconcile_root_disk_size(config: &MachineConfig) -> Result<(), LibVmError> {
+    let Some(desired_size) = config.root_disk_size else {
+        return Ok(());
+    };
+
+    let root_disk_path = MachinePaths::new(&config.instance_dir).root_disk_path();
+    resize_raw_disk(&root_disk_path, desired_size)?;
+    Ok(())
+}
+
 fn assign_mount_tags(mounts: Vec<Mount>) -> Vec<Mount> {
     mounts
         .into_iter()
@@ -1200,6 +1371,7 @@ impl PendingMachine {
             created_at: now,
             modified_at: now,
             image_ref: self.image_ref.clone(),
+            root_disk_size: self.root_disk_size,
             labels: self.labels.clone(),
             metadata: self.metadata.clone(),
             network: self.network.clone(),
@@ -1271,13 +1443,16 @@ mod tests {
     use crate::paths::{root_disk_relative_path, LocalPaths};
     use crate::runtime::local::{
         assign_mount_tags, read_syncpipe, release_startpipe, LocalRuntime, PendingMachine,
-        StartupResult, ROOT_DISK_KERNEL_ARG,
+        PendingMachineRequest, StartupResult, ROOT_DISK_KERNEL_ARG,
     };
-    use crate::{LibVmError, MachineCreate, MachineRef, MachineStatus, RuntimeNetworkingConfig};
+    use crate::{
+        LibVmError, MachineCreate, MachineRef, MachineStatus, MachineUpdate,
+        RuntimeNetworkingConfig,
+    };
     use bento_vm_spec::{Boot, Guest, GuestOs, Hardware, Kernel, Mount, Storage, VmSpec};
     use nix::unistd::pipe;
     use std::io::{Read, Write};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     fn sample_vm_spec() -> VmSpec {
@@ -1337,14 +1512,15 @@ mod tests {
         name: &str,
     ) -> Result<PendingMachine, LibVmError> {
         runtime
-            .create_pending(
-                name.to_string(),
-                sample_vm_spec(),
-                "test-image:latest".to_string(),
-                std::collections::BTreeMap::new(),
-                std::collections::BTreeMap::new(),
-                crate::models::RequestedNetwork::default(),
-            )
+            .create_pending(PendingMachineRequest {
+                name: name.to_string(),
+                spec: sample_vm_spec(),
+                image_ref: "test-image:latest".to_string(),
+                root_disk_size: None,
+                labels: std::collections::BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
+                network: crate::models::RequestedNetwork::default(),
+            })
             .await
     }
 
@@ -1374,6 +1550,15 @@ mod tests {
         std::fs::create_dir_all(&image_dir).expect("image dir should be created");
         let base_rootfs_path = image_dir.join("rootfs.img");
         std::fs::write(&base_rootfs_path, b"disk").expect("rootfs should be written");
+        base_rootfs_path
+    }
+
+    fn write_base_rootfs_with_size(data_dir: &Path, size: u64) -> PathBuf {
+        let image_dir = data_dir.join("images/sha256-test/linux-arm64");
+        std::fs::create_dir_all(&image_dir).expect("image dir should be created");
+        let base_rootfs_path = image_dir.join("rootfs.img");
+        let file = std::fs::File::create(&base_rootfs_path).expect("rootfs should be created");
+        file.set_len(size).expect("rootfs size should be set");
         base_rootfs_path
     }
 
@@ -1463,6 +1648,7 @@ mod tests {
             spec_userdata(&machine.spec),
             Some("#!/bin/sh\necho profile\n")
         );
+        assert_eq!(machine.root_disk_size, Some(4));
     }
 
     #[tokio::test]
@@ -1824,6 +2010,167 @@ mod tests {
             .cpus,
             Some(6)
         );
+    }
+
+    #[tokio::test]
+    async fn update_renames_stopped_machine() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
+
+        let machine = create_pending_sample(&runtime, "devbox")
+            .await
+            .expect("create pending machine")
+            .commit(&runtime)
+            .await
+            .expect("commit machine");
+
+        let updated = runtime
+            .update_by_id(
+                machine.id,
+                MachineUpdate {
+                    name: Some("ubuntu".to_string()),
+                    ..MachineUpdate::default()
+                },
+            )
+            .await
+            .expect("rename machine");
+
+        assert_eq!(updated.name(), "ubuntu");
+        assert!(matches!(
+            runtime
+                .inspect(&MachineRef::parse("devbox").expect("parse old name"))
+                .await
+                .expect_err("old name should not resolve"),
+            LibVmError::MachineNotFound { ref reference } if reference == "devbox"
+        ));
+        assert_eq!(
+            runtime
+                .inspect(&MachineRef::parse("ubuntu").expect("parse new name"))
+                .await
+                .expect("new name should resolve")
+                .id(),
+            machine.id.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn update_rejects_duplicate_machine_name() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
+
+        create_pending_sample(&runtime, "devbox")
+            .await
+            .expect("create first machine")
+            .commit(&runtime)
+            .await
+            .expect("commit first machine");
+        let second = create_pending_sample(&runtime, "ubuntu")
+            .await
+            .expect("create second machine")
+            .commit(&runtime)
+            .await
+            .expect("commit second machine");
+
+        let err = runtime
+            .update_by_id(
+                second.id,
+                MachineUpdate {
+                    name: Some("devbox".to_string()),
+                    ..MachineUpdate::default()
+                },
+            )
+            .await
+            .expect_err("duplicate rename should fail");
+
+        assert!(matches!(
+            err,
+            LibVmError::InvalidMachineUpdate { ref reference, ref reason }
+                if reference == "ubuntu" && reason.contains("already exists")
+        ));
+    }
+
+    #[tokio::test]
+    async fn update_changes_hardware_and_desired_root_disk_size() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let data_dir = temp.path().join("bento");
+        let base_rootfs_path = write_base_rootfs(&data_dir);
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(data_dir),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
+        let machine = runtime
+            .create_machine(create_request(base_rootfs_path, "devbox"))
+            .await
+            .expect("create machine");
+
+        let updated = runtime
+            .update_by_id(
+                machine.id,
+                MachineUpdate {
+                    cpus: Some(6),
+                    memory_mib: Some(2048),
+                    root_disk_size: Some(8),
+                    ..MachineUpdate::default()
+                },
+            )
+            .await
+            .expect("update machine");
+
+        assert_eq!(spec_hardware(updated.spec()).cpus, Some(6));
+        assert_eq!(spec_hardware(updated.spec()).memory, Some(2048));
+        assert_eq!(updated.root_disk_size(), Some(8));
+        let persisted = runtime
+            .inspect(&MachineRef::parse("devbox").expect("parse machine ref"))
+            .await
+            .expect("inspect persisted update");
+        assert_eq!(spec_hardware(persisted.spec()).cpus, Some(6));
+        assert_eq!(persisted.root_disk_size(), Some(8));
+    }
+
+    #[tokio::test]
+    async fn update_root_disk_shrink_error_uses_human_sizes() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let data_dir = temp.path().join("bento");
+        let base_rootfs_path = write_base_rootfs_with_size(&data_dir, 2 * 1024 * 1024);
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(data_dir),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
+        let machine = runtime
+            .create_machine(create_request(base_rootfs_path, "devbox"))
+            .await
+            .expect("create machine");
+
+        let err = runtime
+            .update_by_id(
+                machine.id,
+                MachineUpdate {
+                    root_disk_size: Some(1024 * 1024),
+                    ..MachineUpdate::default()
+                },
+            )
+            .await
+            .expect_err("root disk shrink should fail");
+
+        assert!(matches!(
+            err,
+            LibVmError::InvalidMachineUpdate { ref reason, .. }
+                if reason.contains("2MiB") && reason.contains("1MiB")
+        ));
     }
 
     #[tokio::test]

@@ -202,6 +202,7 @@ mod tests {
             created_at: 1,
             modified_at: 1,
             image_ref: String::new(),
+            root_disk_size: None,
             labels: BTreeMap::new(),
             metadata: BTreeMap::new(),
             network: RequestedNetwork::default(),
@@ -316,6 +317,7 @@ mod tests {
             created_at: 1,
             modified_at: 1,
             image_ref: "test-image:latest".to_string(),
+            root_disk_size: Some(64_000_000_000),
             labels,
             metadata,
             network: RequestedNetwork::default(),
@@ -331,6 +333,7 @@ mod tests {
             .expect("machine exists");
 
         assert_eq!(found.labels.get("owner").map(String::as_str), Some("test"));
+        assert_eq!(found.name, "jsonb-test");
         assert_eq!(
             found.metadata.get("bento.profile").map(String::as_str),
             Some("rust-dev")
@@ -343,6 +346,22 @@ mod tests {
                 .await
                 .expect("query storage type");
         assert_eq!(storage_type, "blob");
+        let config_id: Option<String> = sqlx::query_scalar(
+            "SELECT json_extract(json(config_json), '$.id') FROM machine_config WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .expect("query config id");
+        assert_eq!(config_id, Some(id.to_string()));
+        let config_name: Option<String> = sqlx::query_scalar(
+            "SELECT json_extract(json(config_json), '$.name') FROM machine_config WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .expect("query config name");
+        assert_eq!(config_name.as_deref(), Some("jsonb-test"));
         let lock_id: i64 = sqlx::query_scalar(
             "SELECT json_extract(json(config_json), '$.lockId') FROM machine_config WHERE id = ?1",
         )
@@ -351,6 +370,22 @@ mod tests {
         .await
         .expect("query lock id");
         assert_eq!(lock_id, 42);
+        let created_at: Option<i64> = sqlx::query_scalar(
+            "SELECT json_extract(json(config_json), '$.createdAt') FROM machine_config WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .expect("query created_at");
+        assert_eq!(created_at, Some(1));
+        let modified_at: Option<i64> = sqlx::query_scalar(
+            "SELECT json_extract(json(config_json), '$.modifiedAt') FROM machine_config WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .expect("query modified_at");
+        assert_eq!(modified_at, Some(1));
     }
 
     #[tokio::test]
@@ -420,6 +455,14 @@ mod tests {
                 .expect("state exists"),
             state
         );
+        let updated_at: Option<i64> = sqlx::query_scalar(
+            "SELECT json_extract(json(state_json), '$.updatedAt') FROM machine_state WHERE machine_id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .expect("query state updated_at");
+        assert_eq!(updated_at, Some(43));
 
         db.remove_machine_state(id).await.expect("remove state");
         assert!(db.get_machine_state(id).await.expect("get state").is_none());
@@ -449,6 +492,7 @@ mod tests {
             .await
             .expect("lookup")
             .expect("machine exists");
+        assert_eq!(found.modified_at, 2);
         assert_eq!(
             found
                 .spec
@@ -530,21 +574,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn created_at_columns_are_immutable() {
+    async fn machine_timestamps_live_in_json_not_columns() {
         let (_dir, paths) = temp_paths();
         let db = Sqlite::new(&paths).await.expect("open db");
-        let id = MachineId::new();
-        let metadata = machine_from_path(id, "immutable".to_string(), paths.machine(id).dir());
-        db.insert_machine_config(&metadata)
-            .await
-            .expect("insert machine");
 
-        let result = sqlx::query("UPDATE machine_config SET created_at = ?1 WHERE id = ?2")
-            .bind(metadata.created_at + 1)
-            .bind(id.to_string())
-            .execute(&db.pool)
-            .await;
-        assert!(result.is_err(), "created_at update should be rejected");
+        let machine_config_timestamp_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('machine_config') WHERE name IN ('created_at', 'modified_at')",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("query machine_config columns");
+        assert_eq!(machine_config_timestamp_columns, 0);
+
+        let machine_state_timestamp_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('machine_state') WHERE name = 'updated_at'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .expect("query machine_state columns");
+        assert_eq!(machine_state_timestamp_columns, 0);
     }
 
     #[tokio::test]

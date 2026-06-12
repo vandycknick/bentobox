@@ -53,7 +53,6 @@ impl<'row> FromRow<'row, SqliteRow> for DbMachineState {
         let status = MachineRuntimeState::parse(&status_str).map_err(|err| {
             column_decode_error("machine_state.status", std::io::Error::other(err))
         })?;
-        let updated_at: i64 = row.try_get("updated_at")?;
         let state: MachineState =
             deserialize_json(row.try_get("state_json")?, "machine_state.state_json")?;
         if state.machine_id != machine_id {
@@ -71,15 +70,6 @@ impl<'row> FromRow<'row, SqliteRow> for DbMachineState {
                 std::io::Error::other(format!(
                     "state status {:?} does not match indexed status {:?}",
                     state.status, status
-                )),
-            ));
-        }
-        if state.updated_at != updated_at {
-            return Err(column_decode_error(
-                "machine_state.state_json.updatedAt",
-                std::io::Error::other(format!(
-                    "state updated_at {} does not match indexed updated_at {}",
-                    state.updated_at, updated_at
                 )),
             ));
         }

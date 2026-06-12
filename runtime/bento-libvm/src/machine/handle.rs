@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bento_vm_spec::VmSpec;
 
-use crate::machine::{MachineInspect, MachineRuntimeStatus};
+use crate::machine::{MachineInspect, MachineRuntimeStatus, MachineUpdate};
 use crate::network::RequestedNetwork;
 use crate::runtime::Runtime;
 use crate::{LibVmError, MachineId};
@@ -47,6 +47,10 @@ impl Machine {
         network: RequestedNetwork,
     ) -> Result<MachineInspect, LibVmError> {
         self.runtime.set_machine_network(self.id, network).await
+    }
+
+    pub async fn update(&self, update: MachineUpdate) -> Result<MachineInspect, LibVmError> {
+        self.runtime.update_machine(self.id, update).await
     }
 
     pub async fn wait_for_guest_running(&self, timeout: Duration) -> Result<(), LibVmError> {

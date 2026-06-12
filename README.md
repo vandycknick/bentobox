@@ -188,7 +188,7 @@ bento shell dev
 bento exec dev -- pwd
 bento logs dev --follow
 bento status dev
-bento inspect dev --json
+bento inspect dev
 bento stop dev
 bento restart dev
 bento rm dev
@@ -224,16 +224,14 @@ Registry paths are relative to `~/.local/share/bento/images` and must point to a
 
 ## Introspection
 
-Status is concise and readiness-oriented; inspect is the full machine record.
+Status is concise and readiness-oriented; inspect is the full machine record. Both commands print JSON.
 
 ```bash
 bento status dev
-bento status dev --json
 bento inspect dev
-bento inspect dev --json
 ```
 
-`status` includes process state, guest agent readiness, network mode, profile, and image. `inspect --json` is the better target for scripts that need labels, metadata, paths, and the resolved VM spec.
+`status` includes process state, guest agent readiness, network mode, profile, and image. `inspect` is the better target for scripts that need labels, metadata, paths, and the resolved VM spec.
 
 ## More Docs
 

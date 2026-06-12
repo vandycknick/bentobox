@@ -2,6 +2,7 @@ mod commands;
 mod config;
 mod constants;
 mod profile;
+mod progress;
 mod ssh;
 mod terminal;
 

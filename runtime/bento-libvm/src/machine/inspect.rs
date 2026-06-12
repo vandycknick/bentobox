@@ -45,6 +45,10 @@ impl MachineInspect {
         &self.config.image_ref
     }
 
+    pub fn root_disk_size(&self) -> Option<u64> {
+        self.config.root_disk_size
+    }
+
     pub fn labels(&self) -> &BTreeMap<String, String> {
         &self.config.labels
     }

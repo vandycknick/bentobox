@@ -1,59 +1,56 @@
 use std::fmt::{Display, Formatter};
 
-use bento_libvm::{Machine, MachineRef, Runtime};
+use bento_libvm::{Machine, Runtime};
 use clap::Args;
 use eyre::bail;
 
+use crate::commands::{get_machine, not_running_error};
+use crate::config::GlobalConfig;
 use crate::ssh;
 
 #[derive(Args, Debug)]
 #[command(about = "Execute a command in a running VM")]
 pub struct Cmd {
-    /// Name or ID of the running VM.
+    /// Name or ID of the running VM. Defaults to the configured default VM.
     #[arg(value_name = "VM")]
-    pub name: String,
+    pub name: Option<String>,
 
     /// Guest user for the command.
     #[arg(long, short = 'u')]
     pub user: Option<String>,
 
     /// Guest command and arguments to execute after `--`.
-    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(required = true, last = true, allow_hyphen_values = true)]
     pub command: Vec<String>,
 }
 
 impl Display for Cmd {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let name = self.name.as_deref().unwrap_or("<default>");
         match self.user.as_deref() {
-            Some(user) => write!(
-                f,
-                "{} --user {} -- {}",
-                self.name,
-                user,
-                self.command.join(" ")
-            ),
-            None => write!(f, "{} -- {}", self.name, self.command.join(" ")),
+            Some(user) => write!(f, "{} --user {} -- {}", name, user, self.command.join(" ")),
+            None => write!(f, "{} -- {}", name, self.command.join(" ")),
         }
     }
 }
 
 impl Cmd {
-    pub async fn run(&self, libvm: &Runtime) -> eyre::Result<()> {
-        let machine = libvm
-            .get_machine(&MachineRef::parse(self.name.clone())?)
-            .await?;
+    pub async fn run(&self, libvm: &Runtime, config: &GlobalConfig) -> eyre::Result<()> {
+        if self.command.is_empty() {
+            bail!("command is required; pass it after `--`");
+        }
+
+        let (_reference, machine) = get_machine(libvm, config, self.name.as_deref()).await?;
         let inspection = machine.inspect().await?;
+        let machine_name = inspection.name().to_string();
 
         if !inspection.is_running() {
-            return Err(bento_libvm::LibVmError::MachineNotRunning {
-                reference: self.name.clone(),
-            }
-            .into());
+            return Err(not_running_error(&machine_name));
         }
 
         ensure_guest_ready(&machine).await?;
 
-        let status = ssh::run_remote_command(&self.name, self.user.as_deref(), &self.command)?;
+        let status = ssh::run_remote_command(&machine_name, self.user.as_deref(), &self.command)?;
         std::process::exit(status.code().unwrap_or(1));
     }
 }
@@ -98,10 +95,29 @@ mod tests {
             other => panic!("expected exec command, got {other:?}"),
         };
 
-        assert_eq!(exec.name, "arch");
+        assert_eq!(exec.name.as_deref(), Some("arch"));
         assert_eq!(
             exec.command,
-            vec!["make", "kernel", "TRACK=stable", "ARCH=arm64"]
+            vec![
+                "make".to_string(),
+                "kernel".to_string(),
+                "TRACK=stable".to_string(),
+                "ARCH=arm64".to_string(),
+            ]
         );
+    }
+
+    #[test]
+    fn exec_command_parses_default_machine_form() {
+        let cmd = BentoCtlCmd::try_parse_from(["bentoctl", "exec", "--", "make", "kernel"])
+            .expect("exec command should parse");
+
+        let exec = match cmd.cmd {
+            Command::Exec(cmd) => cmd,
+            other => panic!("expected exec command, got {other:?}"),
+        };
+
+        assert_eq!(exec.name, None);
+        assert_eq!(exec.command, vec!["make".to_string(), "kernel".to_string()]);
     }
 }

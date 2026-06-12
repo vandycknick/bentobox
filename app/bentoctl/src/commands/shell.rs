@@ -1,8 +1,10 @@
-use bento_libvm::{Machine, MachineRef, Runtime};
+use bento_libvm::{Machine, Runtime};
 use clap::{Args, ValueEnum};
 use eyre::bail;
 use std::fmt::{Display, Formatter};
 
+use crate::commands::{get_machine, not_running_error};
+use crate::config::GlobalConfig;
 use crate::ssh;
 use crate::terminal;
 
@@ -15,9 +17,9 @@ pub enum AttachMode {
 #[derive(Args, Debug)]
 #[command(about = "Open a shell in a running VM")]
 pub struct Cmd {
-    /// Name or ID of the running VM.
+    /// Name or ID of the running VM. Defaults to the configured default VM.
     #[arg(value_name = "VM")]
-    pub name: String,
+    pub name: Option<String>,
 
     /// Guest user for the shell session.
     #[arg(long, short = 'u')]
@@ -30,13 +32,14 @@ pub struct Cmd {
 
 impl Display for Cmd {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let name = self.name.as_deref().unwrap_or("<default>");
         match (self.user.as_deref(), self.attach) {
             (Some(user), Some(attach)) => {
-                write!(f, "{} --user {} --attach {}", self.name, user, attach)
+                write!(f, "{} --user {} --attach {}", name, user, attach)
             }
-            (Some(user), None) => write!(f, "{} --user {}", self.name, user),
-            (None, Some(attach)) => write!(f, "{} --attach {}", self.name, attach),
-            (None, None) => write!(f, "{}", self.name),
+            (Some(user), None) => write!(f, "{} --user {}", name, user),
+            (None, Some(attach)) => write!(f, "{} --attach {}", name, attach),
+            (None, None) => write!(f, "{}", name),
         }
     }
 }
@@ -51,36 +54,25 @@ impl Display for AttachMode {
 }
 
 impl Cmd {
-    pub async fn run(&self, libvm: &Runtime) -> eyre::Result<()> {
-        let machine_ref = MachineRef::parse(self.name.clone())?;
-        let machine = libvm.get_machine(&machine_ref).await?;
+    pub async fn run(&self, libvm: &Runtime, config: &GlobalConfig) -> eyre::Result<()> {
+        let (_reference, machine) = get_machine(libvm, config, self.name.as_deref()).await?;
         let inspection = machine.inspect().await?;
+        let machine_name = inspection.name().to_string();
 
         if !inspection.is_running() {
-            return Err(bento_libvm::LibVmError::MachineNotRunning {
-                reference: self.name.clone(),
-            }
-            .into());
+            return Err(not_running_error(&machine_name));
         }
 
-        match self.attach {
-            Some(AttachMode::Serial) => {
-                if self.user.is_some() {
-                    eprintln!("[bento] --user is ignored for serial attach");
-                }
-                let stream = machine.open_serial_stream().await?;
-                return terminal::attach_serial_stream(stream).await;
+        if self.attach == Some(AttachMode::Serial) {
+            if self.user.is_some() {
+                eprintln!("[bento] --user is ignored for serial attach");
             }
-            Some(AttachMode::Shell) => {
-                ensure_guest_ready(&machine).await?;
-                return ssh::exec_remote_shell(&self.name, self.user.as_deref());
-            }
-            None => {}
+            let stream = machine.open_serial_stream().await?;
+            return terminal::attach_serial_stream(stream).await;
         }
 
         ensure_guest_ready(&machine).await?;
-
-        ssh::exec_remote_shell(&self.name, self.user.as_deref())
+        ssh::exec_remote_shell(&machine_name, self.user.as_deref())
     }
 }
 

@@ -10,16 +10,13 @@ CREATE TABLE IF NOT EXISTS db_config (
 CREATE TABLE IF NOT EXISTS machine_config (
     id                  TEXT PRIMARY KEY,
     name                TEXT NOT NULL UNIQUE,
-    config_json         BLOB NOT NULL,
-    created_at          INTEGER NOT NULL,
-    modified_at         INTEGER NOT NULL
+    config_json         BLOB NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS machine_state (
     machine_id          TEXT PRIMARY KEY REFERENCES machine_config(id) ON DELETE CASCADE,
     status              TEXT NOT NULL,
-    state_json          BLOB NOT NULL,
-    updated_at          INTEGER NOT NULL
+    state_json          BLOB NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS network_instances (
@@ -62,12 +59,6 @@ BEFORE INSERT ON db_config
 WHEN (SELECT COUNT(*) FROM db_config) > 0
 BEGIN
     SELECT RAISE(ABORT, 'db_config allows exactly one row');
-END;
-
-CREATE TRIGGER IF NOT EXISTS machine_config_created_at_immutable
-BEFORE UPDATE OF created_at ON machine_config
-BEGIN
-    SELECT RAISE(ABORT, 'machine_config.created_at is immutable');
 END;
 
 CREATE TRIGGER IF NOT EXISTS network_instances_created_at_immutable

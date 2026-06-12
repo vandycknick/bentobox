@@ -72,6 +72,7 @@ mod tests {
             created_at: 1,
             modified_at: 1,
             image_ref: String::new(),
+            root_disk_size: None,
             labels: BTreeMap::new(),
             metadata: BTreeMap::new(),
             network: RequestedNetwork::default(),

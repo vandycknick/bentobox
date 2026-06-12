@@ -248,7 +248,7 @@ impl Profile {
             return Ok(None);
         };
         parse_size_config(disk_size, "disk_size")?
-            .bytes()
+            .storage_bytes()
             .map(Some)
             .map_err(|err| eyre::eyre!("profile disk_size: {err}"))
     }
@@ -565,7 +565,7 @@ disk_size: 40gb
         assert_eq!(profile.memory_mib().expect("memory mib"), Some(1024));
         assert_eq!(
             profile.disk_size_bytes().expect("disk size bytes"),
-            Some(40_000_000_000)
+            Some(40 * 1024 * 1024 * 1024)
         );
     }
 

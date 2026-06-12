@@ -5,19 +5,16 @@ use crate::store::wrappers::{DbMachineConfig, DbMachineState};
 use crate::{LibVmError, MachineId};
 
 const MACHINE_CONFIG_COLUMNS: &str = "id, name, json(config_json) AS config_json";
-const MACHINE_STATE_COLUMNS: &str =
-    "machine_id, status, json(state_json) AS state_json, updated_at";
+const MACHINE_STATE_COLUMNS: &str = "machine_id, status, json(state_json) AS state_json";
 
 pub(super) async fn insert_config(db: &Sqlite, config: &MachineConfig) -> Result<(), LibVmError> {
     sqlx::query(
-        "INSERT INTO machine_config (id, name, config_json, created_at, modified_at)
-         VALUES (?1, ?2, jsonb(?3), ?4, ?5)",
+        "INSERT INTO machine_config (id, name, config_json)
+         VALUES (?1, ?2, jsonb(?3))",
     )
     .bind(config.id.to_string())
     .bind(&config.name)
     .bind(json::serialize("machine_config.config_json", config)?)
-    .bind(config.created_at)
-    .bind(config.modified_at)
     .execute(&db.pool)
     .await?;
     Ok(())
@@ -26,12 +23,11 @@ pub(super) async fn insert_config(db: &Sqlite, config: &MachineConfig) -> Result
 pub(super) async fn update_config(db: &Sqlite, config: &MachineConfig) -> Result<(), LibVmError> {
     sqlx::query(
         "UPDATE machine_config
-         SET name = ?1, config_json = jsonb(?2), modified_at = ?3
-         WHERE id = ?4",
+         SET name = ?1, config_json = jsonb(?2)
+         WHERE id = ?3",
     )
     .bind(&config.name)
     .bind(json::serialize("machine_config.config_json", config)?)
-    .bind(config.modified_at)
     .bind(config.id.to_string())
     .execute(&db.pool)
     .await?;
@@ -128,17 +124,15 @@ pub(super) async fn get_state(
 
 pub(super) async fn upsert_state(db: &Sqlite, state: &MachineState) -> Result<(), LibVmError> {
     sqlx::query(
-        "INSERT INTO machine_state (machine_id, status, state_json, updated_at)
-         VALUES (?1, ?2, jsonb(?3), ?4)
+        "INSERT INTO machine_state (machine_id, status, state_json)
+         VALUES (?1, ?2, jsonb(?3))
          ON CONFLICT(machine_id) DO UPDATE SET
-            status = excluded.status,
-            state_json = excluded.state_json,
-            updated_at = excluded.updated_at",
+             status = excluded.status,
+             state_json = excluded.state_json",
     )
     .bind(state.machine_id.to_string())
     .bind(state.status.as_str())
     .bind(json::serialize("machine_state.state_json", state)?)
-    .bind(state.updated_at)
     .execute(&db.pool)
     .await?;
     Ok(())

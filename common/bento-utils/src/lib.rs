@@ -27,6 +27,12 @@ impl HumanSize {
             .ok_or_else(|| "size is too large".to_string())
     }
 
+    pub fn storage_bytes(self) -> Result<u64, String> {
+        self.quantity
+            .checked_mul(self.unit.storage_bytes_multiplier())
+            .ok_or_else(|| "size is too large".to_string())
+    }
+
     pub fn memory_mib(self) -> Result<u32, String> {
         let mib = self
             .quantity
@@ -54,7 +60,8 @@ impl FromStr for HumanSize {
             .count();
         if digits_len == 0 {
             return Err(
-                "invalid size, expected an integer followed by mb, mib, gb, or gib".to_string(),
+                "invalid size, expected an integer followed by m, mb, mib, g, gb, or gib"
+                    .to_string(),
             );
         }
 
@@ -63,16 +70,47 @@ impl FromStr for HumanSize {
             .map_err(|err| format!("invalid size quantity: {err}"))?;
         let unit = input[digits_len..].trim_start();
         if unit.is_empty() {
-            return Err("invalid size, missing unit; use mb, mib, gb, or gib".to_string());
+            return Err("invalid size, missing unit; use m, mb, mib, g, gb, or gib".to_string());
         }
         if !unit.bytes().all(|byte| byte.is_ascii_alphabetic()) {
-            return Err("invalid size unit; use mb, mib, gb, or gib".to_string());
+            return Err("invalid size unit; use m, mb, mib, g, gb, or gib".to_string());
         }
 
         let unit = HumanSizeUnit::parse(unit)?;
         let size = Self { quantity, unit };
-        let _ = size.bytes()?;
+        let _ = size.storage_bytes()?;
         Ok(size)
+    }
+}
+
+pub fn format_storage_size(bytes: u64) -> String {
+    if bytes >= BYTES_PER_GIB {
+        return format_binary_unit(bytes, BYTES_PER_GIB, "GiB");
+    }
+    if bytes >= BYTES_PER_MIB {
+        return format_binary_unit(bytes, BYTES_PER_MIB, "MiB");
+    }
+
+    format!("{bytes}B")
+}
+
+fn format_binary_unit(bytes: u64, unit: u64, suffix: &str) -> String {
+    let whole = bytes / unit;
+    let remainder = bytes % unit;
+    if remainder == 0 {
+        return format!("{whole}{suffix}");
+    }
+
+    let hundredths = (u128::from(remainder) * 100 + u128::from(unit / 2)) / u128::from(unit);
+    if hundredths == 100 {
+        return format!("{}{suffix}", whole + 1);
+    }
+    let tenths = hundredths / 10;
+    let hundredths = hundredths % 10;
+    if hundredths == 0 {
+        format!("{whole}.{tenths}{suffix}")
+    } else {
+        format!("{whole}.{tenths}{hundredths}{suffix}")
     }
 }
 
@@ -85,11 +123,11 @@ impl Display for HumanSize {
 impl HumanSizeUnit {
     fn parse(input: &str) -> Result<Self, String> {
         match input.to_ascii_lowercase().as_str() {
-            "mb" => Ok(Self::Mb),
-            "gb" => Ok(Self::Gb),
+            "m" | "mb" => Ok(Self::Mb),
+            "g" | "gb" => Ok(Self::Gb),
             "mib" => Ok(Self::Mib),
             "gib" => Ok(Self::Gib),
-            _ => Err("invalid size unit; use mb, mib, gb, or gib".to_string()),
+            _ => Err("invalid size unit; use m, mb, mib, g, gb, or gib".to_string()),
         }
     }
 
@@ -99,6 +137,13 @@ impl HumanSizeUnit {
             Self::Gb => BYTES_PER_GB,
             Self::Mib => BYTES_PER_MIB,
             Self::Gib => BYTES_PER_GIB,
+        }
+    }
+
+    fn storage_bytes_multiplier(self) -> u64 {
+        match self {
+            Self::Mb | Self::Mib => BYTES_PER_MIB,
+            Self::Gb | Self::Gib => BYTES_PER_GIB,
         }
     }
 
@@ -155,7 +200,7 @@ pub fn parse_mac(input: &str) -> Result<[u8; 6], String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{format_mac, parse_mac, HumanSize};
+    use crate::{format_mac, format_storage_size, parse_mac, HumanSize};
 
     #[test]
     fn formats_mac_as_lowercase_colon_hex() {
@@ -196,6 +241,14 @@ mod tests {
             "2GiB".parse::<HumanSize>().expect("parse gib").bytes(),
             Ok(2_147_483_648)
         );
+        assert_eq!(
+            "64G".parse::<HumanSize>().expect("parse short gb").bytes(),
+            Ok(64_000_000_000)
+        );
+        assert_eq!(
+            "512M".parse::<HumanSize>().expect("parse short mb").bytes(),
+            Ok(512_000_000)
+        );
     }
 
     #[test]
@@ -225,6 +278,46 @@ mod tests {
                 .memory_mib(),
             Ok(1024)
         );
+    }
+
+    #[test]
+    fn human_size_storage_uses_binary_units() {
+        assert_eq!(
+            "64g"
+                .parse::<HumanSize>()
+                .expect("parse size")
+                .storage_bytes(),
+            Ok(64 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            "64gb"
+                .parse::<HumanSize>()
+                .expect("parse size")
+                .storage_bytes(),
+            Ok(64 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            "64gib"
+                .parse::<HumanSize>()
+                .expect("parse size")
+                .storage_bytes(),
+            Ok(64 * 1024 * 1024 * 1024)
+        );
+        assert_eq!(
+            "512m"
+                .parse::<HumanSize>()
+                .expect("parse size")
+                .storage_bytes(),
+            Ok(512 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn formats_storage_sizes_as_binary_units() {
+        assert_eq!(format_storage_size(64 * 1024 * 1024 * 1024), "64GiB");
+        assert_eq!(format_storage_size(512 * 1024 * 1024), "512MiB");
+        assert_eq!(format_storage_size(200_000_000_000), "186.26GiB");
+        assert_eq!(format_storage_size(123), "123B");
     }
 
     #[test]

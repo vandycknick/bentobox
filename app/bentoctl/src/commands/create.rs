@@ -9,13 +9,15 @@ use std::path::{Path, PathBuf};
 
 use crate::commands::profile::{parse_label, parse_profile_mount, parse_requested_network};
 use crate::commands::rootfs_image::{get_base_rootfs_image, record_base_rootfs_metadata};
-use crate::constants::PROFILE_METADATA_KEY;
+use crate::config::GlobalConfig;
+use crate::constants::{DEFAULT_PROFILE_NAME, PROFILE_METADATA_KEY};
 use crate::profile::{resolve_host_path, MountMode, ProfileStore};
+use crate::progress::Progress;
 
 #[derive(Args, Debug)]
 #[command(
     about = "Create a persistent VM from a profile or image",
-    after_help = "Examples:\n  bento create dev rust-dev\n  bento create dev rust-dev --start\n  bento create dev --profile rust-dev\n  bento create ubuntu --image ubuntu:24.04\n  bento create dev rust-dev --image disk:./target/rootfs.img\n"
+    after_help = "Examples:\n  bento create dev --start --default\n  bento create dev rust-dev --start\n  bento create dev --profile rust-dev\n  bento create ubuntu --image ubuntu:24.04\n  bento create dev rust-dev --image disk:./target/rootfs.img\n"
 )]
 pub struct Cmd {
     /// Name of the persistent VM to create.
@@ -33,6 +35,9 @@ pub struct Cmd {
     /// Start the VM immediately after it is created.
     #[arg(long)]
     pub start: bool,
+    /// Make the created VM the default for commands that omit VM.
+    #[arg(long)]
+    pub default: bool,
     #[command(flatten)]
     pub overrides: VmOverrideArgs,
 }
@@ -87,7 +92,7 @@ impl VmOverrideArgs {
 
     pub(crate) fn disk_size_bytes(&self) -> eyre::Result<Option<u64>> {
         self.disk_size
-            .map(HumanSize::bytes)
+            .map(HumanSize::storage_bytes)
             .transpose()
             .map_err(eyre::Report::msg)
     }
@@ -101,13 +106,18 @@ impl Display for Cmd {
 
 impl Cmd {
     pub async fn run(&self, libvm: &Runtime) -> eyre::Result<()> {
+        let progress = Progress::start("reading VM recipe");
         let mut resolved = self.resolve()?;
+        progress.step("finding boot assets");
         let data_dir = libvm
             .local_data_dir()
             .ok_or_else(|| eyre::eyre!("local runtime data directory is unavailable"))?;
         let boot_assets =
             resolve_boot_assets(data_dir, resolved.kernel.take(), resolved.initramfs.take());
-        let base_rootfs = get_base_rootfs_image(libvm, &resolved.image_ref).await?;
+        let base_rootfs = {
+            let image_progress = |event| progress.image(event);
+            get_base_rootfs_image(libvm, &resolved.image_ref, Some(&image_progress)).await?
+        };
         record_base_rootfs_metadata(&mut resolved.metadata, &base_rootfs);
         let request = MachineCreate {
             image_ref: resolved.image_ref.clone(),
@@ -128,11 +138,20 @@ impl Cmd {
             network: Some(resolved.network),
         };
 
+        progress.step(format!("creating VM {}", self.name));
         let machine = libvm.create_machine(request).await?;
+        progress.clear();
         println!("created {}", self.name);
 
+        if self.default {
+            GlobalConfig::write_default_machine(Some(&self.name))?;
+            println!("default machine is {}", self.name);
+        }
+
         if self.start {
+            let progress = Progress::start(format!("starting {}", self.name));
             machine.start().await?;
+            progress.success(format!("{} started", self.name));
         }
 
         Ok(())
@@ -143,6 +162,13 @@ impl Cmd {
             eyre::bail!("profile specified twice; use either positional profile or --profile");
         }
         let profile_name = self.profile.clone().or_else(|| self.profile_name.clone());
+        let profile_name = profile_name.or_else(|| {
+            if self.image.is_none() {
+                Some(DEFAULT_PROFILE_NAME.to_string())
+            } else {
+                None
+            }
+        });
 
         let mut labels = BTreeMap::new();
         let mut metadata = BTreeMap::new();
@@ -174,9 +200,8 @@ impl Cmd {
             }
         } else {
             let Some(image) = &self.image else {
-                eyre::bail!("either a profile or image is required\n\nexamples:\n  bento create dev rust-dev\n  bento create dev --profile rust-dev\n  bento create dev --image ubuntu:24.04");
+                unreachable!("profile_name defaults when image is absent")
             };
-
             image_ref = image.clone();
             for (key, value) in &self.overrides.labels {
                 labels.insert(key.clone(), value.clone());
@@ -313,6 +338,21 @@ mod tests {
     }
 
     #[test]
+    fn create_command_parses_default_machine_happy_path() {
+        let cmd = BentoCtlCmd::try_parse_from(["bento", "create", "dev", "--start", "--default"])
+            .expect("create command should parse");
+        let create = match cmd.cmd {
+            Command::Create(cmd) => cmd,
+            other => panic!("expected create command, got {other:?}"),
+        };
+
+        assert_eq!(create.name, "dev");
+        assert_eq!(create.profile, None);
+        assert!(create.start);
+        assert!(create.default);
+    }
+
+    #[test]
     fn create_image_override_takes_precedence_over_profile_image() {
         let cmd = BentoCtlCmd::try_parse_from([
             "bento",
@@ -376,7 +416,7 @@ mod tests {
         );
         assert_eq!(
             create.overrides.disk_size_bytes().expect("disk size bytes"),
-            Some(40_000_000_000)
+            Some(40 * 1024 * 1024 * 1024)
         );
         assert!(create.overrides.nested_virtualization);
         assert!(create.overrides.rosetta);

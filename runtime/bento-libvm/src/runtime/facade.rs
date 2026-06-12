@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use bento_vm_spec::VmSpec;
 
-use crate::machine::{Machine, MachineCreate, MachineInspect, MachineRef, MachineRuntimeStatus};
+use crate::machine::{
+    Machine, MachineCreate, MachineInspect, MachineRef, MachineRuntimeStatus, MachineUpdate,
+};
 use crate::models::MachineConfig;
 use crate::network::{NetworkDefinition, RequestedNetwork};
 use crate::paths::LocalPaths;
@@ -190,6 +192,17 @@ impl Runtime {
         match &self.backend {
             RuntimeBackend::Local(local) => local.set_network_by_id(id, network).await,
             RuntimeBackend::Remote(remote) => remote.unsupported("set_machine_network"),
+        }
+    }
+
+    pub(crate) async fn update_machine(
+        &self,
+        id: MachineId,
+        update: MachineUpdate,
+    ) -> Result<MachineInspect, LibVmError> {
+        match &self.backend {
+            RuntimeBackend::Local(local) => local.update_by_id(id, update).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("update_machine"),
         }
     }
 

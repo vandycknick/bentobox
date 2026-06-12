@@ -13,6 +13,7 @@ use crate::commands::create::{
 use crate::commands::rootfs_image::{get_base_rootfs_image, record_base_rootfs_metadata};
 use crate::constants::{DEFAULT_PROFILE_NAME, PROFILE_METADATA_KEY};
 use crate::profile::ProfileStore;
+use crate::progress::Progress;
 use crate::ssh;
 
 #[derive(Args, Debug)]
@@ -55,13 +56,18 @@ impl Cmd {
             eyre::bail!("--keep-on-failure requires a command");
         }
 
+        let progress = Progress::start("reading run recipe");
         let mut resolved = self.resolve(libvm).await?;
+        progress.step("finding boot assets");
         let data_dir = libvm
             .local_data_dir()
             .ok_or_else(|| eyre::eyre!("local runtime data directory is unavailable"))?;
         let boot_assets =
             resolve_boot_assets(data_dir, resolved.kernel.take(), resolved.initramfs.take());
-        let base_rootfs = get_base_rootfs_image(libvm, &resolved.image_ref).await?;
+        let base_rootfs = {
+            let image_progress = |event| progress.image(event);
+            get_base_rootfs_image(libvm, &resolved.image_ref, Some(&image_progress)).await?
+        };
         record_base_rootfs_metadata(&mut resolved.metadata, &base_rootfs);
         let request = MachineCreate {
             image_ref: resolved.image_ref.clone(),
@@ -82,12 +88,21 @@ impl Cmd {
             network: Some(resolved.network),
         };
 
+        progress.step(format!("creating ephemeral VM {}", resolved.name));
         let machine = libvm.create_machine(request).await?;
+        progress.step(format!("starting {}", resolved.name));
         machine.start().await?;
+        progress.step(format!("waiting for guest agent in {}", resolved.name));
         machine
             .wait_for_guest_running(DEFAULT_GUEST_READINESS_TIMEOUT)
             .await
             .map_err(|err| eyre::eyre!("guest readiness check failed: {err}"))?;
+
+        if self.command.is_empty() {
+            progress.success("guest is ready, opening shell");
+        } else {
+            progress.success("guest is ready, running command");
+        }
 
         let status = if self.command.is_empty() {
             ssh::run_remote_shell_status(&resolved.name, None)?
@@ -99,8 +114,6 @@ impl Cmd {
 
         if !should_keep {
             cleanup_ephemeral(libvm, &resolved.name).await?;
-        } else {
-            println!("kept {}", resolved.name);
         }
 
         std::process::exit(code);
@@ -262,7 +275,7 @@ mod tests {
         assert_eq!(run.overrides.memory_mib().expect("memory mib"), Some(4096));
         assert_eq!(
             run.overrides.disk_size_bytes().expect("disk size bytes"),
-            Some(40_000_000_000)
+            Some(40 * 1024 * 1024 * 1024)
         );
         assert!(run.overrides.nested_virtualization);
         assert!(run.overrides.rosetta);

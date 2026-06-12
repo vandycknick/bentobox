@@ -57,6 +57,9 @@ pub enum LibVmError {
     #[error("invalid create request for machine {name:?}: {reason}")]
     InvalidCreateRequest { name: String, reason: String },
 
+    #[error("invalid update for machine {reference:?}: {reason}")]
+    InvalidMachineUpdate { reference: String, reason: String },
+
     #[error("unsupported host architecture {arch:?}")]
     UnsupportedHostArchitecture { arch: String },
 

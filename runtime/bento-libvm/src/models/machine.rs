@@ -20,6 +20,8 @@ pub(crate) struct MachineConfig {
     pub created_at: i64,
     pub modified_at: i64,
     pub image_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_disk_size: Option<u64>,
     pub labels: BTreeMap<String, String>,
     pub metadata: BTreeMap<String, String>,
     pub network: RequestedNetwork,
