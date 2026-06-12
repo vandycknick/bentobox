@@ -58,12 +58,15 @@ impl RuntimeStatus {
     fn is_running(&self) -> bool {
         self.state.is_running()
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReconcilePolicy {
-    Blocking,
-    BestEffort,
+    fn is_active(&self) -> bool {
+        matches!(
+            self.state,
+            MachineRuntimeState::Starting
+                | MachineRuntimeState::Running
+                | MachineRuntimeState::Stopping
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -321,7 +324,7 @@ impl LocalRuntime {
             .await?;
         let _lock = self.acquire_machine_lock(config.id)?;
         let status = self.reconcile_machine_runtime_locked(&config).await?;
-        if status.is_running() {
+        if status.is_active() {
             return Err(LibVmError::MachineAlreadyRunning {
                 reference: config.name.clone(),
             });
@@ -342,7 +345,7 @@ impl LocalRuntime {
             .await?;
         let _lock = self.acquire_machine_lock(config.id)?;
         let status = self.reconcile_machine_runtime_locked(&config).await?;
-        if status.is_running() {
+        if status.is_active() {
             return Err(LibVmError::MachineAlreadyRunning {
                 reference: config.name.clone(),
             });
@@ -364,9 +367,9 @@ impl LocalRuntime {
             .await?;
         let _lock = self.acquire_machine_lock(config.id)?;
         let status = self.reconcile_machine_runtime_locked(&config).await?;
-        reconcile_network_runtime(&self.paths, &self.db, &config, status.is_running()).await?;
+        reconcile_network_runtime(&self.paths, &self.db, &config, status.is_active()).await?;
 
-        if status.is_running() {
+        if status.is_active() {
             return Err(LibVmError::MachineAlreadyRunning {
                 reference: config.name.clone(),
             });
@@ -391,9 +394,9 @@ impl LocalRuntime {
             .await?;
         let _lock = self.acquire_machine_lock(config.id)?;
         let status = self.reconcile_machine_runtime_locked(&config).await?;
-        reconcile_network_runtime(&self.paths, &self.db, &config, status.is_running()).await?;
+        reconcile_network_runtime(&self.paths, &self.db, &config, status.is_active()).await?;
 
-        if status.is_running() {
+        if status.is_active() {
             return Err(LibVmError::MachineAlreadyRunning {
                 reference: config.name.clone(),
             });
@@ -497,30 +500,36 @@ impl LocalRuntime {
         let config = self
             .resolve_machine_config(&MachineRef::id(machine_id))
             .await?;
-        let _lock = self.acquire_machine_lock(config.id)?;
-        let status = self.reconcile_machine_runtime_locked(&config).await?;
-        if !status.is_running() {
-            return Err(LibVmError::MachineNotRunning {
-                reference: config.name.clone(),
-            });
-        }
         let pid_path = self.paths.machine(config.id).vmmon_pid_path();
-        let pid = read_monitor_pid(&pid_path)?;
+        {
+            let _lock = self.acquire_machine_lock(config.id)?;
+            let status = self.reconcile_machine_runtime_locked(&config).await?;
+            if !status.is_running() {
+                return Err(LibVmError::MachineNotRunning {
+                    reference: config.name.clone(),
+                });
+            }
+            let pid = read_monitor_pid(&pid_path)?;
 
-        self.set_machine_state(
-            config.id,
-            MachineRuntimeState::Stopping,
-            Some(pid),
-            status.started_at,
-            None,
-        )
-        .await?;
+            self.set_machine_state(
+                config.id,
+                MachineRuntimeState::Stopping,
+                Some(pid),
+                status.started_at,
+                None,
+            )
+            .await?;
 
-        kill(Pid::from_raw(pid), Some(Signal::SIGINT))
-            .map_err(|err| io::Error::other(err.to_string()))?;
+            kill(Pid::from_raw(pid), Some(Signal::SIGINT))
+                .map_err(|err| io::Error::other(err.to_string()))?;
+        }
+
         wait_for_monitor_stop(&pid_path, &config.name).await?;
-        self.mark_machine_stopped(config.id, None).await?;
-        reconcile_network_runtime(&self.paths, &self.db, &config, false).await?;
+        {
+            let _lock = self.acquire_machine_lock(config.id)?;
+            self.mark_machine_stopped(config.id, None).await?;
+            reconcile_network_runtime(&self.paths, &self.db, &config, false).await?;
+        }
         self.machine_inspect(config).await
     }
 
@@ -665,32 +674,13 @@ impl LocalRuntime {
         &self,
         metadata: &MachineConfig,
     ) -> Result<RuntimeStatus, LibVmError> {
-        self.reconcile_machine_runtime_with_policy(metadata, ReconcilePolicy::BestEffort)
-            .await
-    }
-
-    async fn reconcile_machine_runtime_with_policy(
-        &self,
-        metadata: &MachineConfig,
-        policy: ReconcilePolicy,
-    ) -> Result<RuntimeStatus, LibVmError> {
-        let observed = self.observe_machine_runtime(metadata, policy).await?;
+        let observed = self.observe_machine_runtime(metadata).await?;
         if observed.needs_writeback {
-            match policy {
-                ReconcilePolicy::Blocking => {
-                    let _lock = self.acquire_machine_lock(metadata.id)?;
-                    return self.reconcile_machine_runtime_locked(metadata).await;
-                }
-                ReconcilePolicy::BestEffort => {
-                    let Some(_lock) = self.try_acquire_machine_lock(metadata.id)? else {
-                        let state = self.machine_state(metadata.id).await?;
-                        return Ok(RuntimeStatus::from_machine_state(&state));
-                    };
-                    return self
-                        .reconcile_machine_runtime_locked_with_policy(metadata, policy)
-                        .await;
-                }
-            }
+            let Some(_lock) = self.try_acquire_machine_lock(metadata.id)? else {
+                let state = self.machine_state(metadata.id).await?;
+                return Ok(RuntimeStatus::from_machine_state(&state));
+            };
+            return self.reconcile_machine_runtime_locked(metadata).await;
         }
         Ok(observed.status())
     }
@@ -699,16 +689,7 @@ impl LocalRuntime {
         &self,
         metadata: &MachineConfig,
     ) -> Result<RuntimeStatus, LibVmError> {
-        self.reconcile_machine_runtime_locked_with_policy(metadata, ReconcilePolicy::Blocking)
-            .await
-    }
-
-    async fn reconcile_machine_runtime_locked_with_policy(
-        &self,
-        metadata: &MachineConfig,
-        policy: ReconcilePolicy,
-    ) -> Result<RuntimeStatus, LibVmError> {
-        let observed = self.observe_machine_runtime(metadata, policy).await?;
+        let observed = self.observe_machine_runtime(metadata).await?;
         if observed.needs_writeback {
             self.db
                 .upsert_machine_state(&observed.machine_state(metadata.id))
@@ -720,7 +701,6 @@ impl LocalRuntime {
     async fn observe_machine_runtime(
         &self,
         metadata: &MachineConfig,
-        policy: ReconcilePolicy,
     ) -> Result<ObservedRuntime, LibVmError> {
         let runtime = self.db.get_machine_state(metadata.id).await?;
         let pid_path = self.paths.machine(metadata.id).vmmon_pid_path();
@@ -738,13 +718,9 @@ impl LocalRuntime {
             .as_ref()
             .map(|runtime| runtime.status)
             .unwrap_or(MachineRuntimeState::Stopped);
-        let desired_state = match (policy, current_state, live_pid) {
-            (
-                ReconcilePolicy::BestEffort,
-                MachineRuntimeState::Starting | MachineRuntimeState::Stopping,
-                Some(_),
-            ) => current_state,
-            (_, _, Some(_)) => MachineRuntimeState::Running,
+        let desired_state = match (current_state, live_pid) {
+            (MachineRuntimeState::Starting | MachineRuntimeState::Stopping, _) => current_state,
+            (_, Some(_)) => MachineRuntimeState::Running,
             _ => MachineRuntimeState::Stopped,
         };
         let started_at = live_pid.map(|_| {
@@ -1352,6 +1328,52 @@ mod tests {
         base_rootfs_path
     }
 
+    struct ChildGuard {
+        child: std::process::Child,
+    }
+
+    impl ChildGuard {
+        fn sleep() -> Self {
+            let child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn sleep process");
+            Self { child }
+        }
+
+        fn id(&self) -> u32 {
+            self.child.id()
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    async fn wait_for_machine_state(
+        runtime: &LocalRuntime,
+        machine_id: crate::MachineId,
+        expected: MachineRuntimeState,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let state = runtime
+                    .machine_state(machine_id)
+                    .await
+                    .expect("read machine state");
+                if state.status == expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("machine state should change before timeout");
+    }
+
     #[tokio::test]
     async fn create_machine_clones_rootfs() {
         let temp = tempfile::tempdir().expect("create temp dir");
@@ -1629,6 +1651,63 @@ mod tests {
         assert_eq!(inspected.status(), MachineStatus::Running);
         assert_eq!(listed.len(), 1);
         assert_eq!(state.status, MachineRuntimeState::Running);
+    }
+
+    #[tokio::test]
+    async fn stop_releases_machine_lock_while_waiting_for_monitor_shutdown() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
+
+        let machine = create_pending_sample(&runtime, "devbox")
+            .await
+            .expect("create pending machine")
+            .commit(&runtime)
+            .await
+            .expect("commit machine");
+        let child = ChildGuard::sleep();
+        let pid = child.id() as i32;
+        let pid_path = runtime.paths.machine(machine.id).vmmon_pid_path();
+        std::fs::write(&pid_path, format!("{pid}\n")).expect("write pid file");
+        runtime
+            .set_machine_state(
+                machine.id,
+                MachineRuntimeState::Running,
+                Some(pid),
+                Some(42),
+                None,
+            )
+            .await
+            .expect("set running state");
+
+        let machine_id = machine.id;
+        let stop_runtime = runtime.clone();
+        let stop_task = tokio::spawn(async move { stop_runtime.stop_by_id(machine_id).await });
+
+        wait_for_machine_state(&runtime, machine_id, MachineRuntimeState::Stopping).await;
+        let lock = runtime
+            .try_acquire_machine_lock(machine_id)
+            .expect("try acquire lock while stop waits")
+            .expect("machine lock should be available while stop waits");
+        drop(lock);
+
+        std::fs::remove_file(&pid_path).expect("remove pid file");
+        let inspected = stop_task
+            .await
+            .expect("join stop task")
+            .expect("stop machine");
+        let state = runtime
+            .machine_state(machine_id)
+            .await
+            .expect("read machine state");
+
+        assert_eq!(inspected.status(), MachineStatus::Stopped);
+        assert_eq!(state.status, MachineRuntimeState::Stopped);
+        drop(child);
     }
 
     #[tokio::test]
