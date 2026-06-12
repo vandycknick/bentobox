@@ -10,7 +10,7 @@ use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
 
-use crate::certificate_authority;
+use crate::host;
 use crate::models::{MachineConfig, NetworkAttachment, NetworkInstance};
 use crate::paths::LocalPaths;
 use crate::store::{Database, Sqlite};
@@ -329,13 +329,12 @@ fn resolve_certificate_authority_paths(
             Ok((certificate_path.clone(), private_key_path.clone()))
         }
         (None, None) => {
-            let authority =
-                certificate_authority::ensure_certificate_authority_in(paths).map_err(|err| {
-                    LibVmError::NetworkRuntime {
-                        reference: reference.to_string(),
-                        message: format!("ensure certificate authority: {err}"),
-                    }
-                })?;
+            let authority = host::ensure_certificate_authority_in(paths).map_err(|err| {
+                LibVmError::NetworkRuntime {
+                    reference: reference.to_string(),
+                    message: format!("ensure certificate authority: {err}"),
+                }
+            })?;
             Ok((authority.certificate_path, authority.private_key_path))
         }
         _ => Err(LibVmError::NetworkRuntime {

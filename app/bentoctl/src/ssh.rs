@@ -2,7 +2,7 @@ use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus};
 
-use bento_libvm::{host_user, ssh_keys};
+use bento_libvm::host::{current_host_user, ensure_user_ssh_keys};
 use eyre::{bail, Context};
 
 pub(crate) fn exec_remote_shell(name: &str, user: Option<&str>) -> eyre::Result<()> {
@@ -58,9 +58,9 @@ fn ssh_command(
         shell_quote(&exe.to_string_lossy()),
         shell_quote(name),
     );
-    let host_user = host_user::current_host_user().context("resolve current host user")?;
+    let host_user = current_host_user().context("resolve current host user")?;
     let ssh_user = user.unwrap_or(host_user.name.as_str());
-    let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure bento SSH keys")?;
+    let user_keys = ensure_user_ssh_keys().context("ensure bento SSH keys")?;
 
     let mut command = Command::new("ssh");
     command

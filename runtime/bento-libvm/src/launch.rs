@@ -12,12 +12,10 @@ use bento_vm_spec::{Boot, Kernel, VmSpec};
 use eyre::Context;
 use serde::Deserialize;
 
-use crate::certificate_authority;
-use crate::host_user::{self, HostUser};
+use crate::host::{self, HostUser};
 use crate::network::RuntimeNetwork;
 use crate::paths::{metadata_config_path_in, vm_spec_path_in, LocalPaths};
 use crate::resolve_mount_location;
-use crate::ssh_keys;
 use crate::RuntimeNetworkingConfig;
 
 const ASSET_INITRAMFS_FILENAME: &str = "initramfs";
@@ -122,8 +120,8 @@ fn resolve_metadata_config(
     network: &RuntimeNetwork,
     networking: &RuntimeNetworkingConfig,
 ) -> eyre::Result<AgentConfig> {
-    let host_user = host_user::current_host_user().context("resolve current host user")?;
-    let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure user SSH keys")?;
+    let host_user = host::current_host_user().context("resolve current host user")?;
+    let user_keys = host::ensure_user_ssh_keys().context("ensure user SSH keys")?;
     let certificate_authority_pem = certificate_authority_pem_for_config(paths, networking)?;
 
     let mut guest_runtime = resolve_guest_runtime_config(spec, network)?;
@@ -310,11 +308,10 @@ fn certificate_authority_pem_for_config(
     config: &RuntimeNetworkingConfig,
 ) -> eyre::Result<String> {
     if let Some(path) = config.netd.tls_ca_cert.as_deref() {
-        return certificate_authority::read_certificate_authority_certificate(path);
+        return host::read_certificate_authority_certificate(path);
     }
 
-    certificate_authority::ensure_certificate_authority_in(paths)
-        .map(|authority| authority.certificate_pem)
+    host::ensure_certificate_authority_in(paths).map(|authority| authority.certificate_pem)
 }
 
 fn pem_with_trailing_newline(pem: &str) -> String {
@@ -401,7 +398,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use crate::host_user::HostUser;
+    use crate::host::HostUser;
     use crate::network::RuntimeNetwork;
     use crate::paths::LocalPaths;
 
