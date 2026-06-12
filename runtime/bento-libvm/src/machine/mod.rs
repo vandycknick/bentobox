@@ -1,9 +1,11 @@
 mod create;
+mod handle;
 mod inspect;
 mod reference;
 mod status;
 
 pub use create::MachineCreate;
+pub use handle::Machine;
 pub use inspect::{MachineInspect, MachineStatus};
 pub use reference::MachineRef;
 pub use status::{MachineRuntimeStatus, RuntimeComponentStatus};

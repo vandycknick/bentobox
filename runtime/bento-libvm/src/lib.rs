@@ -14,11 +14,10 @@ mod runtime;
 mod store;
 mod vm_lock;
 
-pub use crate::engine::Machine;
 pub use crate::error::LibVmError;
 pub use crate::host::{ensure_certificate_authority, CertificateAuthority};
 pub use crate::machine::{
-    MachineCreate, MachineInspect, MachineRef, MachineRuntimeStatus, MachineStatus,
+    Machine, MachineCreate, MachineInspect, MachineRef, MachineRuntimeStatus, MachineStatus,
     RuntimeComponentStatus,
 };
 pub use crate::monitor::DEFAULT_GUEST_READINESS_TIMEOUT;

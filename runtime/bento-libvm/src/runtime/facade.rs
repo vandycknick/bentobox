@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use bento_vm_spec::VmSpec;
 
-use crate::engine::{LocalRuntime, Machine};
-use crate::machine::{MachineCreate, MachineInspect, MachineRef, MachineRuntimeStatus};
+use crate::engine::LocalRuntime;
+use crate::machine::{Machine, MachineCreate, MachineInspect, MachineRef, MachineRuntimeStatus};
 use crate::models::MachineConfig;
 use crate::network::{NetworkDefinition, RequestedNetwork};
 use crate::paths::LocalPaths;
