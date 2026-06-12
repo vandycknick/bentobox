@@ -28,8 +28,8 @@ use crate::models::{
 };
 use crate::monitor;
 use crate::network::{
-    prepare_network_runtime, reconcile_network_runtime, NetworkDefinition, RequestedNetwork,
-    RuntimeNetwork,
+    prepare_network_runtime, reconcile_network_runtime, NetworkDefinition, NetworkDriverKind,
+    RequestedNetwork, RuntimeNetwork,
 };
 use crate::store::{Database, Sqlite};
 use crate::vm_lock::VmLock;
@@ -52,6 +52,17 @@ impl RuntimeConfig {
             target: RuntimeTarget::Local(LocalRuntimeConfig::new(data_dir)),
         }
     }
+
+    pub fn from_env() -> Result<Self, LibVmError> {
+        Ok(Self::local(resolve_default_data_dir()?))
+    }
+
+    pub fn with_networking(mut self, networking: RuntimeNetworkingConfig) -> Self {
+        match &mut self.target {
+            RuntimeTarget::Local(local) => local.networking = networking,
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -63,12 +74,50 @@ pub enum RuntimeTarget {
 #[derive(Debug, Clone)]
 pub struct LocalRuntimeConfig {
     pub data_dir: PathBuf,
+    pub networking: RuntimeNetworkingConfig,
 }
 
 impl LocalRuntimeConfig {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self {
             data_dir: data_dir.into(),
+            networking: RuntimeNetworkingConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeNetworkingConfig {
+    pub private_driver: NetworkDriverKind,
+    pub policy_config_dir: Option<PathBuf>,
+    pub netd: NetdRuntimeConfig,
+}
+
+impl Default for RuntimeNetworkingConfig {
+    fn default() -> Self {
+        Self {
+            private_driver: NetworkDriverKind::Netd,
+            policy_config_dir: None,
+            netd: NetdRuntimeConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetdRuntimeConfig {
+    pub subnet: String,
+    pub pcap: bool,
+    pub tls_ca_cert: Option<PathBuf>,
+    pub tls_ca_key: Option<PathBuf>,
+}
+
+impl Default for NetdRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            subnet: "192.168.105.0/24".to_string(),
+            pcap: false,
+            tls_ca_cert: None,
+            tls_ca_key: None,
         }
     }
 }
@@ -107,6 +156,7 @@ impl RuntimeStatus {
 struct LocalRuntime {
     paths: LocalPaths,
     db: Sqlite,
+    networking: RuntimeNetworkingConfig,
 }
 
 struct PendingMachine {
@@ -155,14 +205,14 @@ impl Runtime {
         match config.target {
             RuntimeTarget::Local(config) => Ok(Self {
                 backend: RuntimeBackend::Local(
-                    LocalRuntime::new(LocalPaths::new(config.data_dir)).await?,
+                    LocalRuntime::new(LocalPaths::new(config.data_dir), config.networking).await?,
                 ),
             }),
         }
     }
 
     pub async fn from_env() -> Result<Self, LibVmError> {
-        Self::new(RuntimeConfig::local(resolve_default_data_dir()?)).await
+        Self::new(RuntimeConfig::from_env()?).await
     }
 
     pub fn local_data_dir(&self) -> Option<&Path> {
@@ -405,10 +455,17 @@ impl Machine {
 }
 
 impl LocalRuntime {
-    async fn new(paths: LocalPaths) -> Result<Self, LibVmError> {
+    async fn new(
+        paths: LocalPaths,
+        networking: RuntimeNetworkingConfig,
+    ) -> Result<Self, LibVmError> {
         let db = Sqlite::new(&paths).await?;
         let paths = LocalPaths::from_roots(db.roots().clone());
-        Ok(Self { paths, db })
+        Ok(Self {
+            paths,
+            db,
+            networking,
+        })
     }
 
     async fn create_machine(&self, request: MachineCreate) -> Result<MachineConfig, LibVmError> {
@@ -667,7 +724,8 @@ impl LocalRuntime {
             });
         }
 
-        let resolved_network = prepare_network_runtime(&self.paths, &self.db, &config).await?;
+        let resolved_network =
+            prepare_network_runtime(&self.paths, &self.db, &config, &self.networking).await?;
         let mut spec = config.spec.clone();
         prepare_instance_runtime(
             &self.paths,
@@ -675,6 +733,7 @@ impl LocalRuntime {
             &config.name,
             &mut spec,
             &resolved_network,
+            &self.networking,
         )
         .map_err(|err| LibVmError::InstancePreparationFailed {
             reference: config.name.clone(),
@@ -1454,7 +1513,7 @@ mod tests {
     };
     use crate::models::MachineRuntimeState;
     use crate::paths::{root_disk_relative_path, LocalPaths};
-    use crate::{LibVmError, MachineCreate, MachineRef};
+    use crate::{LibVmError, MachineCreate, MachineRef, RuntimeNetworkingConfig};
     use bento_vm_spec::{Boot, Guest, GuestOs, Hardware, Kernel, Mount, Storage, VmSpec};
     use nix::unistd::pipe;
     use std::io::{Read, Write};
@@ -1563,9 +1622,12 @@ mod tests {
         let data_dir = temp.path().join("bento");
         let base_rootfs_path = write_base_rootfs(&data_dir);
 
-        let runtime = LocalRuntime::new(LocalPaths::new(data_dir))
-            .await
-            .expect("create runtime");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(data_dir),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
         let mut request = create_request(base_rootfs_path, "devbox");
         request.userdata = Some("#!/bin/sh\necho profile\n".to_string());
         let machine = runtime
@@ -1602,9 +1664,12 @@ mod tests {
         let data_dir = temp.path().join("bento");
         let base_rootfs_path = write_base_rootfs(&data_dir);
 
-        let runtime = LocalRuntime::new(LocalPaths::new(data_dir))
-            .await
-            .expect("create runtime");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(data_dir),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
         let machine = runtime
             .create_machine(create_request(base_rootfs_path, "devbox"))
             .await
@@ -1622,9 +1687,12 @@ mod tests {
         let explicit = temp.path().join("custom-initramfs");
         std::fs::write(&explicit, b"custom initramfs").expect("write explicit initramfs");
 
-        let runtime = LocalRuntime::new(LocalPaths::new(data_dir))
-            .await
-            .expect("create runtime");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(data_dir),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
         let mut request = create_request(base_rootfs_path, "devbox");
         request.initramfs = Some(explicit.clone());
         let machine = runtime
@@ -1645,9 +1713,12 @@ mod tests {
         let data_dir = temp.path().join("bento");
         let base_rootfs_path = write_base_rootfs(&data_dir);
 
-        let runtime = LocalRuntime::new(LocalPaths::new(data_dir))
-            .await
-            .expect("create runtime");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(data_dir),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
         let machine = runtime
             .create_machine(create_request(base_rootfs_path, "devbox"))
             .await
@@ -1712,9 +1783,12 @@ mod tests {
     #[tokio::test]
     async fn create_pending_and_commit_write_vm_spec_and_state() {
         let temp = tempfile::tempdir().expect("create temp dir");
-        let runtime = LocalRuntime::new(LocalPaths::new(temp.path().join("bento")))
-            .await
-            .expect("create runtime");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
 
         let pending = create_pending_sample(&runtime, "devbox")
             .await
@@ -1740,9 +1814,12 @@ mod tests {
     #[tokio::test]
     async fn inspect_and_list_use_name_and_id_lookup() {
         let temp = tempfile::tempdir().expect("create temp dir");
-        let runtime = LocalRuntime::new(LocalPaths::new(temp.path().join("bento")))
-            .await
-            .expect("create runtime");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
 
         let machine = create_pending_sample(&runtime, "devbox")
             .await
@@ -1770,9 +1847,12 @@ mod tests {
     #[tokio::test]
     async fn inspect_uses_sqlite_config_when_config_file_is_missing() {
         let temp = tempfile::tempdir().expect("create temp dir");
-        let runtime = LocalRuntime::new(LocalPaths::new(temp.path().join("bento")))
-            .await
-            .expect("create runtime");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
 
         let machine = create_pending_sample(&runtime, "devbox")
             .await
@@ -1794,9 +1874,12 @@ mod tests {
     #[tokio::test]
     async fn replace_config_updates_stopped_machine_config() {
         let temp = tempfile::tempdir().expect("create temp dir");
-        let runtime = LocalRuntime::new(LocalPaths::new(temp.path().join("bento")))
-            .await
-            .expect("create runtime");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
 
         let machine = create_pending_sample(&runtime, "devbox")
             .await
@@ -1829,9 +1912,12 @@ mod tests {
     #[tokio::test]
     async fn remove_deletes_machine_from_state_and_disk() {
         let temp = tempfile::tempdir().expect("create temp dir");
-        let runtime = LocalRuntime::new(LocalPaths::new(temp.path().join("bento")))
-            .await
-            .expect("create runtime");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
 
         let machine = create_pending_sample(&runtime, "devbox")
             .await
@@ -1856,9 +1942,12 @@ mod tests {
     #[tokio::test]
     async fn remove_refuses_running_machine_when_pid_file_exists() {
         let temp = tempfile::tempdir().expect("create temp dir");
-        let runtime = LocalRuntime::new(LocalPaths::new(temp.path().join("bento")))
-            .await
-            .expect("create runtime");
+        let runtime = LocalRuntime::new(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
 
         let machine = create_pending_sample(&runtime, "devbox")
             .await

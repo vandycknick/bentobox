@@ -20,7 +20,6 @@ bento-ocidisk = { path = "../../runtime/bento-ocidisk" }
 bento-vm-spec = { path = "../../specs/bento-vm-spec" }
 bento-utils = { path = "../../common/bento-utils" }
 anyhow = "1.0.102"
-bento-protocol = { path = "../../specs/bento-protocol" }
 clap = { version = "4.6.1", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

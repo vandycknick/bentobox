@@ -13,12 +13,12 @@ use eyre::Context;
 use serde::Deserialize;
 
 use crate::certificate_authority;
-use crate::global_config::GlobalConfig;
 use crate::host_user::{self, HostUser};
 use crate::network::RuntimeNetwork;
 use crate::paths::{metadata_config_path_in, vm_spec_path_in, LocalPaths};
 use crate::resolve_mount_location;
 use crate::ssh_keys;
+use crate::RuntimeNetworkingConfig;
 
 const ASSET_INITRAMFS_FILENAME: &str = "initramfs";
 const FORWARD_ENDPOINT_NAME: &str = "forward";
@@ -41,9 +41,10 @@ pub(crate) fn prepare_instance_runtime(
     name: &str,
     spec: &mut VmSpec,
     network: &RuntimeNetwork,
+    networking: &RuntimeNetworkingConfig,
 ) -> eyre::Result<()> {
     normalize_runtime_mounts(spec)?;
-    let metadata_config = resolve_metadata_config(paths, name, spec, network)?;
+    let metadata_config = resolve_metadata_config(paths, name, spec, network, networking)?;
     write_metadata_config_to_dir(instance_dir, &metadata_config)?;
     prepare_runtime_initramfs(paths, spec)?;
     write_vm_spec_to_dir(instance_dir, spec)?;
@@ -119,11 +120,11 @@ fn resolve_metadata_config(
     name: &str,
     spec: &VmSpec,
     network: &RuntimeNetwork,
+    networking: &RuntimeNetworkingConfig,
 ) -> eyre::Result<AgentConfig> {
     let host_user = host_user::current_host_user().context("resolve current host user")?;
     let user_keys = ssh_keys::ensure_user_ssh_keys().context("ensure user SSH keys")?;
-    let global_config = GlobalConfig::load()?;
-    let certificate_authority_pem = certificate_authority_pem_for_config(paths, &global_config)?;
+    let certificate_authority_pem = certificate_authority_pem_for_config(paths, networking)?;
 
     let mut guest_runtime = resolve_guest_runtime_config(spec, network)?;
     guest_runtime.provision = resolve_provision_config(
@@ -306,9 +307,9 @@ fn provision_mount_entries(spec: &VmSpec) -> Vec<ProvisionMountConfig> {
 
 fn certificate_authority_pem_for_config(
     paths: &LocalPaths,
-    config: &GlobalConfig,
+    config: &RuntimeNetworkingConfig,
 ) -> eyre::Result<String> {
-    if let Some(path) = config.networking.netd.tls_ca_cert.as_deref() {
+    if let Some(path) = config.netd.tls_ca_cert.as_deref() {
         return certificate_authority::read_certificate_authority_certificate(path);
     }
 

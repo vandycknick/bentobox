@@ -1,7 +1,6 @@
 pub mod certificate_authority;
 mod engine;
 mod error;
-pub mod global_config;
 pub mod host_user;
 mod launch;
 mod machine;
@@ -17,7 +16,10 @@ mod store;
 mod vm_lock;
 
 pub use crate::certificate_authority::{ensure_certificate_authority, CertificateAuthority};
-pub use crate::engine::{LocalRuntimeConfig, Machine, Runtime, RuntimeConfig, RuntimeTarget};
+pub use crate::engine::{
+    LocalRuntimeConfig, Machine, NetdRuntimeConfig, Runtime, RuntimeConfig,
+    RuntimeNetworkingConfig, RuntimeTarget,
+};
 pub use crate::error::LibVmError;
 pub use crate::machine::{
     MachineCreate, MachineInspect, MachineRef, MachineRuntimeStatus, MachineStatus,

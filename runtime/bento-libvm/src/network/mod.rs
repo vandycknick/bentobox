@@ -15,7 +15,6 @@ pub use api::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::global_config::GlobalConfig;
 use crate::models::{
     MachineConfig, NamedNetworkMode as ModelNamedNetworkMode,
     NetworkDefinition as ModelNetworkDefinition,
@@ -24,7 +23,7 @@ use crate::models::{
 };
 use crate::paths::LocalPaths;
 use crate::store::{Database, Sqlite};
-use crate::{LibVmError, MachineId};
+use crate::{LibVmError, MachineId, RuntimeNetworkingConfig};
 
 use self::core::{
     NetworkDriver, NetworkDriverContext, NetworkRequest, NetworkScope, PreparedNetwork,
@@ -74,6 +73,7 @@ pub(crate) async fn prepare_network_runtime(
     paths: &LocalPaths,
     db: &Sqlite,
     metadata: &MachineConfig,
+    config: &RuntimeNetworkingConfig,
 ) -> Result<RuntimeNetwork, LibVmError> {
     reconcile_network_runtime(paths, db, metadata, false).await?;
 
@@ -83,19 +83,18 @@ pub(crate) async fn prepare_network_runtime(
             Ok(RuntimeNetwork::None)
         }
         ModelRequestedNetwork::Private { policy_ref } => {
-            let global_config = load_global_config(&metadata.name)?;
             let request = NetworkRequest {
                 scope: NetworkScope::Private,
                 definition_name: None,
                 policy_ref: policy_ref.as_ref(),
             };
             prepare_with_driver(
-                selected_private_driver(global_config.networking.private_driver),
+                selected_private_driver(config.private_driver),
                 &NetworkDriverContext {
                     paths,
                     db,
                     metadata,
-                    config: &global_config.networking,
+                    config,
                 },
                 &request,
             )
@@ -118,7 +117,7 @@ pub(crate) async fn prepare_network_runtime(
                     message: format!("named network {:?} is not defined", name),
                 }
             })?;
-            resolve_named_network(paths, db, metadata, &definition).await
+            resolve_named_network(paths, db, metadata, &definition, config).await
         }
     }
 }
@@ -161,8 +160,8 @@ async fn resolve_named_network(
     db: &Sqlite,
     metadata: &MachineConfig,
     definition: &ModelNetworkDefinition,
+    config: &RuntimeNetworkingConfig,
 ) -> Result<RuntimeNetwork, LibVmError> {
-    let global_config = load_global_config(&metadata.name)?;
     match definition.mode {
         ModelNamedNetworkMode::Nat => {
             let driver = match definition.driver_preference {
@@ -182,7 +181,7 @@ async fn resolve_named_network(
                     paths,
                     db,
                     metadata,
-                    config: &global_config.networking,
+                    config,
                 },
                 &request,
             )
@@ -389,13 +388,6 @@ pub(super) fn remove_file_if_exists(path: &Path) -> Result<(), LibVmError> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err.into()),
     }
-}
-
-fn load_global_config(reference: &str) -> Result<GlobalConfig, LibVmError> {
-    GlobalConfig::load().map_err(|err| LibVmError::NetworkRuntime {
-        reference: reference.to_string(),
-        message: format!("load networking defaults: {err}"),
-    })
 }
 
 pub(super) fn now_unix() -> i64 {

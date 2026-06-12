@@ -1,8 +1,7 @@
-use crate::global_config::NetworkingConfig;
 use crate::models::MachineConfig;
 use crate::paths::LocalPaths;
 use crate::store::Sqlite;
-use crate::{LibVmError, NetworkPolicyRef};
+use crate::{LibVmError, NetworkPolicyRef, RuntimeNetworkingConfig};
 
 use super::RuntimeNetwork;
 
@@ -22,7 +21,7 @@ pub(super) struct NetworkDriverContext<'a> {
     pub(super) paths: &'a LocalPaths,
     pub(super) db: &'a Sqlite,
     pub(super) metadata: &'a MachineConfig,
-    pub(super) config: &'a NetworkingConfig,
+    pub(super) config: &'a RuntimeNetworkingConfig,
 }
 
 pub(super) struct PreparedNetwork {

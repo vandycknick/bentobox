@@ -49,14 +49,13 @@ mod tests {
     use std::path::Path;
 
     use super::VzNatDriver;
-    use crate::global_config::{NetdConfig, NetworkingConfig};
     use crate::models::{MachineConfig, RequestedNetwork};
     use crate::network::core::{NetworkDriver, NetworkDriverContext, NetworkRequest, NetworkScope};
     use crate::network::NetworkDriverKind;
     use crate::network::RuntimeNetwork;
     use crate::paths::LocalPaths;
     use crate::store::{Database, Sqlite};
-    use crate::MachineId;
+    use crate::{MachineId, NetdRuntimeConfig, RuntimeNetworkingConfig};
     use bento_vm_spec::VmSpec;
 
     use crate::NetworkPolicyRef;
@@ -135,9 +134,10 @@ mod tests {
             "devbox".to_string(),
             paths.machine(machine_id).dir(),
         );
-        let config = NetworkingConfig {
+        let config = RuntimeNetworkingConfig {
             private_driver: NetworkDriverKind::VzNat,
-            netd: NetdConfig::default(),
+            netd: NetdRuntimeConfig::default(),
+            ..RuntimeNetworkingConfig::default()
         };
         let driver = VzNatDriver;
 

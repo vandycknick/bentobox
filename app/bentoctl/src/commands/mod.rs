@@ -1,7 +1,8 @@
-use bento_libvm::Runtime;
+use bento_libvm::{Runtime, RuntimeConfig};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::fmt::{Display, Formatter};
 
+use crate::config::GlobalConfig;
 use crate::constants::HELP_TEMPLATE;
 use eyre::Context;
 
@@ -183,7 +184,13 @@ fn apply_help_template(command: clap::Command) -> clap::Command {
 }
 
 async fn libvm() -> eyre::Result<Runtime> {
-    Runtime::from_env().await.context("initialize bento-libvm")
+    let global_config = GlobalConfig::load().context("load global config")?;
+    let runtime_config = RuntimeConfig::from_env()
+        .context("resolve bento-libvm runtime config")?
+        .with_networking(global_config.networking);
+    Runtime::new(runtime_config)
+        .await
+        .context("initialize bento-libvm")
 }
 
 #[cfg(test)]

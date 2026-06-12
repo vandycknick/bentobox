@@ -1,4 +1,5 @@
 mod commands;
+mod config;
 mod constants;
 mod profile;
 mod ssh;

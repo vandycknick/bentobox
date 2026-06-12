@@ -1,60 +1,77 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
+use bento_libvm::{NetdRuntimeConfig, NetworkDriverKind, RuntimeNetworkingConfig};
 use eyre::Context;
 use serde::Deserialize;
 
-use crate::network::NetworkDriverKind;
-use crate::paths::resolve_default_config_dir;
-
+const APP_DIR_NAME: &str = "bento";
 const CONFIG_FILE_NAME: &str = "config.yaml";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct GlobalConfig {
-    pub networking: NetworkingConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NetworkingConfig {
-    pub private_driver: NetworkDriverKind,
-    pub netd: NetdConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NetdConfig {
-    pub subnet: String,
-    pub pcap: bool,
-    pub tls_ca_cert: Option<PathBuf>,
-    pub tls_ca_key: Option<PathBuf>,
+pub(crate) struct GlobalConfig {
+    pub(crate) networking: RuntimeNetworkingConfig,
 }
 
 impl GlobalConfig {
-    pub fn load() -> eyre::Result<Self> {
-        let config_path = config_path()?;
+    pub(crate) fn load() -> eyre::Result<Self> {
+        let config_dir = resolve_default_config_dir()?;
+        let config_path = config_dir.join(CONFIG_FILE_NAME);
         let raw = match std::fs::read_to_string(&config_path) {
             Ok(raw) => raw,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default_for_config_dir(config_dir));
+            }
             Err(err) => {
                 return Err(err)
                     .with_context(|| format!("read global config {}", config_path.display()));
             }
         };
 
-        parse_global_config(&raw)
-            .with_context(|| format!("parse global config {}", config_path.display()))
+        let mut config = parse_global_config(&raw)
+            .with_context(|| format!("parse global config {}", config_path.display()))?;
+        config.networking.policy_config_dir = Some(config_dir);
+        Ok(config)
+    }
+
+    fn default_for_config_dir(config_dir: PathBuf) -> Self {
+        let networking = RuntimeNetworkingConfig {
+            policy_config_dir: Some(config_dir),
+            ..RuntimeNetworkingConfig::default()
+        };
+        Self { networking }
     }
 }
 
-impl Default for NetworkingConfig {
-    fn default() -> Self {
-        Self {
-            private_driver: NetworkDriverKind::Netd,
-            netd: NetdConfig::default(),
-        }
+fn resolve_default_config_dir() -> eyre::Result<PathBuf> {
+    let home = env_absolute_path("HOME")?;
+    let config_home = env_absolute_path("XDG_CONFIG_HOME")?
+        .or_else(|| home.as_ref().map(|path| path.join(".config")));
+
+    config_home
+        .map(|path| path.join(APP_DIR_NAME))
+        .ok_or_else(|| {
+            eyre::eyre!("could not resolve Bento config directory from XDG_CONFIG_HOME or HOME")
+        })
+}
+
+fn env_absolute_path(name: &'static str) -> eyre::Result<Option<PathBuf>> {
+    match std::env::var_os(name) {
+        Some(value) => absolute_path(name, value).map(Some),
+        None => Ok(None),
     }
 }
 
-fn config_path() -> eyre::Result<PathBuf> {
-    Ok(resolve_default_config_dir()?.join(CONFIG_FILE_NAME))
+fn absolute_path(name: &'static str, value: OsString) -> eyre::Result<PathBuf> {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(eyre::eyre!(
+            "environment variable {name} must be an absolute path: {}",
+            path.display()
+        ))
+    }
 }
 
 fn parse_global_config(input: &str) -> eyre::Result<GlobalConfig> {
@@ -71,14 +88,15 @@ fn parse_global_config(input: &str) -> eyre::Result<GlobalConfig> {
     let netd = parsed
         .networking
         .and_then(|networking| networking.drivers.and_then(|drivers| drivers.netd))
-        .map(NetdConfig::from)
+        .map(NetdRuntimeConfig::from)
         .unwrap_or_default();
     validate_netd_config(&netd)?;
 
     Ok(GlobalConfig {
-        networking: NetworkingConfig {
+        networking: RuntimeNetworkingConfig {
             private_driver,
             netd,
+            ..RuntimeNetworkingConfig::default()
         },
     })
 }
@@ -126,18 +144,7 @@ impl RawNetworkingConfig {
     }
 }
 
-impl Default for NetdConfig {
-    fn default() -> Self {
-        Self {
-            subnet: "192.168.105.0/24".to_string(),
-            pcap: false,
-            tls_ca_cert: None,
-            tls_ca_key: None,
-        }
-    }
-}
-
-impl From<RawNetdConfig> for NetdConfig {
+impl From<RawNetdConfig> for NetdRuntimeConfig {
     fn from(raw: RawNetdConfig) -> Self {
         let default = Self::default();
         Self {
@@ -159,7 +166,7 @@ fn parse_network_driver(value: &str) -> eyre::Result<NetworkDriverKind> {
     }
 }
 
-fn validate_netd_config(config: &NetdConfig) -> eyre::Result<()> {
+fn validate_netd_config(config: &NetdRuntimeConfig) -> eyre::Result<()> {
     if config.tls_ca_cert.is_some() != config.tls_ca_key.is_some() {
         return Err(eyre::eyre!(
             "[networking.drivers.netd].tls_ca_cert and tls_ca_key must be configured together"
@@ -183,6 +190,8 @@ fn validate_netd_config(config: &NetdConfig) -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -190,7 +199,7 @@ mod tests {
         let cfg = parse_global_config("{}").expect("parse config");
 
         assert_eq!(cfg.networking.private_driver, NetworkDriverKind::Netd);
-        assert_eq!(cfg.networking.netd, NetdConfig::default());
+        assert_eq!(cfg.networking.netd, NetdRuntimeConfig::default());
     }
 
     #[test]
@@ -224,7 +233,7 @@ networking:
         assert_eq!(cfg.networking.private_driver, NetworkDriverKind::Netd);
         assert_eq!(
             cfg.networking.netd,
-            NetdConfig {
+            NetdRuntimeConfig {
                 subnet: "192.168.105.0/24".to_string(),
                 pcap: true,
                 tls_ca_cert: None,
@@ -312,5 +321,15 @@ networking:
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_config_sets_policy_config_dir() {
+        let config = GlobalConfig::default_for_config_dir(PathBuf::from("/tmp/bento-config"));
+
+        assert_eq!(
+            config.networking.policy_config_dir.as_deref(),
+            Some(Path::new("/tmp/bento-config"))
+        );
     }
 }
