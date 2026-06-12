@@ -27,8 +27,8 @@ pub use crate::network::{
 };
 pub use crate::network_policy::NetworkPolicyRef;
 pub use crate::runtime::{
-    LocalRuntimeConfig, NetdRuntimeConfig, Runtime, RuntimeConfig, RuntimeNetworkingConfig,
-    RuntimeTarget,
+    LocalRuntimeConfig, NetdRuntimeConfig, RemoteRuntimeConfig, Runtime, RuntimeConfig,
+    RuntimeNetworkingConfig, RuntimeTarget,
 };
 
 pub(crate) use crate::models::MachineId;

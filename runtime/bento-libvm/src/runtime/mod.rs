@@ -2,9 +2,11 @@ mod backend;
 mod config;
 mod facade;
 mod local;
+mod remote;
 
 pub use config::{
-    LocalRuntimeConfig, NetdRuntimeConfig, RuntimeConfig, RuntimeNetworkingConfig, RuntimeTarget,
+    LocalRuntimeConfig, NetdRuntimeConfig, RemoteRuntimeConfig, RuntimeConfig,
+    RuntimeNetworkingConfig, RuntimeTarget,
 };
 pub use facade::Runtime;
 

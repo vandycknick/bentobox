@@ -16,6 +16,12 @@ impl RuntimeConfig {
         }
     }
 
+    pub fn remote(endpoint: impl Into<String>) -> Self {
+        Self {
+            target: RuntimeTarget::Remote(RemoteRuntimeConfig::new(endpoint)),
+        }
+    }
+
     pub fn from_env() -> Result<Self, LibVmError> {
         Ok(Self::local(resolve_default_data_dir()?))
     }
@@ -23,6 +29,7 @@ impl RuntimeConfig {
     pub fn with_networking(mut self, networking: RuntimeNetworkingConfig) -> Self {
         match &mut self.target {
             RuntimeTarget::Local(local) => local.networking = networking,
+            RuntimeTarget::Remote(_) => {}
         }
         self
     }
@@ -32,6 +39,20 @@ impl RuntimeConfig {
 #[non_exhaustive]
 pub enum RuntimeTarget {
     Local(LocalRuntimeConfig),
+    Remote(RemoteRuntimeConfig),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteRuntimeConfig {
+    pub endpoint: String,
+}
+
+impl RemoteRuntimeConfig {
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -9,7 +9,9 @@ use crate::network::{NetworkDefinition, RequestedNetwork};
 use crate::paths::LocalPaths;
 use crate::{LibVmError, MachineId};
 
-use super::{local::LocalRuntime, RuntimeBackend, RuntimeConfig, RuntimeTarget};
+use super::{
+    local::LocalRuntime, remote::RemoteRuntime, RuntimeBackend, RuntimeConfig, RuntimeTarget,
+};
 
 #[derive(Debug, Clone)]
 pub struct Runtime {
@@ -20,9 +22,12 @@ impl Runtime {
     pub async fn new(config: RuntimeConfig) -> Result<Self, LibVmError> {
         match config.target {
             RuntimeTarget::Local(config) => Ok(Self {
-                backend: RuntimeBackend::Local(
+                backend: RuntimeBackend::Local(Box::new(
                     LocalRuntime::new(LocalPaths::new(config.data_dir), config.networking).await?,
-                ),
+                )),
+            }),
+            RuntimeTarget::Remote(config) => Ok(Self {
+                backend: RuntimeBackend::Remote(RemoteRuntime::new(config)),
             }),
         }
     }
@@ -34,19 +39,22 @@ impl Runtime {
     pub fn local_data_dir(&self) -> Option<&Path> {
         match &self.backend {
             RuntimeBackend::Local(local) => Some(local.paths().data_dir()),
+            RuntimeBackend::Remote(_) => None,
         }
     }
 
     pub fn local_images_dir(&self) -> Option<&Path> {
         match &self.backend {
             RuntimeBackend::Local(local) => Some(local.paths().images_dir()),
+            RuntimeBackend::Remote(_) => None,
         }
     }
 
     pub async fn create_machine(&self, request: MachineCreate) -> Result<Machine, LibVmError> {
         let config = match &self.backend {
-            RuntimeBackend::Local(local) => local.create_machine(request).await?,
-        };
+            RuntimeBackend::Local(local) => local.create_machine(request).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("create_machine"),
+        }?;
         Ok(Machine::new(self.clone(), config.id))
     }
 
@@ -57,8 +65,9 @@ impl Runtime {
 
     pub async fn list_machines(&self) -> Result<Vec<Machine>, LibVmError> {
         let configs = match &self.backend {
-            RuntimeBackend::Local(local) => local.list_machine_configs().await?,
-        };
+            RuntimeBackend::Local(local) => local.list_machine_configs().await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("list_machines"),
+        }?;
         Ok(configs
             .into_iter()
             .map(|config| Machine::new(self.clone(), config.id))
@@ -68,6 +77,7 @@ impl Runtime {
     pub async fn allocate_ephemeral_name(&self, prefix: &str) -> Result<String, LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.allocate_ephemeral_name(prefix).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("allocate_ephemeral_name"),
         }
     }
 
@@ -84,6 +94,7 @@ impl Runtime {
         let definition = definition.into_model();
         match &self.backend {
             RuntimeBackend::Local(local) => local.create_network_definition(definition).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("create_network_definition"),
         }
     }
 
@@ -95,6 +106,7 @@ impl Runtime {
                 .into_iter()
                 .map(NetworkDefinition::from_model)
                 .collect()),
+            RuntimeBackend::Remote(remote) => remote.unsupported("list_network_definitions"),
         }
     }
 
@@ -107,12 +119,14 @@ impl Runtime {
                 .get_network_definition(name)
                 .await?
                 .map(NetworkDefinition::from_model)),
+            RuntimeBackend::Remote(remote) => remote.unsupported("get_network_definition"),
         }
     }
 
     pub async fn remove_network_definition(&self, name: &str) -> Result<(), LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.remove_network_definition(name).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("remove_network_definition"),
         }
     }
 
@@ -122,6 +136,7 @@ impl Runtime {
     ) -> Result<MachineConfig, LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.resolve_machine_config(machine).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("resolve_machine_config"),
         }
     }
 
@@ -131,24 +146,28 @@ impl Runtime {
     ) -> Result<MachineInspect, LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.inspect_by_id(id).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("machine_inspect"),
         }
     }
 
     pub(crate) async fn start_machine(&self, id: MachineId) -> Result<MachineInspect, LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.start_by_id(id).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("start_machine"),
         }
     }
 
     pub(crate) async fn stop_machine(&self, id: MachineId) -> Result<MachineInspect, LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.stop_by_id(id).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("stop_machine"),
         }
     }
 
     pub(crate) async fn remove_machine(&self, id: MachineId) -> Result<(), LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.remove_by_id(id).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("remove_machine"),
         }
     }
 
@@ -159,6 +178,7 @@ impl Runtime {
     ) -> Result<MachineInspect, LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.replace_config_by_id(id, spec).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("replace_machine_config"),
         }
     }
 
@@ -169,6 +189,7 @@ impl Runtime {
     ) -> Result<MachineInspect, LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.set_network_by_id(id, network).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("set_machine_network"),
         }
     }
 
@@ -179,6 +200,7 @@ impl Runtime {
     ) -> Result<(), LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.wait_for_guest_running_by_id(id, timeout).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("wait_for_guest_running"),
         }
     }
 
@@ -188,6 +210,7 @@ impl Runtime {
     ) -> Result<MachineRuntimeStatus, LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.get_status_by_id(id).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("get_status"),
         }
     }
 
@@ -197,6 +220,7 @@ impl Runtime {
     ) -> Result<tokio::net::UnixStream, LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.open_serial_stream_by_id(id).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("open_serial_stream"),
         }
     }
 
@@ -211,6 +235,42 @@ impl Runtime {
                     .open_shell_stream_by_id(id, wait_for_guest_readiness)
                     .await
             }
+            RuntimeBackend::Remote(remote) => remote.unsupported("open_shell_stream"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{LibVmError, Runtime, RuntimeConfig};
+
+    #[tokio::test]
+    async fn remote_runtime_has_no_local_paths() {
+        let runtime = Runtime::new(RuntimeConfig::remote("http://127.0.0.1:8080"))
+            .await
+            .expect("create remote runtime stub");
+
+        assert!(runtime.local_data_dir().is_none());
+        assert!(runtime.local_images_dir().is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_runtime_reports_explicit_unsupported_operations() {
+        let runtime = Runtime::new(RuntimeConfig::remote("http://127.0.0.1:8080"))
+            .await
+            .expect("create remote runtime stub");
+
+        let err = runtime
+            .allocate_ephemeral_name("bento")
+            .await
+            .expect_err("remote runtime should not implement operations yet");
+
+        assert!(matches!(
+            err,
+            LibVmError::RemoteRuntimeUnsupported {
+                endpoint,
+                operation: "allocate_ephemeral_name"
+            } if endpoint == "http://127.0.0.1:8080"
+        ));
     }
 }

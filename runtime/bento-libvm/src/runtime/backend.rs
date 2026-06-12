@@ -1,6 +1,7 @@
-use super::local::LocalRuntime;
+use super::{local::LocalRuntime, remote::RemoteRuntime};
 
 #[derive(Debug, Clone)]
 pub(crate) enum RuntimeBackend {
-    Local(LocalRuntime),
+    Local(Box<LocalRuntime>),
+    Remote(RemoteRuntime),
 }
