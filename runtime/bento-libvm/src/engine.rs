@@ -7,10 +7,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::launch::prepare_instance_runtime;
-use crate::paths::{
-    resolve_default_data_dir, root_disk_relative_path, vm_spec_path_in, LocalPaths, MachinePaths,
-};
+use crate::paths::{root_disk_relative_path, vm_spec_path_in, LocalPaths, MachinePaths};
 use crate::root_disk::{clone_or_copy_root_disk, resize_raw_disk};
+use crate::runtime::{Runtime, RuntimeNetworkingConfig};
 use bento_vm_spec::{Boot, Disk, Guest, GuestOs, Hardware, Kernel, Mount, Storage, VmSpec};
 use nix::{
     errno::Errno,
@@ -28,8 +27,7 @@ use crate::models::{
 };
 use crate::monitor;
 use crate::network::{
-    prepare_network_runtime, reconcile_network_runtime, NetworkDefinition, NetworkDriverKind,
-    RequestedNetwork, RuntimeNetwork,
+    prepare_network_runtime, reconcile_network_runtime, RequestedNetwork, RuntimeNetwork,
 };
 use crate::store::{Database, Sqlite};
 use crate::vm_lock::VmLock;
@@ -40,97 +38,6 @@ const DEFAULT_IMAGE_MEMORY_MIB: u32 = 512;
 const ROOT_DISK_KERNEL_ARG: &str = "root=/dev/vda";
 const ENV_VM_STARTPIPE: &str = "_VM_STARTPIPE";
 const ENV_VM_SYNCPIPE: &str = "_VM_SYNCPIPE";
-
-#[derive(Debug, Clone)]
-pub struct RuntimeConfig {
-    target: RuntimeTarget,
-}
-
-impl RuntimeConfig {
-    pub fn local(data_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            target: RuntimeTarget::Local(LocalRuntimeConfig::new(data_dir)),
-        }
-    }
-
-    pub fn from_env() -> Result<Self, LibVmError> {
-        Ok(Self::local(resolve_default_data_dir()?))
-    }
-
-    pub fn with_networking(mut self, networking: RuntimeNetworkingConfig) -> Self {
-        match &mut self.target {
-            RuntimeTarget::Local(local) => local.networking = networking,
-        }
-        self
-    }
-}
-
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub enum RuntimeTarget {
-    Local(LocalRuntimeConfig),
-}
-
-#[derive(Debug, Clone)]
-pub struct LocalRuntimeConfig {
-    pub data_dir: PathBuf,
-    pub networking: RuntimeNetworkingConfig,
-}
-
-impl LocalRuntimeConfig {
-    pub fn new(data_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            data_dir: data_dir.into(),
-            networking: RuntimeNetworkingConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeNetworkingConfig {
-    pub private_driver: NetworkDriverKind,
-    pub policy_config_dir: Option<PathBuf>,
-    pub netd: NetdRuntimeConfig,
-}
-
-impl Default for RuntimeNetworkingConfig {
-    fn default() -> Self {
-        Self {
-            private_driver: NetworkDriverKind::Netd,
-            policy_config_dir: None,
-            netd: NetdRuntimeConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NetdRuntimeConfig {
-    pub subnet: String,
-    pub pcap: bool,
-    pub tls_ca_cert: Option<PathBuf>,
-    pub tls_ca_key: Option<PathBuf>,
-}
-
-impl Default for NetdRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            subnet: "192.168.105.0/24".to_string(),
-            pcap: false,
-            tls_ca_cert: None,
-            tls_ca_key: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Runtime {
-    backend: RuntimeBackend,
-}
-
-#[derive(Debug, Clone)]
-enum RuntimeBackend {
-    Local(LocalRuntime),
-}
 
 #[derive(Debug, Clone)]
 pub struct Machine {
@@ -153,7 +60,7 @@ impl RuntimeStatus {
 }
 
 #[derive(Debug, Clone)]
-struct LocalRuntime {
+pub(crate) struct LocalRuntime {
     paths: LocalPaths,
     db: Sqlite,
     networking: RuntimeNetworkingConfig,
@@ -200,201 +107,8 @@ impl ObservedRuntime {
     }
 }
 
-impl Runtime {
-    pub async fn new(config: RuntimeConfig) -> Result<Self, LibVmError> {
-        match config.target {
-            RuntimeTarget::Local(config) => Ok(Self {
-                backend: RuntimeBackend::Local(
-                    LocalRuntime::new(LocalPaths::new(config.data_dir), config.networking).await?,
-                ),
-            }),
-        }
-    }
-
-    pub async fn from_env() -> Result<Self, LibVmError> {
-        Self::new(RuntimeConfig::from_env()?).await
-    }
-
-    pub fn local_data_dir(&self) -> Option<&Path> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => Some(local.paths.data_dir()),
-        }
-    }
-
-    pub fn local_images_dir(&self) -> Option<&Path> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => Some(local.paths.images_dir()),
-        }
-    }
-
-    pub async fn create_machine(&self, request: MachineCreate) -> Result<Machine, LibVmError> {
-        let config = match &self.backend {
-            RuntimeBackend::Local(local) => local.create_machine(request).await?,
-        };
-        Ok(Machine::new(self.clone(), config.id))
-    }
-
-    pub async fn get_machine(&self, machine: &MachineRef) -> Result<Machine, LibVmError> {
-        let config = self.resolve_machine_config(machine).await?;
-        Ok(Machine::new(self.clone(), config.id))
-    }
-
-    pub async fn list_machines(&self) -> Result<Vec<Machine>, LibVmError> {
-        let configs = match &self.backend {
-            RuntimeBackend::Local(local) => local.list_machine_configs().await?,
-        };
-        Ok(configs
-            .into_iter()
-            .map(|config| Machine::new(self.clone(), config.id))
-            .collect())
-    }
-
-    pub async fn allocate_ephemeral_name(&self, prefix: &str) -> Result<String, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.allocate_ephemeral_name(prefix).await,
-        }
-    }
-
-    pub async fn create_network_definition(
-        &self,
-        definition: NetworkDefinition,
-    ) -> Result<(), LibVmError> {
-        definition
-            .validate()
-            .map_err(|reason| LibVmError::InvalidCreateRequest {
-                name: definition.name.clone(),
-                reason,
-            })?;
-        let definition = definition.into_model();
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.create_network_definition(definition).await,
-        }
-    }
-
-    pub async fn list_network_definitions(&self) -> Result<Vec<NetworkDefinition>, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => Ok(local
-                .list_network_definitions()
-                .await?
-                .into_iter()
-                .map(NetworkDefinition::from_model)
-                .collect()),
-        }
-    }
-
-    pub async fn get_network_definition(
-        &self,
-        name: &str,
-    ) -> Result<Option<NetworkDefinition>, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => Ok(local
-                .get_network_definition(name)
-                .await?
-                .map(NetworkDefinition::from_model)),
-        }
-    }
-
-    pub async fn remove_network_definition(&self, name: &str) -> Result<(), LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.remove_network_definition(name).await,
-        }
-    }
-
-    async fn resolve_machine_config(
-        &self,
-        machine: &MachineRef,
-    ) -> Result<MachineConfig, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.resolve_machine_config(machine).await,
-        }
-    }
-
-    async fn machine_inspect(&self, id: MachineId) -> Result<MachineInspect, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.inspect_by_id(id).await,
-        }
-    }
-
-    async fn start_machine(&self, id: MachineId) -> Result<MachineInspect, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.start_by_id(id).await,
-        }
-    }
-
-    async fn stop_machine(&self, id: MachineId) -> Result<MachineInspect, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.stop_by_id(id).await,
-        }
-    }
-
-    async fn remove_machine(&self, id: MachineId) -> Result<(), LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.remove_by_id(id).await,
-        }
-    }
-
-    async fn replace_machine_config(
-        &self,
-        id: MachineId,
-        spec: VmSpec,
-    ) -> Result<MachineInspect, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.replace_config_by_id(id, spec).await,
-        }
-    }
-
-    async fn set_machine_network(
-        &self,
-        id: MachineId,
-        network: RequestedNetwork,
-    ) -> Result<MachineInspect, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.set_network_by_id(id, network).await,
-        }
-    }
-
-    async fn wait_for_guest_running(
-        &self,
-        id: MachineId,
-        timeout: std::time::Duration,
-    ) -> Result<(), LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.wait_for_guest_running_by_id(id, timeout).await,
-        }
-    }
-
-    async fn get_status(&self, id: MachineId) -> Result<MachineRuntimeStatus, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.get_status_by_id(id).await,
-        }
-    }
-
-    async fn open_serial_stream(
-        &self,
-        id: MachineId,
-    ) -> Result<tokio::net::UnixStream, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => local.open_serial_stream_by_id(id).await,
-        }
-    }
-
-    async fn open_shell_stream(
-        &self,
-        id: MachineId,
-        wait_for_guest_readiness: bool,
-    ) -> Result<tokio::net::UnixStream, LibVmError> {
-        match &self.backend {
-            RuntimeBackend::Local(local) => {
-                local
-                    .open_shell_stream_by_id(id, wait_for_guest_readiness)
-                    .await
-            }
-        }
-    }
-}
-
 impl Machine {
-    fn new(runtime: Runtime, id: MachineId) -> Self {
+    pub(crate) fn new(runtime: Runtime, id: MachineId) -> Self {
         Self { runtime, id }
     }
 
@@ -455,7 +169,7 @@ impl Machine {
 }
 
 impl LocalRuntime {
-    async fn new(
+    pub(crate) async fn new(
         paths: LocalPaths,
         networking: RuntimeNetworkingConfig,
     ) -> Result<Self, LibVmError> {
@@ -468,7 +182,14 @@ impl LocalRuntime {
         })
     }
 
-    async fn create_machine(&self, request: MachineCreate) -> Result<MachineConfig, LibVmError> {
+    pub(crate) fn paths(&self) -> &LocalPaths {
+        &self.paths
+    }
+
+    pub(crate) async fn create_machine(
+        &self,
+        request: MachineCreate,
+    ) -> Result<MachineConfig, LibVmError> {
         if matches!(request.disk_size_bytes, Some(0)) {
             return Err(LibVmError::InvalidCreateRequest {
                 name: request.name,
@@ -599,11 +320,14 @@ impl LocalRuntime {
         self.machine_inspect(config).await
     }
 
-    async fn inspect_by_id(&self, machine_id: MachineId) -> Result<MachineInspect, LibVmError> {
+    pub(crate) async fn inspect_by_id(
+        &self,
+        machine_id: MachineId,
+    ) -> Result<MachineInspect, LibVmError> {
         self.inspect(&MachineRef::id(machine_id)).await
     }
 
-    async fn list_machine_configs(&self) -> Result<Vec<MachineConfig>, LibVmError> {
+    pub(crate) async fn list_machine_configs(&self) -> Result<Vec<MachineConfig>, LibVmError> {
         let machines = self.db.list_machine_configs().await?;
         for config in &machines {
             self.reconcile_machine_runtime(config).await?;
@@ -611,33 +335,35 @@ impl LocalRuntime {
         Ok(machines)
     }
 
-    async fn allocate_ephemeral_name(&self, prefix: &str) -> Result<String, LibVmError> {
+    pub(crate) async fn allocate_ephemeral_name(&self, prefix: &str) -> Result<String, LibVmError> {
         self.db.allocate_ephemeral_name(prefix).await
     }
 
-    async fn create_network_definition(
+    pub(crate) async fn create_network_definition(
         &self,
         definition: ModelNetworkDefinition,
     ) -> Result<(), LibVmError> {
         self.db.upsert_network_definition(&definition).await
     }
 
-    async fn list_network_definitions(&self) -> Result<Vec<ModelNetworkDefinition>, LibVmError> {
+    pub(crate) async fn list_network_definitions(
+        &self,
+    ) -> Result<Vec<ModelNetworkDefinition>, LibVmError> {
         self.db.list_network_definitions().await
     }
 
-    async fn get_network_definition(
+    pub(crate) async fn get_network_definition(
         &self,
         name: &str,
     ) -> Result<Option<ModelNetworkDefinition>, LibVmError> {
         self.db.get_network_definition(name).await
     }
 
-    async fn remove_network_definition(&self, name: &str) -> Result<(), LibVmError> {
+    pub(crate) async fn remove_network_definition(&self, name: &str) -> Result<(), LibVmError> {
         self.db.remove_network_definition(name).await
     }
 
-    async fn set_network_by_id(
+    pub(crate) async fn set_network_by_id(
         &self,
         machine_id: MachineId,
         network: RequestedNetwork,
@@ -660,7 +386,7 @@ impl LocalRuntime {
         self.machine_inspect(config).await
     }
 
-    async fn replace_config_by_id(
+    pub(crate) async fn replace_config_by_id(
         &self,
         machine_id: MachineId,
         spec: VmSpec,
@@ -686,7 +412,7 @@ impl LocalRuntime {
         self.machine_inspect(config).await
     }
 
-    async fn remove_by_id(&self, machine_id: MachineId) -> Result<(), LibVmError> {
+    pub(crate) async fn remove_by_id(&self, machine_id: MachineId) -> Result<(), LibVmError> {
         let config = self
             .resolve_machine_config(&MachineRef::id(machine_id))
             .await?;
@@ -710,7 +436,10 @@ impl LocalRuntime {
         self.db.remove_machine_config(&config).await
     }
 
-    async fn start_by_id(&self, machine_id: MachineId) -> Result<MachineInspect, LibVmError> {
+    pub(crate) async fn start_by_id(
+        &self,
+        machine_id: MachineId,
+    ) -> Result<MachineInspect, LibVmError> {
         let config = self
             .resolve_machine_config(&MachineRef::id(machine_id))
             .await?;
@@ -801,7 +530,7 @@ impl LocalRuntime {
         self.machine_inspect(config).await
     }
 
-    async fn wait_for_guest_running_by_id(
+    pub(crate) async fn wait_for_guest_running_by_id(
         &self,
         machine_id: MachineId,
         timeout: std::time::Duration,
@@ -815,7 +544,10 @@ impl LocalRuntime {
             })
     }
 
-    async fn stop_by_id(&self, machine_id: MachineId) -> Result<MachineInspect, LibVmError> {
+    pub(crate) async fn stop_by_id(
+        &self,
+        machine_id: MachineId,
+    ) -> Result<MachineInspect, LibVmError> {
         let config = self
             .resolve_machine_config(&MachineRef::id(machine_id))
             .await?;
@@ -846,7 +578,7 @@ impl LocalRuntime {
         self.machine_inspect(config).await
     }
 
-    async fn get_status_by_id(
+    pub(crate) async fn get_status_by_id(
         &self,
         machine_id: MachineId,
     ) -> Result<MachineRuntimeStatus, LibVmError> {
@@ -865,7 +597,7 @@ impl LocalRuntime {
         Ok(MachineRuntimeStatus::from_protocol(status))
     }
 
-    async fn open_serial_stream_by_id(
+    pub(crate) async fn open_serial_stream_by_id(
         &self,
         machine_id: MachineId,
     ) -> Result<tokio::net::UnixStream, LibVmError> {
@@ -888,7 +620,7 @@ impl LocalRuntime {
             })
     }
 
-    async fn open_shell_stream_by_id(
+    pub(crate) async fn open_shell_stream_by_id(
         &self,
         machine_id: MachineId,
         wait_for_guest_readiness: bool,
@@ -925,7 +657,7 @@ impl LocalRuntime {
             })
     }
 
-    async fn resolve_machine_config(
+    pub(crate) async fn resolve_machine_config(
         &self,
         machine: &MachineRef,
     ) -> Result<MachineConfig, LibVmError> {

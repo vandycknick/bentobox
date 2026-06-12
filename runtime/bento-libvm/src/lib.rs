@@ -10,13 +10,11 @@ mod network;
 mod network_policy;
 mod paths;
 mod root_disk;
+mod runtime;
 mod store;
 mod vm_lock;
 
-pub use crate::engine::{
-    LocalRuntimeConfig, Machine, NetdRuntimeConfig, Runtime, RuntimeConfig,
-    RuntimeNetworkingConfig, RuntimeTarget,
-};
+pub use crate::engine::Machine;
 pub use crate::error::LibVmError;
 pub use crate::host::{ensure_certificate_authority, CertificateAuthority};
 pub use crate::machine::{
@@ -30,5 +28,9 @@ pub use crate::network::{
     RequestedNetwork,
 };
 pub use crate::network_policy::NetworkPolicyRef;
+pub use crate::runtime::{
+    LocalRuntimeConfig, NetdRuntimeConfig, Runtime, RuntimeConfig, RuntimeNetworkingConfig,
+    RuntimeTarget,
+};
 
 pub(crate) use crate::models::MachineId;
