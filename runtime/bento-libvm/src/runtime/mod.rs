@@ -1,6 +1,7 @@
 mod backend;
 mod config;
 mod facade;
+mod local;
 
 pub use config::{
     LocalRuntimeConfig, NetdRuntimeConfig, RuntimeConfig, RuntimeNetworkingConfig, RuntimeTarget,

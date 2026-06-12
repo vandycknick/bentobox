@@ -1172,7 +1172,7 @@ fn create_staging_dir(paths: &LocalPaths) -> Result<PathBuf, LibVmError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::{
+    use super::{
         assign_mount_tags, read_syncpipe, release_startpipe, LocalRuntime, PendingMachine,
         StartupResult, ROOT_DISK_KERNEL_ARG,
     };

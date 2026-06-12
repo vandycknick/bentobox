@@ -3,14 +3,13 @@ use std::time::Duration;
 
 use bento_vm_spec::VmSpec;
 
-use crate::engine::LocalRuntime;
 use crate::machine::{Machine, MachineCreate, MachineInspect, MachineRef, MachineRuntimeStatus};
 use crate::models::MachineConfig;
 use crate::network::{NetworkDefinition, RequestedNetwork};
 use crate::paths::LocalPaths;
 use crate::{LibVmError, MachineId};
 
-use super::{RuntimeBackend, RuntimeConfig, RuntimeTarget};
+use super::{local::LocalRuntime, RuntimeBackend, RuntimeConfig, RuntimeTarget};
 
 #[derive(Debug, Clone)]
 pub struct Runtime {
