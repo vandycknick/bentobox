@@ -4,8 +4,6 @@ use bento_libvm::{Machine, MachineRef, Runtime};
 use clap::Args;
 use eyre::bail;
 
-use bento_protocol::v1::LifecycleState;
-
 use crate::ssh;
 
 #[derive(Args, Debug)]
@@ -62,14 +60,12 @@ impl Cmd {
 
 async fn ensure_guest_ready(machine: &Machine) -> eyre::Result<()> {
     let status = machine.get_status().await?;
-    let guest_state =
-        LifecycleState::try_from(status.guest_state).unwrap_or(LifecycleState::Unspecified);
 
-    if guest_state != LifecycleState::Running || !status.ready {
-        let summary = if status.summary.is_empty() {
-            format!("guest state is {guest_state:?}")
+    if !status.guest_ready() {
+        let summary = if status.summary().is_empty() {
+            format!("guest state is {}", status.guest().as_str())
         } else {
-            status.summary
+            status.summary().to_string()
         };
         bail!("guest service is not ready: {summary}");
     }

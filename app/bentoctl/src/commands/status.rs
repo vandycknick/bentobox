@@ -3,7 +3,6 @@ use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bento_libvm::{MachineRef, MachineStatus, Runtime};
-use bento_protocol::v1::LifecycleState;
 use bento_vm_spec::VmSpec;
 
 use crate::constants::PROFILE_METADATA_KEY;
@@ -72,14 +71,14 @@ impl Cmd {
 
         let status = machine.get_status().await?;
 
-        println!("vm: {}", lifecycle_label(status.vm_state));
+        println!("vm: {}", status.vm().as_str());
         print_guest(
-            Some((lifecycle_label(status.guest_state), status.ready)),
+            Some((status.guest().as_str(), status.ready())),
             guest_config_status(inspection.spec(), inspection.instance_dir()),
         );
-        println!("ready: {}", if status.ready { "yes" } else { "no" });
-        if !status.summary.is_empty() {
-            println!("summary: {}", status.summary);
+        println!("ready: {}", if status.ready() { "yes" } else { "no" });
+        if !status.summary().is_empty() {
+            println!("summary: {}", status.summary());
         }
 
         Ok(())
@@ -228,17 +227,6 @@ fn relative_time(timestamp: i64, now: i64) -> String {
 
     let years = days / 365;
     format!("{years} years ago")
-}
-
-fn lifecycle_label(raw: i32) -> &'static str {
-    match LifecycleState::try_from(raw).unwrap_or(LifecycleState::Unspecified) {
-        LifecycleState::Unspecified => "unspecified",
-        LifecycleState::Starting => "starting",
-        LifecycleState::Running => "running",
-        LifecycleState::Stopping => "stopping",
-        LifecycleState::Stopped => "stopped",
-        LifecycleState::Error => "error",
-    }
 }
 
 #[cfg(test)]

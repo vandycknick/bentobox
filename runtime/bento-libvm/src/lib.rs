@@ -19,7 +19,10 @@ mod vm_lock;
 pub use crate::certificate_authority::{ensure_certificate_authority, CertificateAuthority};
 pub use crate::engine::{LocalRuntimeConfig, Machine, Runtime, RuntimeConfig, RuntimeTarget};
 pub use crate::error::LibVmError;
-pub use crate::machine::{MachineCreate, MachineInspect, MachineRef, MachineStatus};
+pub use crate::machine::{
+    MachineCreate, MachineInspect, MachineRef, MachineRuntimeStatus, MachineStatus,
+    RuntimeComponentStatus,
+};
 pub use crate::monitor::DEFAULT_GUEST_READINESS_TIMEOUT;
 pub use crate::mount_path::resolve_mount_location;
 pub use crate::network::{

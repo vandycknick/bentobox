@@ -11,7 +11,6 @@ use crate::paths::{
     resolve_default_data_dir, root_disk_relative_path, vm_spec_path_in, LocalPaths, MachinePaths,
 };
 use crate::root_disk::{clone_or_copy_root_disk, resize_raw_disk};
-use bento_protocol::v1::InspectResponse;
 use bento_vm_spec::{Boot, Disk, Guest, GuestOs, Hardware, Kernel, Mount, Storage, VmSpec};
 use nix::{
     errno::Errno,
@@ -21,6 +20,7 @@ use nix::{
 
 use crate::machine::{
     validate_machine_name, MachineCreate, MachineInspect, MachineRef, MachineRefKind,
+    MachineRuntimeStatus,
 };
 use crate::models::{
     MachineConfig, MachineRuntimeState, MachineState, NetworkDefinition as ModelNetworkDefinition,
@@ -313,7 +313,7 @@ impl Runtime {
         }
     }
 
-    async fn get_status(&self, id: MachineId) -> Result<InspectResponse, LibVmError> {
+    async fn get_status(&self, id: MachineId) -> Result<MachineRuntimeStatus, LibVmError> {
         match &self.backend {
             RuntimeBackend::Local(local) => local.get_status_by_id(id).await,
         }
@@ -386,7 +386,7 @@ impl Machine {
         self.runtime.wait_for_guest_running(self.id, timeout).await
     }
 
-    pub async fn get_status(&self) -> Result<InspectResponse, LibVmError> {
+    pub async fn get_status(&self) -> Result<MachineRuntimeStatus, LibVmError> {
         self.runtime.get_status(self.id).await
     }
 
@@ -787,19 +787,23 @@ impl LocalRuntime {
         self.machine_inspect(config).await
     }
 
-    async fn get_status_by_id(&self, machine_id: MachineId) -> Result<InspectResponse, LibVmError> {
+    async fn get_status_by_id(
+        &self,
+        machine_id: MachineId,
+    ) -> Result<MachineRuntimeStatus, LibVmError> {
         let config = self
             .resolve_machine_config(&MachineRef::id(machine_id))
             .await?;
         let status = self.reconcile_machine_runtime(&config).await?;
         reconcile_network_runtime(&self.paths, &self.db, &config, status.is_running()).await?;
         let (config, socket_path) = self.resolve_running_socket_by_id(machine_id).await?;
-        monitor::get_vm_monitor_inspect(&socket_path)
+        let status = monitor::get_vm_monitor_inspect(&socket_path)
             .await
             .map_err(|message| LibVmError::MonitorProtocol {
                 reference: config.name,
                 message,
-            })
+            })?;
+        Ok(MachineRuntimeStatus::from_protocol(status))
     }
 
     async fn open_serial_stream_by_id(
