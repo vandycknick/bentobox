@@ -10,7 +10,7 @@ Proposed
 
 Current shell access works through an external OpenSSH process and proxy command:
 
-`bentoctl shell -> host ssh binary -> bentoctl shell-proxy -> vmmon (UDS control) -> VSOCK -> guest socat -> guest sshd`
+`bento shell -> host ssh binary -> bento shell-proxy -> vmmon (UDS control) -> VSOCK -> guest socat -> guest sshd`
 
 This implementation is functional and supports concurrent sessions, but it has architectural and UX drawbacks:
 
@@ -24,9 +24,9 @@ We want `vmmon` to remain the sole VM owner and VSOCK endpoint owner. We also wa
 
 ## Decision
 
-We will replace the external OpenSSH invocation path with an in-process SSH client built in `bentoctl` using `ssh2` (libssh2 bindings).
+We will replace the external OpenSSH invocation path with an in-process SSH client built in `bento` using `ssh2` (libssh2 bindings).
 
-The `bentoctl shell` command will own:
+The `bento shell` command will own:
 
 1. transport setup to `vmmon` control socket,
 2. protocol handshake (`open_vsock`),
@@ -40,9 +40,9 @@ The `bentoctl shell` command will own:
 
 ## Target Architecture
 
-`bentoctl shell -> vmmon vm.sock -> open_vsock(2222) -> guest VSOCK bridge -> guest sshd`
+`bento shell -> vmmon vm.sock -> open_vsock(2222) -> guest VSOCK bridge -> guest sshd`
 
-Implementation shape in `bentoctl`:
+Implementation shape in `bento`:
 
 - `ssh_transport` module:
   - connect to `vm.sock`

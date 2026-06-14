@@ -106,11 +106,11 @@ fn unix_nanos() -> u128 {
 mod tests {
     use clap::Parser;
 
-    use crate::commands::{BentoCtlCmd, Command};
+    use crate::commands::{BentoCmd, Command};
 
     #[test]
     fn edit_command_parses_vm_reference() {
-        let cmd = BentoCtlCmd::try_parse_from(["bento", "edit", "devbox"])
+        let cmd = BentoCmd::try_parse_from(["bento", "edit", "devbox"])
             .expect("edit command should parse");
 
         let edit = match cmd.cmd {

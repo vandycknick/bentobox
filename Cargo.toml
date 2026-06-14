@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "app/bentoctl",
+    "app/bento-cli",
     "common/bento-ext4",
     "common/bento-initramfs",
     "common/bento-utils",
@@ -19,7 +19,7 @@ members = [
     "specs/bento-protocol",
     "specs/bento-vm-spec",
 ]
-default-members = ["app/bentoctl", "runtime/bento-vmmon"]
+default-members = ["app/bento-cli", "runtime/bento-vmmon"]
 resolver = "2"
 
 [profile.dev.package.sha2]

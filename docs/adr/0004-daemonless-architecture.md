@@ -16,7 +16,7 @@ Bentobox needs a VM architecture that keeps the runtime surface small, focused, 
 - works well without a central always-on daemon,
 - preserves room for a future daemon or tunnel mode without changing the machine model.
 
-The chosen architecture is daemonless. `bentoctl` calls into `bento-libvm`, and `bento-libvm` owns machine lifecycle in local ABI mode. When a machine starts, `bento-libvm` spawns a dedicated `vmmon` process for that machine. `vmmon` reads the machine configuration from the instance directory, starts the VM, supervises it, and exposes the per-VM control surface.
+The chosen architecture is daemonless. `bento` calls into `bento-libvm`, and `bento-libvm` owns machine lifecycle in local ABI mode. When a machine starts, `bento-libvm` spawns a dedicated `vmmon` process for that machine. `vmmon` reads the machine configuration from the instance directory, starts the VM, supervises it, and exposes the per-VM control surface.
 
 This gives Bentobox the operational flexibility of a daemonless system while still leaving room for a future manager daemon. `bento-libvm` is the boundary that preserves that split. It is the local engine today, and it can also become the client-side boundary for future daemon or tunnel mode without changing the monitor model.
 
@@ -24,7 +24,7 @@ This gives Bentobox the operational flexibility of a daemonless system while sti
 
 Bentobox adopts a daemonless, config-driven architecture with these roles:
 
-- `bentoctl` is a thin frontend over `bento-libvm`.
+- `bento` is a thin frontend over `bento-libvm`.
 - `bento-core` owns the canonical shared domain model, including `VmSpec`, machine identity types, and guest service configuration types.
 - `bento-libvm` owns manager-side lifecycle, machine inventory, on-disk layout, image policy, bootstrap materialization, Negotiate client behavior, and `vmmon` process spawning.
 - `bento-vmmon` is the canonical per-VM monitor. It is a small-footprint runtime supervisor that owns one running VM.
@@ -37,7 +37,7 @@ This architecture is intentionally daemonless by default. A future daemon or tun
 ## Goals
 
 - Keep one `vmmon` process responsible for one VM.
-- Make `bentoctl` a thin consumer of `bento-libvm`.
+- Make `bento` a thin consumer of `bento-libvm`.
 - Keep `vmmon` focused on runtime supervision instead of manager concerns.
 - Make machine startup config-driven from the per-instance `config.yaml`.
 - Keep `bento-libvm` as the architectural boundary between daemonless local ABI mode and future daemon or tunnel mode.
@@ -54,9 +54,9 @@ This architecture is intentionally daemonless by default. A future daemon or tun
 
 ## Component Boundaries
 
-### `bentoctl`
+### `bento`
 
-`bentoctl` is a thin command-line frontend.
+`bento` is a thin command-line frontend.
 
 It owns:
 

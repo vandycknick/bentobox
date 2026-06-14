@@ -291,7 +291,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::commands::create::resolve_boot_assets;
-    use crate::commands::{BentoCtlCmd, Command};
+    use crate::commands::{BentoCmd, Command};
 
     #[test]
     fn default_boot_assets_use_flat_data_assets_dir() {
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn create_command_parses_profile_form() {
-        let cmd = BentoCtlCmd::try_parse_from(["bento", "create", "dev", "rust-dev"])
+        let cmd = BentoCmd::try_parse_from(["bento", "create", "dev", "rust-dev"])
             .expect("create command should parse");
         let create = match cmd.cmd {
             Command::Create(cmd) => cmd,
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn create_command_parses_default_machine_happy_path() {
-        let cmd = BentoCtlCmd::try_parse_from(["bento", "create", "dev", "--start", "--default"])
+        let cmd = BentoCmd::try_parse_from(["bento", "create", "dev", "--start", "--default"])
             .expect("create command should parse");
         let create = match cmd.cmd {
             Command::Create(cmd) => cmd,
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn create_image_override_takes_precedence_over_profile_image() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento",
             "create",
             "dev",
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn create_command_parses_vm_overrides() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento",
             "create",
             "dev",
@@ -430,11 +430,11 @@ mod tests {
 
     #[test]
     fn create_command_rejects_bare_memory_and_disk_size() {
-        assert!(BentoCtlCmd::try_parse_from([
+        assert!(BentoCmd::try_parse_from([
             "bento", "create", "dev", "rust-dev", "--memory", "4096"
         ])
         .is_err());
-        assert!(BentoCtlCmd::try_parse_from([
+        assert!(BentoCmd::try_parse_from([
             "bento",
             "create",
             "dev",

@@ -104,7 +104,7 @@ tooling.
 
 ### Instance creation from images
 
-`bentoctl create <ref> <name>` resolves a local image or pulls it on demand, then:
+`bento create <ref> <name>` resolves a local image or pulls it on demand, then:
 
 - applies image metadata defaults for CPU, memory, and bootstrap support unless CLI
   overrides them
@@ -115,7 +115,7 @@ tooling.
 
 ### Packing local VMs
 
-`bentoctl images pack <vm> <ref>`:
+`bento images pack <vm> <ref>`:
 
 - requires a stopped VM with a root disk
 - captures the VM rootfs and metadata into the Bentobox OCI format
@@ -138,12 +138,12 @@ Bundled boot asset rules:
 
 ### Pulling remote images
 
-`bentoctl images pull <ref>` downloads the OCI artifact, validates it, reconstructs the normalized
+`bento images pull <ref>` downloads the OCI artifact, validates it, reconstructs the normalized
 image directory, and updates `registry.json`.
 
 ### Importing OCI tar archives
 
-`bentoctl images import <path>` ingests an OCI tar archive into the normalized local image store.
+`bento images import <path>` ingests an OCI tar archive into the normalized local image store.
 
 - input is restricted to OCI tar archives in V1
 - imported artifacts follow the same validation and reconstruction rules as pulled artifacts
@@ -191,9 +191,9 @@ Comparison of the backend features that matter here:
 
 ## Deferred
 
-- `bentoctl images push <src> <ref>`
+- `bento images push <src> <ref>`
 - registry credential integration
 - signed artifact verification
 - multi-arch index selection
 - persistent OCI blob cache or CAS/dedupe layer if needed
-- built-in `bentoctl images resize`
+- built-in `bento images resize`

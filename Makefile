@@ -57,7 +57,7 @@ build-guest-init:
 
 .PHONY: build
 build: $(HOST_BUILD_COMPONENTS)
-	cargo build $(CARGO_PROFILE_FLAGS) -p bentoctl
+	cargo build $(CARGO_PROFILE_FLAGS) -p bento-cli
 
 .PHONY: clippy
 clippy:

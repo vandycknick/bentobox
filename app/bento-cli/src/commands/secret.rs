@@ -166,7 +166,7 @@ async fn login(store: &SecretStore, cmd: &LoginCmd) -> eyre::Result<()> {
 
 async fn login_openai_codex() -> eyre::Result<TokenResponse> {
     let client = reqwest::Client::builder()
-        .user_agent(concat!("bentoctl/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("bento/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
         .build()?;
 
@@ -819,7 +819,7 @@ mod tests {
     use clap::Parser;
     use reqwest::StatusCode;
 
-    use crate::commands::{BentoCtlCmd, Command};
+    use crate::commands::{BentoCmd, Command};
 
     use super::{
         is_pending_device_poll_response, plain_secret_value, write_plain_secret, LoginProvider,
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn secret_login_openai_codex_parses() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento",
             "secret",
             "login",
@@ -853,12 +853,12 @@ mod tests {
 
     #[test]
     fn credentials_subcommand_is_removed() {
-        assert!(BentoCtlCmd::try_parse_from(["bento", "credentials", "list"]).is_err());
+        assert!(BentoCmd::try_parse_from(["bento", "credentials", "list"]).is_err());
     }
 
     #[test]
     fn secret_login_rejects_policy_credential_kind_as_provider() {
-        assert!(BentoCtlCmd::try_parse_from([
+        assert!(BentoCmd::try_parse_from([
             "bento",
             "secret",
             "login",
@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn secret_set_plain_value_parses() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento",
             "secret",
             "set",

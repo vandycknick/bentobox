@@ -33,7 +33,7 @@ pub mod stop;
     about = "BentoBox VM lifecycle control",
     disable_help_subcommand = true
 )]
-pub struct BentoCtlCmd {
+pub struct BentoCmd {
     /// Increase diagnostic output. Repeat for full error chains.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
@@ -95,7 +95,7 @@ impl Display for Command {
     }
 }
 
-impl BentoCtlCmd {
+impl BentoCmd {
     pub fn parse() -> Self {
         let mut matches = Self::command().get_matches();
         Self::from_arg_matches_mut(&mut matches).unwrap_or_else(|err| err.exit())
@@ -245,39 +245,39 @@ async fn libvm_with_config(global_config: &GlobalConfig) -> eyre::Result<Runtime
 mod tests {
     use clap::Parser;
 
-    use crate::commands::{BentoCtlCmd, Command};
+    use crate::commands::{BentoCmd, Command};
 
     #[test]
     fn images_command_is_not_available() {
-        assert!(BentoCtlCmd::try_parse_from(["bento", "images", "list"]).is_err());
+        assert!(BentoCmd::try_parse_from(["bento", "images", "list"]).is_err());
     }
 
     #[test]
     fn show_accepts_status_alias_and_json() {
         let status =
-            BentoCtlCmd::try_parse_from(["bento", "status", "dev", "--json"]).expect("status");
+            BentoCmd::try_parse_from(["bento", "status", "dev", "--json"]).expect("status");
         let Command::Show(status) = status.cmd else {
             panic!("expected show command");
         };
         assert_eq!(status.name.as_deref(), Some("dev"));
         assert!(status.json);
 
-        assert!(BentoCtlCmd::try_parse_from(["bento", "inspect", "dev"]).is_err());
+        assert!(BentoCmd::try_parse_from(["bento", "inspect", "dev"]).is_err());
 
-        let show = BentoCtlCmd::try_parse_from(["bento", "show", "dev"]).expect("show");
+        let show = BentoCmd::try_parse_from(["bento", "show", "dev"]).expect("show");
         assert!(matches!(show.cmd, Command::Show(_)));
     }
 
     #[test]
     fn default_command_parses_set_show_and_unset_forms() {
-        let set = BentoCtlCmd::try_parse_from(["bento", "default", "dev"]).expect("default set");
+        let set = BentoCmd::try_parse_from(["bento", "default", "dev"]).expect("default set");
         let Command::Default(set) = set.cmd else {
             panic!("expected default command");
         };
         assert_eq!(set.name.as_deref(), Some("dev"));
         assert!(!set.unset);
 
-        let show = BentoCtlCmd::try_parse_from(["bento", "default"]).expect("default show");
+        let show = BentoCmd::try_parse_from(["bento", "default"]).expect("default show");
         let Command::Default(show) = show.cmd else {
             panic!("expected default command");
         };
@@ -285,7 +285,7 @@ mod tests {
         assert!(!show.unset);
 
         let unset =
-            BentoCtlCmd::try_parse_from(["bento", "default", "--unset"]).expect("default unset");
+            BentoCmd::try_parse_from(["bento", "default", "--unset"]).expect("default unset");
         let Command::Default(unset) = unset.cmd else {
             panic!("expected default command");
         };
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn set_command_parses_default_and_named_machine_forms() {
         let default =
-            BentoCtlCmd::try_parse_from(["bento", "set", "cpus=4", "memory=8G"]).expect("set");
+            BentoCmd::try_parse_from(["bento", "set", "cpus=4", "memory=8G"]).expect("set");
         let Command::Set(default) = default.cmd else {
             panic!("expected set command");
         };
@@ -305,7 +305,7 @@ mod tests {
             vec!["cpus=4".to_string(), "memory=8G".to_string()]
         );
 
-        let named = BentoCtlCmd::try_parse_from(["bento", "set", "dev", "disk=64G"]).expect("set");
+        let named = BentoCmd::try_parse_from(["bento", "set", "dev", "disk=64G"]).expect("set");
         let Command::Set(named) = named.cmd else {
             panic!("expected set command");
         };
@@ -314,10 +314,10 @@ mod tests {
 
     #[test]
     fn edit_command_is_hidden_from_help() {
-        let mut command = BentoCtlCmd::command();
+        let mut command = BentoCmd::command();
         let help = command.render_long_help().to_string();
 
         assert!(!help.contains("edit"));
-        assert!(BentoCtlCmd::try_parse_from(["bento", "edit", "dev"]).is_ok());
+        assert!(BentoCmd::try_parse_from(["bento", "edit", "dev"]).is_ok());
     }
 }

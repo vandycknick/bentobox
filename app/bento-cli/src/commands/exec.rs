@@ -74,12 +74,12 @@ async fn ensure_guest_ready(machine: &Machine) -> eyre::Result<()> {
 mod tests {
     use clap::Parser;
 
-    use crate::commands::{BentoCtlCmd, Command};
+    use crate::commands::{BentoCmd, Command};
 
     #[test]
     fn exec_command_parses_trailing_args() {
-        let cmd = BentoCtlCmd::try_parse_from([
-            "bentoctl",
+        let cmd = BentoCmd::try_parse_from([
+            "bento",
             "exec",
             "arch",
             "--",
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn exec_command_parses_default_machine_form() {
-        let cmd = BentoCtlCmd::try_parse_from(["bentoctl", "exec", "--", "make", "kernel"])
+        let cmd = BentoCmd::try_parse_from(["bento", "exec", "--", "make", "kernel"])
             .expect("exec command should parse");
 
         let exec = match cmd.cmd {

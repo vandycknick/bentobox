@@ -2,12 +2,12 @@
 
 # What to run
 
-Create an image-backed VM with `bentoctl create <ref> <name>` using a Linux image that already
+Create an image-backed VM with `bento create <ref> <name>` using a Linux image that already
 provides the kernel, initramfs, and writable root disk, then run the following commands inside the
 guest.
 
 ```sh
-./target/release/bentoctl create <image-ref> archboot \
+./target/release/bento create <image-ref> archboot \
     --cpus 2 \
     --memory 2gb
 ```

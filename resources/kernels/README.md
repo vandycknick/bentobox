@@ -11,9 +11,9 @@ This directory owns the guest kernel build inputs for Bento.
 Build with:
 
 ```bash
-bentoctl exec arch -- make kernel TRACK=stable ARCH=arm64
-bentoctl exec arch -- make kernel TRACK=longterm ARCH=arm64
-bentoctl exec arch -- make kernel TRACK=longterm5 ARCH=arm64
+bento exec arch -- make kernel TRACK=stable ARCH=arm64
+bento exec arch -- make kernel TRACK=longterm ARCH=arm64
+bento exec arch -- make kernel TRACK=longterm5 ARCH=arm64
 ```
 
 Kernel source, build, and cache state live inside the guest under `$HOME/.cache/bento/kernels/`.

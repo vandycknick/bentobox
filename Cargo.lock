@@ -315,6 +315,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "bento-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bento-agent-spec",
+ "bento-libvm",
+ "bento-ocidisk",
+ "bento-utils",
+ "bento-vm-spec",
+ "chrono",
+ "clap",
+ "eyre",
+ "hyper-util",
+ "indicatif",
+ "libc",
+ "nix 0.31.3",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tabwriter",
+ "tempfile",
+ "time",
+ "tokio",
+ "tonic",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bento-ext4"
 version = "0.1.2"
 dependencies = [
@@ -530,37 +561,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "bentoctl"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bento-agent-spec",
- "bento-libvm",
- "bento-ocidisk",
- "bento-utils",
- "bento-vm-spec",
- "chrono",
- "clap",
- "eyre",
- "hyper-util",
- "indicatif",
- "libc",
- "nix 0.31.3",
- "reqwest 0.13.3",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "tabwriter",
- "tempfile",
- "time",
- "tokio",
- "tonic",
- "tower",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

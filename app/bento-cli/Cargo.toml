@@ -1,17 +1,12 @@
 [package]
-name = "bentoctl"
+name = "bento-cli"
 version = "0.1.0"
 edition = "2021"
-default-run = "bentoctl"
-autobins = false
+default-run = "bento"
 
 [[bin]]
 name = "bento"
-path = "src/bin/bento.rs"
-
-[[bin]]
-name = "bentoctl"
-path = "src/bin/bentoctl.rs"
+path = "src/main.rs"
 
 [dependencies]
 bento-agent-spec = { path = "../../specs/bento-agent-spec" }

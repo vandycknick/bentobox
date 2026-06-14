@@ -6,13 +6,14 @@ mod progress;
 mod ssh;
 mod terminal;
 
-use crate::commands::BentoCtlCmd;
+use crate::commands::BentoCmd;
 use std::process::ExitCode;
 
 use eyre::Report;
 
-pub async fn run() -> ExitCode {
-    let cmd = BentoCtlCmd::parse();
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> ExitCode {
+    let cmd = BentoCmd::parse();
 
     match cmd.run().await {
         Ok(()) => ExitCode::SUCCESS,

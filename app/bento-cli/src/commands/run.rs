@@ -233,11 +233,11 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use crate::commands::create::resolve_boot_assets;
-    use crate::commands::{BentoCtlCmd, Command};
+    use crate::commands::{BentoCmd, Command};
 
     #[test]
     fn run_command_parses_create_parity_overrides() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento",
             "run",
             "dev",
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn run_command_accepts_image_override_with_profile() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento",
             "run",
             "dev",
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn run_command_leaves_default_initramfs_for_libvm_generation() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento",
             "run",
             "dev",
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn run_command_forwards_explicit_initramfs_to_libvm() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento",
             "run",
             "dev",
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn run_command_rejects_bare_memory_and_disk_size() {
-        assert!(BentoCtlCmd::try_parse_from(["bento", "run", "dev", "--memory", "4096"]).is_err());
-        assert!(BentoCtlCmd::try_parse_from(["bento", "run", "dev", "--disk-size", "40"]).is_err());
+        assert!(BentoCmd::try_parse_from(["bento", "run", "dev", "--memory", "4096"]).is_err());
+        assert!(BentoCmd::try_parse_from(["bento", "run", "dev", "--disk-size", "40"]).is_err());
     }
 }

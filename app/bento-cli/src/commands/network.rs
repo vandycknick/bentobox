@@ -242,13 +242,13 @@ mod tests {
     use bento_libvm::{NetworkPolicyRef, RequestedNetwork};
     use clap::Parser;
 
-    use crate::commands::{BentoCtlCmd, Command};
+    use crate::commands::{BentoCmd, Command};
 
     use super::{requested_network_with_policy, NetworkSubcommand};
 
     #[test]
     fn network_ls_alias_parses_as_network_list() {
-        let cmd = BentoCtlCmd::try_parse_from(["bento", "network", "ls", "--json"])
+        let cmd = BentoCmd::try_parse_from(["bento", "network", "ls", "--json"])
             .expect("network ls alias should parse");
 
         let network = match cmd.cmd {
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn network_set_parses_private_policy_name() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento", "network", "set", "devbox", "private", "--policy", "github",
         ])
         .expect("network set should parse");
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn network_set_parses_private_absolute_policy_path() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento",
             "network",
             "set",
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn network_set_rejects_invalid_policy_ref() {
-        let result = BentoCtlCmd::try_parse_from([
+        let result = BentoCmd::try_parse_from([
             "bento",
             "network",
             "set",
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn network_set_parses_none_with_policy_for_runtime_validation() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento", "network", "set", "devbox", "none", "--policy", "github",
         ])
         .expect("network set should parse");
@@ -331,7 +331,7 @@ mod tests {
 
     #[test]
     fn network_set_parses_named_with_policy_for_runtime_validation() {
-        let cmd = BentoCtlCmd::try_parse_from([
+        let cmd = BentoCmd::try_parse_from([
             "bento", "network", "set", "devbox", "devnet", "--policy", "github",
         ])
         .expect("network set should parse");
@@ -397,7 +397,7 @@ mod tests {
         );
     }
 
-    fn network_set_cmd(cmd: BentoCtlCmd) -> super::SetCmd {
+    fn network_set_cmd(cmd: BentoCmd) -> super::SetCmd {
         let network = match cmd.cmd {
             Command::Network(cmd) => cmd,
             other => panic!("expected network command, got {other:?}"),
