@@ -3,6 +3,9 @@ use std::str::FromStr;
 use crate::models::{looks_like_id_prefix, MachineId};
 use crate::LibVmError;
 
+/// Reference used to resolve a machine.
+///
+/// A reference can be a machine name, full machine ID, or unambiguous ID prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MachineRef {
     kind: MachineRefKind,
@@ -16,6 +19,7 @@ pub(crate) enum MachineRefKind {
 }
 
 impl MachineRef {
+    /// Parses a name, full ID, or ID prefix into a machine reference.
     pub fn parse(input: impl Into<String>) -> Result<Self, LibVmError> {
         let input = input.into();
         if let Ok(id) = MachineId::from_str(&input) {

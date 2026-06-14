@@ -30,23 +30,23 @@ impl Cmd {
         let parsed = ParsedSet::parse(&self.args)?;
         let (_reference, machine) = get_machine(libvm, config, parsed.machine.as_deref()).await?;
         let old_name = if parsed.update.name.is_some() {
-            Some(machine.inspect().await?.name().to_string())
+            Some(machine.inspect().await?.name)
         } else {
             None
         };
         let update_default = old_name
             .as_deref()
             .is_some_and(|name| config.default_machine() == Some(name));
-        let inspection = machine.update(parsed.update).await.map_err(|err| match err {
+        let inspect_data = machine.update(parsed.update).await.map_err(|err| match err {
             bento_libvm::LibVmError::MachineAlreadyRunning { reference } => eyre::eyre!(
                 "{reference} is running\n\nhint: stop it with `bento stop {reference}` before changing settings"
             ),
             other => eyre::Report::from(other),
         })?;
         if update_default {
-            GlobalConfig::write_default_machine(Some(inspection.name()))?;
+            GlobalConfig::write_default_machine(Some(inspect_data.name.as_str()))?;
         }
-        println!("updated {}", inspection.name());
+        println!("updated {}", inspect_data.name);
         Ok(())
     }
 }

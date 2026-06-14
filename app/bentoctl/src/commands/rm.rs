@@ -29,8 +29,8 @@ impl Cmd {
         let machine = libvm
             .get_machine(&MachineRef::parse(self.name.clone())?)
             .await?;
-        let inspection = machine.inspect().await?;
-        let machine_name = inspection.name().to_string();
+        let inspect_data = machine.inspect().await?;
+        let machine_name = inspect_data.name;
         let removed_default = config.default_machine() == Some(machine_name.as_str());
         if self.force {
             progress.step(format!("stopping {} before removal", self.name));

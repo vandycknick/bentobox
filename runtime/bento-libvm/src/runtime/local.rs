@@ -20,7 +20,7 @@ use nix::{
 };
 
 use crate::machine::{
-    validate_machine_name, MachineCreate, MachineInspect, MachineRef, MachineRefKind,
+    validate_machine_name, MachineCreate, MachineInspectData, MachineRef, MachineRefKind,
     MachineRuntimeStatus, MachineUpdate,
 };
 use crate::models::{
@@ -230,7 +230,7 @@ impl LocalRuntime {
             ..VmSpec::current()
         };
 
-        let network = request.network.unwrap_or_default().into_model();
+        let network = request.network.unwrap_or_default().into();
         self.validate_requested_network(&network).await?;
         let pending = self
             .create_pending(PendingMachineRequest {
@@ -301,15 +301,15 @@ impl LocalRuntime {
         })
     }
 
-    async fn inspect(&self, machine: &MachineRef) -> Result<MachineInspect, LibVmError> {
+    async fn inspect(&self, machine: &MachineRef) -> Result<MachineInspectData, LibVmError> {
         let config = self.resolve_machine_config(machine).await?;
-        self.machine_inspect(config).await
+        self.machine_inspect_data(config).await
     }
 
     pub(crate) async fn inspect_by_id(
         &self,
         machine_id: MachineId,
-    ) -> Result<MachineInspect, LibVmError> {
+    ) -> Result<MachineInspectData, LibVmError> {
         self.inspect(&MachineRef::id(machine_id)).await
     }
 
@@ -353,8 +353,8 @@ impl LocalRuntime {
         &self,
         machine_id: MachineId,
         network: RequestedNetwork,
-    ) -> Result<MachineInspect, LibVmError> {
-        let network = network.into_model();
+    ) -> Result<MachineInspectData, LibVmError> {
+        let network = network.into();
         self.validate_requested_network(&network).await?;
         let LockedMachine { _lock, mut config } =
             self.lock_machine_config_by_id(machine_id).await?;
@@ -367,14 +367,14 @@ impl LocalRuntime {
         config.network = network;
         config.modified_at = current_unix();
         self.db.update_machine_config(&config).await?;
-        self.machine_inspect(config).await
+        self.machine_inspect_data(config).await
     }
 
     pub(crate) async fn replace_config_by_id(
         &self,
         machine_id: MachineId,
         spec: VmSpec,
-    ) -> Result<MachineInspect, LibVmError> {
+    ) -> Result<MachineInspectData, LibVmError> {
         let LockedMachine { _lock, mut config } =
             self.lock_machine_config_by_id(machine_id).await?;
         let status = self.reconcile_machine_runtime_locked(&config).await?;
@@ -391,15 +391,15 @@ impl LocalRuntime {
             let _ = write_machine_config(&config.instance_dir, &config.name, &previous_spec);
             return Err(err);
         }
-        self.machine_inspect(config).await
+        self.machine_inspect_data(config).await
     }
 
     pub(crate) async fn update_by_id(
         &self,
         machine_id: MachineId,
         update: MachineUpdate,
-    ) -> Result<MachineInspect, LibVmError> {
-        let network = update.network.clone().map(RequestedNetwork::into_model);
+    ) -> Result<MachineInspectData, LibVmError> {
+        let network: Option<ModelRequestedNetwork> = update.network.clone().map(Into::into);
         if let Some(network) = &network {
             self.validate_requested_network(network).await?;
         }
@@ -496,7 +496,7 @@ impl LocalRuntime {
             }
             return Err(err);
         }
-        self.machine_inspect(config).await
+        self.machine_inspect_data(config).await
     }
 
     pub(crate) async fn remove_by_id(&self, machine_id: MachineId) -> Result<(), LibVmError> {
@@ -525,7 +525,7 @@ impl LocalRuntime {
     pub(crate) async fn start_by_id(
         &self,
         machine_id: MachineId,
-    ) -> Result<MachineInspect, LibVmError> {
+    ) -> Result<MachineInspectData, LibVmError> {
         let (config, pid_path, trace_path, sync_read) = {
             let LockedMachine { _lock, config } =
                 self.lock_machine_config_by_id(machine_id).await?;
@@ -626,7 +626,7 @@ impl LocalRuntime {
             )
             .await?;
         }
-        self.machine_inspect(config).await
+        self.machine_inspect_data(config).await
     }
 
     pub(crate) async fn wait_for_guest_running_by_id(
@@ -646,7 +646,7 @@ impl LocalRuntime {
     pub(crate) async fn stop_by_id(
         &self,
         machine_id: MachineId,
-    ) -> Result<MachineInspect, LibVmError> {
+    ) -> Result<MachineInspectData, LibVmError> {
         let (config, pid_path) = {
             let LockedMachine { _lock, config } =
                 self.lock_machine_config_by_id(machine_id).await?;
@@ -680,7 +680,7 @@ impl LocalRuntime {
             self.mark_machine_stopped(config.id, None).await?;
             reconcile_network_runtime(&self.paths, &self.db, &config, false).await?;
         }
-        self.machine_inspect(config).await
+        self.machine_inspect_data(config).await
     }
 
     pub(crate) async fn get_status_by_id(
@@ -978,10 +978,13 @@ impl LocalRuntime {
         Ok(stopped_machine_state(machine_id, None))
     }
 
-    async fn machine_inspect(&self, config: MachineConfig) -> Result<MachineInspect, LibVmError> {
+    async fn machine_inspect_data(
+        &self,
+        config: MachineConfig,
+    ) -> Result<MachineInspectData, LibVmError> {
         self.reconcile_machine_runtime_best_effort(&config).await?;
         let state = self.machine_state(config.id).await?;
-        Ok(MachineInspect::from_model(config, state))
+        Ok(MachineInspectData::from_models(config, state))
     }
 
     async fn resolve_running_socket_by_id(
@@ -1832,8 +1835,8 @@ mod tests {
             .expect("inspect by id");
         let listed = runtime.list_machine_configs().await.expect("list machines");
 
-        assert_eq!(by_name.id(), machine.id.to_string());
-        assert_eq!(by_id.id(), machine.id.to_string());
+        assert_eq!(by_name.id, machine.id.to_string());
+        assert_eq!(by_id.id, machine.id.to_string());
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "devbox");
     }
@@ -1869,7 +1872,7 @@ mod tests {
             .await
             .expect("hold machine lock");
 
-        let inspected = tokio::time::timeout(
+        let inspect_data = tokio::time::timeout(
             Duration::from_secs(1),
             runtime.inspect(&MachineRef::id(machine.id)),
         )
@@ -1885,7 +1888,7 @@ mod tests {
             .await
             .expect("read machine state");
 
-        assert_eq!(inspected.status(), MachineStatus::Running);
+        assert_eq!(inspect_data.status, MachineStatus::Running);
         assert_eq!(listed.len(), 1);
         assert_eq!(state.status, MachineRuntimeState::Running);
     }
@@ -1933,7 +1936,7 @@ mod tests {
         drop(lock);
 
         std::fs::remove_file(&pid_path).expect("remove pid file");
-        let inspected = stop_task
+        let inspect_data = stop_task
             .await
             .expect("join stop task")
             .expect("stop machine");
@@ -1942,7 +1945,7 @@ mod tests {
             .await
             .expect("read machine state");
 
-        assert_eq!(inspected.status(), MachineStatus::Stopped);
+        assert_eq!(inspect_data.status, MachineStatus::Stopped);
         assert_eq!(state.status, MachineRuntimeState::Stopped);
         drop(child);
     }
@@ -1966,12 +1969,12 @@ mod tests {
         std::fs::remove_file(runtime.paths.machine(machine.id).vm_spec_path())
             .expect("remove generated config");
 
-        let inspected = runtime
+        let inspect_data = runtime
             .inspect(&MachineRef::parse(machine.id.to_string()).expect("parse machine ref"))
             .await
             .expect("inspect machine");
 
-        assert_eq!(inspected.name(), "devbox");
+        assert_eq!(inspect_data.name, "devbox");
     }
 
     #[tokio::test]
@@ -1998,18 +2001,12 @@ mod tests {
             .await
             .expect("replace config");
 
-        assert_eq!(spec_hardware(edited.spec()).cpus, Some(6));
-        assert_eq!(
-            spec_hardware(
-                runtime
-                    .inspect(&MachineRef::parse(machine.id.to_string()).expect("parse machine ref"))
-                    .await
-                    .expect("inspect")
-                    .spec(),
-            )
-            .cpus,
-            Some(6)
-        );
+        assert_eq!(spec_hardware(&edited.spec).cpus, Some(6));
+        let persisted = runtime
+            .inspect(&MachineRef::parse(machine.id.to_string()).expect("parse machine ref"))
+            .await
+            .expect("inspect");
+        assert_eq!(spec_hardware(&persisted.spec).cpus, Some(6));
     }
 
     #[tokio::test]
@@ -2040,7 +2037,7 @@ mod tests {
             .await
             .expect("rename machine");
 
-        assert_eq!(updated.name(), "ubuntu");
+        assert_eq!(updated.name, "ubuntu");
         assert!(matches!(
             runtime
                 .inspect(&MachineRef::parse("devbox").expect("parse old name"))
@@ -2053,7 +2050,7 @@ mod tests {
                 .inspect(&MachineRef::parse("ubuntu").expect("parse new name"))
                 .await
                 .expect("new name should resolve")
-                .id(),
+                .id,
             machine.id.to_string()
         );
     }
@@ -2128,15 +2125,15 @@ mod tests {
             .await
             .expect("update machine");
 
-        assert_eq!(spec_hardware(updated.spec()).cpus, Some(6));
-        assert_eq!(spec_hardware(updated.spec()).memory, Some(2048));
-        assert_eq!(updated.root_disk_size(), Some(8));
+        assert_eq!(spec_hardware(&updated.spec).cpus, Some(6));
+        assert_eq!(spec_hardware(&updated.spec).memory, Some(2048));
+        assert_eq!(updated.root_disk_size, Some(8));
         let persisted = runtime
             .inspect(&MachineRef::parse("devbox").expect("parse machine ref"))
             .await
             .expect("inspect persisted update");
-        assert_eq!(spec_hardware(persisted.spec()).cpus, Some(6));
-        assert_eq!(persisted.root_disk_size(), Some(8));
+        assert_eq!(spec_hardware(&persisted.spec).cpus, Some(6));
+        assert_eq!(persisted.root_disk_size, Some(8));
     }
 
     #[tokio::test]

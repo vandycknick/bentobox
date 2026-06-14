@@ -168,13 +168,13 @@ async fn set_machine_network(libvm: &Runtime, cmd: &SetCmd) -> eyre::Result<()> 
     let machine = libvm
         .get_machine(&MachineRef::parse(cmd.vm.clone())?)
         .await?;
-    let inspection = machine.set_network(network).await?;
+    let inspect_data = machine.set_network(network).await?;
     println!(
         "network for {} set to {}",
-        inspection.name(),
-        inspection.network().name()
+        inspect_data.name,
+        inspect_data.network.name()
     );
-    if inspection.is_running() {
+    if inspect_data.is_running() {
         println!("change applies on next restart");
     }
     Ok(())

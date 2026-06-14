@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use bento_libvm::{MachineInspect, MachineRuntimeStatus, MachineStatus, RequestedNetwork};
+use bento_libvm::{MachineInspectData, MachineRuntimeStatus, MachineStatus, RequestedNetwork};
 use bento_vm_spec::VmSpec;
 use serde::Serialize;
 
@@ -59,11 +59,11 @@ pub(crate) struct MachineGuestSettingsView {
 
 impl MachineView {
     pub(crate) fn new(
-        inspection: &MachineInspect,
+        data: &MachineInspectData,
         runtime_status: Option<&MachineRuntimeStatus>,
         default: bool,
     ) -> Self {
-        let hardware = inspection.spec().hardware.as_ref();
+        let hardware = data.spec.hardware.as_ref();
         let guest_status = runtime_status
             .map(|status| status.guest().as_str().to_string())
             .unwrap_or_else(|| "stopped".to_string());
@@ -73,37 +73,37 @@ impl MachineView {
             .map(str::to_string);
 
         Self {
-            id: inspection.id(),
-            name: inspection.name().to_string(),
-            state: state_label(inspection.status()),
+            id: data.id.clone(),
+            name: data.name.clone(),
+            state: state_label(data.status),
             default,
-            profile: inspection.metadata().get(PROFILE_METADATA_KEY).cloned(),
-            image: inspection.image_ref().to_string(),
-            network: inspection.network(),
-            created_at: inspection.created_at(),
-            modified_at: inspection.modified_at(),
-            started_at: inspection.started_at(),
-            updated_at: inspection.updated_at(),
-            root_disk_size: inspection.root_disk_size(),
+            profile: data.metadata.get(PROFILE_METADATA_KEY).cloned(),
+            image: data.image_ref.clone(),
+            network: data.network.clone(),
+            created_at: data.created_at,
+            modified_at: data.modified_at,
+            started_at: data.started_at,
+            updated_at: data.updated_at,
+            root_disk_size: data.root_disk_size,
             resources: MachineResourcesView {
                 cpus: hardware.and_then(|hardware| hardware.cpus).unwrap_or(1),
                 memory_mib: hardware.and_then(|hardware| hardware.memory).unwrap_or(512),
             },
             process: MachineProcessView {
-                status: state_label(inspection.status()),
-                started_at: inspection.started_at(),
+                status: state_label(data.status),
+                started_at: data.started_at,
             },
             guest: MachineGuestView {
                 status: guest_status,
                 ready: runtime_status.is_some_and(|status| status.guest_ready()),
-                settings: guest_settings(inspection.spec(), inspection.instance_dir()),
+                settings: guest_settings(&data.spec, &data.instance_dir),
             },
             ready: runtime_status.is_some_and(|status| status.ready()),
             summary,
-            labels: inspection.labels().clone(),
-            metadata: inspection.metadata().clone(),
-            dir: inspection.instance_dir().to_path_buf(),
-            spec: inspection.spec().clone(),
+            labels: data.labels.clone(),
+            metadata: data.metadata.clone(),
+            dir: data.instance_dir.clone(),
+            spec: data.spec.clone(),
         }
     }
 }

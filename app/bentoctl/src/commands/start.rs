@@ -32,7 +32,7 @@ impl Cmd {
         });
         let (name, machine) = get_machine(libvm, config, name).await?;
         progress.step(format!("starting {name}"));
-        let inspection = machine.start().await?;
+        let inspect_data = machine.start().await?;
 
         progress.step(format!("waiting for guest agent in {name}"));
         machine
@@ -40,7 +40,7 @@ impl Cmd {
             .await
             .map_err(|err| eyre::eyre!("guest readiness check failed: {err}"))?;
 
-        progress.success(format!("{} is ready", inspection.name()));
+        progress.success(format!("{} is ready", inspect_data.name));
         Ok(())
     }
 }

@@ -3,16 +3,23 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::models;
 use crate::NetworkPolicyRef;
 
+/// Requested network attachment for a machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RequestedNetwork {
+    /// Attach the machine to its private network.
     Private {
+        /// Optional policy reference for the private network.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         policy_ref: Option<NetworkPolicyRef>,
     },
+    /// Start the machine with no network attachment.
     None,
+    /// Attach the machine to a named network definition.
     Named {
+        /// Named network definition to attach to.
         name: String,
+        /// Optional policy reference for the named network.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         policy_ref: Option<NetworkPolicyRef>,
     },
@@ -67,6 +74,7 @@ impl Default for RequestedNetwork {
 }
 
 impl RequestedNetwork {
+    /// Returns the display name for the requested network.
     pub fn name(&self) -> String {
         match self {
             Self::Private { .. } => "private".to_string(),
@@ -75,69 +83,85 @@ impl RequestedNetwork {
         }
     }
 
+    /// Returns the configured policy reference, when present.
     pub fn policy_ref(&self) -> Option<&NetworkPolicyRef> {
         match self {
             Self::Private { policy_ref } | Self::Named { policy_ref, .. } => policy_ref.as_ref(),
             Self::None => None,
         }
     }
+}
 
-    pub(crate) fn into_model(self) -> models::RequestedNetwork {
-        match self {
-            Self::Private { policy_ref } => models::RequestedNetwork::Private { policy_ref },
-            Self::None => models::RequestedNetwork::None,
-            Self::Named { name, policy_ref } => {
-                models::RequestedNetwork::Named { name, policy_ref }
+impl From<RequestedNetwork> for models::RequestedNetwork {
+    fn from(value: RequestedNetwork) -> Self {
+        match value {
+            RequestedNetwork::Private { policy_ref } => Self::Private { policy_ref },
+            RequestedNetwork::None => Self::None,
+            RequestedNetwork::Named { name, policy_ref } => Self::Named { name, policy_ref },
+        }
+    }
+}
+
+impl From<models::RequestedNetwork> for RequestedNetwork {
+    fn from(value: models::RequestedNetwork) -> Self {
+        match value {
+            models::RequestedNetwork::Private { policy_ref } => Self::Private { policy_ref },
+            models::RequestedNetwork::None => Self::None,
+            models::RequestedNetwork::Named { name, policy_ref } => {
+                Self::Named { name, policy_ref }
             }
         }
     }
-
-    pub(crate) fn from_model(value: &models::RequestedNetwork) -> Self {
-        match value {
-            models::RequestedNetwork::Private { policy_ref } => Self::Private {
-                policy_ref: policy_ref.clone(),
-            },
-            models::RequestedNetwork::None => Self::None,
-            models::RequestedNetwork::Named { name, policy_ref } => Self::Named {
-                name: name.clone(),
-                policy_ref: policy_ref.clone(),
-            },
-        }
-    }
 }
 
+/// Network driver implementation kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkDriverKind {
+    /// netd-based networking.
     Netd,
+    /// Virtualization.framework NAT networking.
     VzNat,
 }
 
+/// Mode for a named network definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NamedNetworkMode {
+    /// NAT-backed network.
     Nat,
+    /// Bridge-backed network.
     Bridge,
+    /// Isolated network.
     Isolated,
 }
 
+/// Preferred driver for a named network definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkDriverPreference {
+    /// Let the runtime choose the best supported driver.
     #[default]
     Auto,
+    /// Prefer netd.
     Netd,
+    /// Prefer Virtualization.framework NAT.
     VzNat,
 }
 
+/// Named network definition.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkDefinition {
+    /// Unique network name.
     pub name: String,
+    /// Network mode.
     pub mode: NamedNetworkMode,
+    /// Preferred network driver.
     pub driver_preference: NetworkDriverPreference,
 }
 
 impl NetworkDefinition {
+    /// Validates this definition before storing it.
     pub fn validate(&self) -> Result<(), String> {
         if self.name.trim().is_empty() {
             return Err("invalid network name: cannot be empty".to_string());
@@ -152,22 +176,6 @@ impl NetworkDefinition {
         }
         Ok(())
     }
-
-    pub(crate) fn into_model(self) -> models::NetworkDefinition {
-        models::NetworkDefinition {
-            name: self.name,
-            mode: self.mode.into(),
-            driver_preference: self.driver_preference.into(),
-        }
-    }
-
-    pub(crate) fn from_model(value: models::NetworkDefinition) -> Self {
-        Self {
-            name: value.name,
-            mode: value.mode.into(),
-            driver_preference: value.driver_preference.into(),
-        }
-    }
 }
 
 impl Default for NetworkDefinition {
@@ -176,6 +184,26 @@ impl Default for NetworkDefinition {
             name: String::new(),
             mode: NamedNetworkMode::Nat,
             driver_preference: NetworkDriverPreference::default(),
+        }
+    }
+}
+
+impl From<NetworkDefinition> for models::NetworkDefinition {
+    fn from(value: NetworkDefinition) -> Self {
+        Self {
+            name: value.name,
+            mode: value.mode.into(),
+            driver_preference: value.driver_preference.into(),
+        }
+    }
+}
+
+impl From<models::NetworkDefinition> for NetworkDefinition {
+    fn from(value: models::NetworkDefinition) -> Self {
+        Self {
+            name: value.name,
+            mode: value.mode.into(),
+            driver_preference: value.driver_preference.into(),
         }
     }
 }

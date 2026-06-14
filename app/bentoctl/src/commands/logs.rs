@@ -31,8 +31,8 @@ impl Display for Cmd {
 impl Cmd {
     pub async fn run(&self, libvm: &Runtime, config: &GlobalConfig) -> eyre::Result<()> {
         let (_name, machine) = get_machine(libvm, config, self.name.as_deref()).await?;
-        let inspection = machine.inspect().await?;
-        let path = inspection.trace_log_path();
+        let inspect_data = machine.inspect().await?;
+        let path = inspect_data.trace_log_path();
         if !path.exists() {
             return Ok(());
         }

@@ -48,9 +48,9 @@ impl Cmd {
         let machine = libvm
             .get_machine(&MachineRef::parse(name.to_string())?)
             .await?;
-        let inspection = machine.inspect().await?;
-        GlobalConfig::write_default_machine(Some(inspection.name()))?;
-        println!("default machine is {}", inspection.name());
+        let inspect_data = machine.inspect().await?;
+        GlobalConfig::write_default_machine(Some(inspect_data.name.as_str()))?;
+        println!("default machine is {}", inspect_data.name);
         Ok(())
     }
 }

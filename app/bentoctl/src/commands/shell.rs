@@ -56,10 +56,10 @@ impl Display for AttachMode {
 impl Cmd {
     pub async fn run(&self, libvm: &Runtime, config: &GlobalConfig) -> eyre::Result<()> {
         let (_reference, machine) = get_machine(libvm, config, self.name.as_deref()).await?;
-        let inspection = machine.inspect().await?;
-        let machine_name = inspection.name().to_string();
+        let inspect_data = machine.inspect().await?;
+        let machine_name = inspect_data.name.clone();
 
-        if !inspection.is_running() {
+        if !inspect_data.is_running() {
             return Err(not_running_error(&machine_name));
         }
 

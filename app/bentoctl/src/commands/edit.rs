@@ -27,15 +27,15 @@ impl Cmd {
     pub async fn run(&self, libvm: &Runtime) -> eyre::Result<()> {
         let machine_ref = MachineRef::parse(self.name.clone())?;
         let machine = libvm.get_machine(&machine_ref).await?;
-        let inspection = machine.inspect().await?;
-        if inspection.is_running() {
+        let inspect_data = machine.inspect().await?;
+        if inspect_data.is_running() {
             eyre::bail!(
                 "VM `{}` is running; stop it before editing",
-                inspection.name()
+                inspect_data.name
             );
         }
 
-        let edit_file = EditFile::create(inspection.name(), inspection.spec())?;
+        let edit_file = EditFile::create(&inspect_data.name, &inspect_data.spec)?;
         let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
         let status = Command::new(editor).arg(edit_file.path()).status()?;
         if !status.success() {
@@ -47,7 +47,7 @@ impl Cmd {
         let edited: VmSpec = serde_json::from_str(&raw)
             .with_context(|| format!("parse edited config {}", edit_file.path().display()))?;
         let updated = machine.replace_config(edited).await?;
-        println!("updated {}", updated.name());
+        println!("updated {}", updated.name);
         Ok(())
     }
 }

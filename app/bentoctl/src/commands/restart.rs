@@ -41,13 +41,13 @@ impl Cmd {
             Err(err) => return Err(err.into()),
         }
         progress.step(format!("starting {name}"));
-        let inspection = machine.start().await?;
+        let inspect_data = machine.start().await?;
         progress.step(format!("waiting for guest agent in {name}"));
         machine
             .wait_for_guest_running(DEFAULT_GUEST_READINESS_TIMEOUT)
             .await
             .map_err(|err| eyre::eyre!("guest readiness check failed: {err}"))?;
-        progress.success(format!("{} is back", inspection.name()));
+        progress.success(format!("{} is back", inspect_data.name));
         Ok(())
     }
 }

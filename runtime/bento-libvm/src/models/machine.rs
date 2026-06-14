@@ -27,12 +27,6 @@ pub(crate) struct MachineConfig {
     pub network: RequestedNetwork,
 }
 
-impl MachineConfig {
-    pub(crate) fn trace_log_path(&self) -> PathBuf {
-        crate::paths::vmmon_trace_log_path_in(&self.instance_dir)
-    }
-}
-
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

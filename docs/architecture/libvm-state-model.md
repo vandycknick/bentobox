@@ -137,8 +137,9 @@ The public API exposes resource handles and owned snapshots:
 
 - `Runtime`: target facade.
 - `Machine`: resource handle containing a runtime and machine ID.
-- `MachineConfig`: static config snapshot.
-- `MachineState`: mutable state snapshot.
-- `MachineInspect`: combined config and state snapshot.
+- `MachineCreate` and `MachineUpdate`: request DTOs for caller input.
+- `MachineInspectData`: owned public read snapshot assembled from internal config and state.
+
+`MachineConfig` and `MachineState` are internal persistence models, not public API shapes.
 
 The low-level database trait stays private to the local runtime. A future remote runtime should implement machine-management operations at the `Runtime`/`Machine` level, not the SQLite CRUD layer.

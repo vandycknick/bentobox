@@ -7,7 +7,7 @@ mod update;
 
 pub use create::MachineCreate;
 pub use handle::Machine;
-pub use inspect::{MachineInspect, MachineStatus};
+pub use inspect::{MachineInspectData, MachineStatus};
 pub use reference::MachineRef;
 pub use status::{MachineRuntimeStatus, RuntimeComponentStatus};
 pub use update::MachineUpdate;

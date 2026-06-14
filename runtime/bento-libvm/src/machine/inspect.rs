@@ -1,106 +1,104 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use bento_vm_spec::VmSpec;
 
 use crate::models::{MachineConfig, MachineRuntimeState, MachineState};
 use crate::network::RequestedNetwork;
 
+/// Public snapshot returned by machine inspect and mutation operations.
+///
+/// This is intentionally flattened so callers can read machine configuration
+/// and persisted runtime state without depending on the crate's internal store
+/// models.
 #[derive(Debug, Clone)]
-pub struct MachineInspect {
-    config: MachineConfig,
-    state: MachineState,
+#[non_exhaustive]
+pub struct MachineInspectData {
+    /// Stable machine ID.
+    pub id: String,
+    /// Human-readable machine name.
+    pub name: String,
+    /// VM specification used to start the machine.
+    pub spec: VmSpec,
+    /// Directory containing this machine's persistent runtime files.
+    pub instance_dir: PathBuf,
+    /// Unix timestamp for when the machine was created.
+    pub created_at: i64,
+    /// Unix timestamp for the last configuration change.
+    pub modified_at: i64,
+    /// Image reference used to create the machine.
+    pub image_ref: String,
+    /// Requested root disk size in bytes, when explicitly configured.
+    pub root_disk_size: Option<u64>,
+    /// User-defined labels attached to the machine.
+    pub labels: BTreeMap<String, String>,
+    /// User-defined metadata attached to the machine.
+    pub metadata: BTreeMap<String, String>,
+    /// Requested network attachment.
+    pub network: RequestedNetwork,
+    /// Persisted machine lifecycle state.
+    pub status: MachineStatus,
+    /// Process ID for the running monitor, when known.
+    pub vmmon_pid: Option<i32>,
+    /// Unix timestamp for when the machine last started.
+    pub started_at: Option<i64>,
+    /// Last persisted runtime error, when present.
+    pub last_error: Option<String>,
+    /// Unix timestamp for the last runtime state change.
+    pub updated_at: i64,
 }
 
-impl MachineInspect {
-    pub(crate) fn from_model(config: MachineConfig, state: MachineState) -> Self {
-        Self { config, state }
+impl MachineInspectData {
+    pub(crate) fn from_models(config: MachineConfig, state: MachineState) -> Self {
+        Self {
+            id: config.id.to_string(),
+            name: config.name,
+            spec: config.spec,
+            instance_dir: config.instance_dir,
+            created_at: config.created_at,
+            modified_at: config.modified_at,
+            image_ref: config.image_ref,
+            root_disk_size: config.root_disk_size,
+            labels: config.labels,
+            metadata: config.metadata,
+            network: config.network.into(),
+            status: state.status.into(),
+            vmmon_pid: state.vmmon_pid,
+            started_at: state.started_at,
+            last_error: state.last_error,
+            updated_at: state.updated_at,
+        }
     }
 
-    pub fn id(&self) -> String {
-        self.config.id.to_string()
-    }
-
-    pub fn name(&self) -> &str {
-        &self.config.name
-    }
-
-    pub fn spec(&self) -> &VmSpec {
-        &self.config.spec
-    }
-
-    pub fn instance_dir(&self) -> &Path {
-        &self.config.instance_dir
-    }
-
-    pub fn created_at(&self) -> i64 {
-        self.config.created_at
-    }
-
-    pub fn modified_at(&self) -> i64 {
-        self.config.modified_at
-    }
-
-    pub fn image_ref(&self) -> &str {
-        &self.config.image_ref
-    }
-
-    pub fn root_disk_size(&self) -> Option<u64> {
-        self.config.root_disk_size
-    }
-
-    pub fn labels(&self) -> &BTreeMap<String, String> {
-        &self.config.labels
-    }
-
-    pub fn metadata(&self) -> &BTreeMap<String, String> {
-        &self.config.metadata
-    }
-
-    pub fn network(&self) -> RequestedNetwork {
-        RequestedNetwork::from_model(&self.config.network)
-    }
-
-    pub fn status(&self) -> MachineStatus {
-        self.state.status.into()
-    }
-
+    /// Returns true when the persisted lifecycle state is running.
     pub fn is_running(&self) -> bool {
-        self.status().is_running()
+        self.status.is_running()
     }
 
-    pub fn vmmon_pid(&self) -> Option<i32> {
-        self.state.vmmon_pid
-    }
-
-    pub fn started_at(&self) -> Option<i64> {
-        self.state.started_at
-    }
-
-    pub fn last_error(&self) -> Option<&str> {
-        self.state.last_error.as_deref()
-    }
-
-    pub fn updated_at(&self) -> i64 {
-        self.state.updated_at
-    }
-
+    /// Returns the vmmon trace log path for this machine.
     pub fn trace_log_path(&self) -> PathBuf {
-        self.config.trace_log_path()
+        crate::paths::vmmon_trace_log_path_in(&self.instance_dir)
     }
 }
 
+/// Persisted machine lifecycle state.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MachineStatus {
+    /// The machine is stopped.
     Stopped,
+    /// The machine is starting.
     Starting,
+    /// The machine is running.
     Running,
+    /// The machine is stopping.
     Stopping,
+    /// The machine is in an error state.
     Error,
 }
 
 impl MachineStatus {
+    /// Returns true when the lifecycle state is running.
     pub fn is_running(self) -> bool {
         matches!(self, Self::Running)
     }

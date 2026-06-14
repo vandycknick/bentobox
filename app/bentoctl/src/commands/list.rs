@@ -29,16 +29,16 @@ impl Cmd {
         let mut views = Vec::with_capacity(machines.len());
         let default_machine = config.default_machine();
         for machine in machines {
-            let inspection = machine.inspect().await?;
-            let runtime_status = if self.json && inspection.is_running() {
+            let inspect_data = machine.inspect().await?;
+            let runtime_status = if self.json && inspect_data.is_running() {
                 Some(machine.get_status().await?)
             } else {
                 None
             };
             views.push(MachineView::new(
-                &inspection,
+                &inspect_data,
                 runtime_status.as_ref(),
-                default_machine == Some(inspection.name()),
+                default_machine == Some(inspect_data.name.as_str()),
             ));
         }
         let now = now_unix();
