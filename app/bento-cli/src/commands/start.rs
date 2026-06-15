@@ -2,7 +2,7 @@ use bento_libvm::{Runtime, DEFAULT_GUEST_READINESS_TIMEOUT};
 use clap::Args;
 use std::fmt::{Display, Formatter};
 
-use crate::commands::get_machine;
+use crate::commands::{get_machine, start_options::machine_start_options};
 use crate::config::GlobalConfig;
 use crate::progress::Progress;
 
@@ -32,7 +32,9 @@ impl Cmd {
         });
         let (name, machine) = get_machine(libvm, config, name).await?;
         progress.step(format!("starting {name}"));
-        let inspect_data = machine.start().await?;
+        let inspect_data = machine
+            .start_with(machine_start_options(libvm, &machine)?)
+            .await?;
 
         progress.step(format!("waiting for guest agent in {name}"));
         machine

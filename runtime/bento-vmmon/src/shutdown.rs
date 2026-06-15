@@ -41,7 +41,7 @@ pub async fn run(
     cleanup(&runtime, &ctx).await?;
 
     if forced {
-        std::process::exit(0);
+        tracing::warn!(instance = %ctx.machine.name(), "forced shutdown completed");
     }
 
     Ok(())

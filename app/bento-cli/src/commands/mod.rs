@@ -6,6 +6,7 @@ use crate::config::GlobalConfig;
 use crate::constants::HELP_TEMPLATE;
 use eyre::Context;
 
+pub mod cleanup;
 pub mod create;
 pub mod default_machine;
 pub mod edit;
@@ -26,6 +27,7 @@ pub mod shell;
 pub mod shell_proxy;
 pub mod show;
 pub mod start;
+mod start_options;
 pub mod stop;
 
 #[derive(Parser)]
@@ -46,6 +48,8 @@ pub struct BentoCmd {
 pub enum Command {
     Run(run::Cmd),
     Create(create::Cmd),
+    #[command(hide = true)]
+    Cleanup(cleanup::Cmd),
     Start(start::Cmd),
     Stop(stop::Cmd),
     Restart(restart::Cmd),
@@ -74,6 +78,7 @@ impl Display for Command {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Command::Create(cmd) => write!(f, "create {}", cmd),
+            Command::Cleanup(cmd) => write!(f, "cleanup {}", cmd),
             Command::Run(cmd) => write!(f, "run {}", cmd),
             Command::Start(cmd) => write!(f, "start {}", cmd),
             Command::Stop(cmd) => write!(f, "stop {}", cmd),
@@ -117,6 +122,15 @@ impl BentoCmd {
             }
             Command::Create(cmd) => {
                 let libvm = libvm().await?;
+                cmd.run(&libvm).await
+            }
+            Command::Cleanup(cmd) => {
+                let global_config = GlobalConfig::load().context("load global config")?;
+                let runtime_config = RuntimeConfig::local(&cmd.data_dir)
+                    .with_networking(global_config.networking.clone());
+                let libvm = Runtime::new(runtime_config)
+                    .await
+                    .context("initialize bento-libvm")?;
                 cmd.run(&libvm).await
             }
             Command::Start(cmd) => {
@@ -319,5 +333,27 @@ mod tests {
 
         assert!(!help.contains("edit"));
         assert!(BentoCmd::try_parse_from(["bento", "edit", "dev"]).is_ok());
+    }
+
+    #[test]
+    fn cleanup_command_is_hidden_from_help() {
+        let mut command = BentoCmd::command();
+        let help = command.render_long_help().to_string();
+
+        assert!(!help.contains("cleanup"));
+        let parsed = BentoCmd::try_parse_from([
+            "bento",
+            "cleanup",
+            "--data-dir",
+            "/tmp/bento",
+            "--machine-id",
+            "0123456789abcdef0123456789abcdef",
+        ])
+        .expect("cleanup command");
+        let Command::Cleanup(cleanup) = parsed.cmd else {
+            panic!("expected cleanup command");
+        };
+        assert_eq!(cleanup.data_dir, std::path::PathBuf::from("/tmp/bento"));
+        assert_eq!(cleanup.machine_id, "0123456789abcdef0123456789abcdef");
     }
 }

@@ -4,6 +4,7 @@ const VM_SPEC_FILE_NAME: &str = "config.json";
 const VMMON_PID_FILE_NAME: &str = "vm.pid";
 const VMMON_SOCKET_FILE_NAME: &str = "vm.sock";
 const VMMON_TRACE_LOG_FILE_NAME: &str = "vm.trace.log";
+const RUNTIME_EXIT_STATUS_FILE_NAME: &str = "vm.exit.json";
 const SERIAL_LOG_FILE_NAME: &str = "serial.log";
 const ROOT_DISK_FILE_NAME: &str = "rootfs.img";
 const METADATA_CONFIG_FILE_NAME: &str = "metadata.json";
@@ -45,6 +46,10 @@ impl MachinePaths {
 
     pub(crate) fn vmmon_trace_log_path(&self) -> PathBuf {
         vmmon_trace_log_path_in(&self.dir)
+    }
+
+    pub(crate) fn runtime_exit_status_path(&self) -> PathBuf {
+        self.dir.join(RUNTIME_EXIT_STATUS_FILE_NAME)
     }
 
     pub(crate) fn serial_log_path(&self) -> PathBuf {
@@ -105,6 +110,10 @@ mod tests {
         assert_eq!(
             paths.vmmon_trace_log_path(),
             PathBuf::from("/tmp/bento/machines/test/vm.trace.log")
+        );
+        assert_eq!(
+            paths.runtime_exit_status_path(),
+            PathBuf::from("/tmp/bento/machines/test/vm.exit.json")
         );
         assert_eq!(
             paths.serial_log_path(),

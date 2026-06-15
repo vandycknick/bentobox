@@ -2,6 +2,7 @@ mod create;
 mod handle;
 mod inspect;
 mod reference;
+mod start;
 mod status;
 mod update;
 
@@ -9,6 +10,7 @@ pub use create::MachineCreate;
 pub use handle::Machine;
 pub use inspect::{MachineInspectData, MachineStatus};
 pub use reference::MachineRef;
+pub use start::{MachineExitCommand, MachineStartOptions};
 pub use status::{MachineRuntimeStatus, RuntimeComponentStatus};
 pub use update::MachineUpdate;
 

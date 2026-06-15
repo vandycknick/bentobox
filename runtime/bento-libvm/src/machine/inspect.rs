@@ -38,8 +38,6 @@ pub struct MachineInspectData {
     pub network: RequestedNetwork,
     /// Persisted machine lifecycle state.
     pub status: MachineStatus,
-    /// Process ID for the running monitor, when known.
-    pub vmmon_pid: Option<i32>,
     /// Unix timestamp for when the machine last started.
     pub started_at: Option<i64>,
     /// Last persisted runtime error, when present.
@@ -63,7 +61,6 @@ impl MachineInspectData {
             metadata: config.metadata,
             network: config.network.into(),
             status: state.status.into(),
-            vmmon_pid: state.vmmon_pid,
             started_at: state.started_at,
             last_error: state.last_error,
             updated_at: state.updated_at,
@@ -75,7 +72,7 @@ impl MachineInspectData {
         self.status.is_running()
     }
 
-    /// Returns the vmmon trace log path for this machine.
+    /// Returns the runtime trace log path for this machine.
     pub fn trace_log_path(&self) -> PathBuf {
         crate::paths::vmmon_trace_log_path_in(&self.instance_dir)
     }

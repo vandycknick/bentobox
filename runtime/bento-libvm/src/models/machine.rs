@@ -35,6 +35,8 @@ pub(crate) struct MachineState {
     pub status: MachineRuntimeState,
     pub vmmon_pid: Option<i32>,
     pub started_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub last_error: Option<String>,
     pub updated_at: i64,
 }

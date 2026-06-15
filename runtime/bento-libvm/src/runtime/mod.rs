@@ -1,5 +1,6 @@
 mod backend;
 mod config;
+mod exit_status;
 mod facade;
 mod local;
 mod remote;

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::commands::profile::{parse_label, parse_profile_mount, parse_requested_network};
 use crate::commands::rootfs_image::{get_base_rootfs_image, record_base_rootfs_metadata};
+use crate::commands::start_options::machine_start_options;
 use crate::config::GlobalConfig;
 use crate::constants::{DEFAULT_PROFILE_NAME, PROFILE_METADATA_KEY};
 use crate::profile::{resolve_host_path, MountMode, ProfileStore};
@@ -150,7 +151,9 @@ impl Cmd {
 
         if self.start {
             let progress = Progress::start(format!("starting {}", self.name));
-            machine.start().await?;
+            machine
+                .start_with(machine_start_options(libvm, &machine)?)
+                .await?;
             progress.success(format!("{} started", self.name));
         }
 

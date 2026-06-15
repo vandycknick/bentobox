@@ -1,15 +1,15 @@
 use std::path::Path;
 use std::time::Duration;
 
-use bento_vm_spec::VmSpec;
-
 use crate::machine::{
-    Machine, MachineCreate, MachineInspectData, MachineRef, MachineRuntimeStatus, MachineUpdate,
+    Machine, MachineCreate, MachineInspectData, MachineRef, MachineRuntimeStatus,
+    MachineStartOptions, MachineUpdate,
 };
 use crate::models::MachineConfig;
 use crate::network::{NetworkDefinition, RequestedNetwork};
 use crate::paths::LocalPaths;
 use crate::{LibVmError, MachineId};
+use bento_vm_spec::VmSpec;
 
 use super::{
     local::LocalRuntime, remote::RemoteRuntime, RuntimeBackend, RuntimeConfig, RuntimeTarget,
@@ -170,9 +170,10 @@ impl Runtime {
     pub(crate) async fn start_machine(
         &self,
         id: MachineId,
+        options: MachineStartOptions,
     ) -> Result<MachineInspectData, LibVmError> {
         match &self.backend {
-            RuntimeBackend::Local(local) => local.start_by_id(id).await,
+            RuntimeBackend::Local(local) => local.start_by_id(id, options).await,
             RuntimeBackend::Remote(remote) => remote.unsupported("start_machine"),
         }
     }
@@ -184,6 +185,16 @@ impl Runtime {
         match &self.backend {
             RuntimeBackend::Local(local) => local.stop_by_id(id).await,
             RuntimeBackend::Remote(remote) => remote.unsupported("stop_machine"),
+        }
+    }
+
+    pub(crate) async fn cleanup_machine(
+        &self,
+        id: MachineId,
+    ) -> Result<MachineInspectData, LibVmError> {
+        match &self.backend {
+            RuntimeBackend::Local(local) => local.cleanup_by_id(id).await,
+            RuntimeBackend::Remote(remote) => remote.unsupported("cleanup_machine"),
         }
     }
 

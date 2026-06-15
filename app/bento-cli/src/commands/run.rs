@@ -11,6 +11,7 @@ use crate::commands::create::{
     profile_mount_to_mount, read_userdata_path, resolve_boot_assets, VmOverrideArgs,
 };
 use crate::commands::rootfs_image::{get_base_rootfs_image, record_base_rootfs_metadata};
+use crate::commands::start_options::machine_start_options;
 use crate::constants::{DEFAULT_PROFILE_NAME, PROFILE_METADATA_KEY};
 use crate::profile::ProfileStore;
 use crate::progress::Progress;
@@ -91,7 +92,9 @@ impl Cmd {
         progress.step(format!("creating ephemeral VM {}", resolved.name));
         let machine = libvm.create_machine(request).await?;
         progress.step(format!("starting {}", resolved.name));
-        machine.start().await?;
+        machine
+            .start_with(machine_start_options(libvm, &machine)?)
+            .await?;
         progress.step(format!("waiting for guest agent in {}", resolved.name));
         machine
             .wait_for_guest_running(DEFAULT_GUEST_READINESS_TIMEOUT)

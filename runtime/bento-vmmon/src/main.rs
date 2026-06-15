@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 
@@ -5,6 +6,8 @@ use clap::Parser;
 
 mod context;
 mod endpoints;
+mod exit_command;
+mod exit_status;
 mod ext;
 mod guest;
 mod lock;
@@ -16,6 +19,8 @@ mod startup;
 mod state;
 
 use crate::context::RuntimeContext;
+use crate::exit_command::ExitCommand;
+use crate::exit_status::{ExitOutcome, ExitStatus};
 use crate::lock::pid::PidGuard;
 use crate::startup::{InheritedPipeFds, StartGate, SyncReporter};
 
@@ -33,6 +38,9 @@ struct Args {
 
     #[arg(long = "pidfile")]
     pidfile: PathBuf,
+
+    #[arg(long = "exit-status", hide = true)]
+    exit_status: PathBuf,
 
     #[arg(long = "config")]
     config: PathBuf,
@@ -54,6 +62,15 @@ struct Args {
 
     #[arg(long = "network")]
     network: Vec<String>,
+
+    #[arg(long = "run-id", hide = true)]
+    run_id: String,
+
+    #[arg(long = "exit-command", hide = true)]
+    exit_command: Option<PathBuf>,
+
+    #[arg(long = "exit-command-arg", hide = true, allow_hyphen_values = true, value_parser = clap::builder::OsStringValueParser::new())]
+    exit_command_args: Vec<OsString>,
 
     #[arg(long, hide = true)]
     foreground: bool,
@@ -106,13 +123,15 @@ fn main() -> eyre::Result<()> {
 async fn run(args: Args, start_gate: StartGate, sync_reporter: SyncReporter) -> eyre::Result<()> {
     let mut start_gate = start_gate;
     let mut sync_reporter = sync_reporter;
+    let exit_command =
+        ExitCommand::from_cli(args.exit_command.clone(), args.exit_command_args.clone())?;
     let runtime = RuntimeContext::new(
         args.data_dir.clone(),
         args.config.clone(),
         args.socket.clone(),
         args.serial_log.clone(),
     );
-    let _guard = PidGuard::create(&args.pidfile).await?;
+    let pid_guard = PidGuard::create(&args.pidfile).await?;
 
     let result = match startup::init(
         &runtime,
@@ -132,10 +151,29 @@ async fn run(args: Args, start_gate: StartGate, sync_reporter: SyncReporter) -> 
         Err(err) => Err(err),
     };
 
-    if let Err(err) = &result {
-        let full_error = format_error_chain(err);
+    let last_error = result.as_ref().err().map(format_error_chain);
+    if let Some(full_error) = &last_error {
         tracing::error!(error = %full_error, data_dir = %args.data_dir.display(), "vmmon exiting with error");
-        let _ = sync_reporter.report_failed(&full_error);
+        let _ = sync_reporter.report_failed(full_error);
+    }
+
+    let outcome = if last_error.is_some() {
+        ExitOutcome::Error
+    } else {
+        ExitOutcome::Clean
+    };
+    match ExitStatus::new(args.run_id.clone(), outcome, last_error.clone()) {
+        Ok(status) => {
+            if let Err(err) = exit_status::write(&args.exit_status, &status).await {
+                tracing::warn!(error = %err, path = %args.exit_status.display(), "write runtime exit status");
+            }
+        }
+        Err(err) => tracing::warn!(error = %err, "build runtime exit status"),
+    }
+
+    drop(pid_guard);
+    if let Some(exit_command) = &exit_command {
+        exit_command.run().await;
     }
 
     result
@@ -167,6 +205,8 @@ fn daemonize(args: &Args, inherited_fds: InheritedPipeFds) -> eyre::Result<()> {
         .arg(&args.data_dir)
         .arg("--pidfile")
         .arg(&args.pidfile)
+        .arg("--exit-status")
+        .arg(&args.exit_status)
         .arg("--config")
         .arg(&args.config);
     if let Some(metadata_config) = &args.metadata_config {
@@ -182,6 +222,13 @@ fn daemonize(args: &Args, inherited_fds: InheritedPipeFds) -> eyre::Result<()> {
         .arg(&args.trace_log);
     for network in &args.network {
         cmd.arg("--network").arg(network);
+    }
+    cmd.arg("--run-id").arg(&args.run_id);
+    if let Some(exit_command) = &args.exit_command {
+        cmd.arg("--exit-command").arg(exit_command);
+    }
+    for arg in &args.exit_command_args {
+        cmd.arg("--exit-command-arg").arg(arg);
     }
     inherited_fds.clear_cloexec()?;
     unsafe {
@@ -208,4 +255,68 @@ fn daemonize(_args: &Args, _inherited_fds: InheritedPipeFds) -> eyre::Result<()>
     }
     nix::unistd::setsid().map_err(|err| eyre::eyre!("setsid: {err}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use clap::Parser;
+
+    use crate::Args;
+
+    #[test]
+    fn parses_hidden_exit_command_as_opaque_argv() {
+        let args = Args::try_parse_from([
+            "vmmon",
+            "--id",
+            "03147ec30bd748f4ad8574539c2e75ea",
+            "--name",
+            "ubuntu",
+            "--data-dir",
+            "/tmp/bento/machines/03147ec30bd748f4ad8574539c2e75ea",
+            "--pidfile",
+            "/tmp/bento/machines/03147ec30bd748f4ad8574539c2e75ea/vm.pid",
+            "--exit-status",
+            "/tmp/bento/machines/03147ec30bd748f4ad8574539c2e75ea/vm.exit.json",
+            "--config",
+            "/tmp/bento/machines/03147ec30bd748f4ad8574539c2e75ea/config.json",
+            "--socket",
+            "/tmp/bento/machines/03147ec30bd748f4ad8574539c2e75ea/vm.sock",
+            "--serial-log",
+            "/tmp/bento/machines/03147ec30bd748f4ad8574539c2e75ea/serial.log",
+            "--trace-log",
+            "/tmp/bento/machines/03147ec30bd748f4ad8574539c2e75ea/vm.trace.log",
+            "--network",
+            "none",
+            "--run-id",
+            "run-1",
+            "--exit-command",
+            "bento",
+            "--exit-command-arg",
+            "cleanup",
+            "--exit-command-arg",
+            "--data-dir",
+            "--exit-command-arg",
+            "/tmp/bento",
+            "--exit-command-arg",
+            "--machine-id",
+            "--exit-command-arg",
+            "03147ec30bd748f4ad8574539c2e75ea",
+            "--foreground",
+        ])
+        .expect("vmmon args");
+
+        assert_eq!(args.exit_command, Some(PathBuf::from("bento")));
+        assert_eq!(
+            args.exit_command_args,
+            vec![
+                "cleanup",
+                "--data-dir",
+                "/tmp/bento",
+                "--machine-id",
+                "03147ec30bd748f4ad8574539c2e75ea"
+            ]
+        );
+    }
 }

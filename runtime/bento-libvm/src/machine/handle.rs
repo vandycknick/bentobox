@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use bento_vm_spec::VmSpec;
 
-use crate::machine::{MachineInspectData, MachineRuntimeStatus, MachineUpdate};
+use crate::machine::{
+    MachineInspectData, MachineRuntimeStatus, MachineStartOptions, MachineUpdate,
+};
 use crate::network::RequestedNetwork;
 use crate::runtime::Runtime;
 use crate::{LibVmError, MachineId};
@@ -34,12 +36,28 @@ impl Machine {
 
     /// Starts the machine and returns its updated inspect data.
     pub async fn start(&self) -> Result<MachineInspectData, LibVmError> {
-        self.runtime.start_machine(self.id).await
+        self.start_with(MachineStartOptions::default()).await
+    }
+
+    /// Starts the machine with explicit start options.
+    pub async fn start_with(
+        &self,
+        options: MachineStartOptions,
+    ) -> Result<MachineInspectData, LibVmError> {
+        self.runtime.start_machine(self.id, options).await
     }
 
     /// Stops the machine and returns its updated inspect data.
     pub async fn stop(&self) -> Result<MachineInspectData, LibVmError> {
         self.runtime.stop_machine(self.id).await
+    }
+
+    /// Cleans host resources associated with a stopped machine.
+    ///
+    /// This is safe to call repeatedly. If the machine is still active, cleanup
+    /// leaves it alone and returns the current inspect data.
+    pub async fn cleanup(&self) -> Result<MachineInspectData, LibVmError> {
+        self.runtime.cleanup_machine(self.id).await
     }
 
     /// Removes the persistent machine record and files.

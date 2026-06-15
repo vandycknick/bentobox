@@ -443,6 +443,7 @@ mod tests {
             status: MachineRuntimeState::Running,
             vmmon_pid: Some(1234),
             started_at: Some(42),
+            run_id: Some("run-1".to_string()),
             last_error: None,
             updated_at: 43,
         };
