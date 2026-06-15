@@ -34,8 +34,10 @@ fn main() {
                 continue;
             };
             let name = file_name.to_string_lossy();
-            let is_library =
-                name.starts_with("libkrun") && (name.contains(".so") || name.ends_with(".dylib"));
+            let is_library = name == "libkrun.so"
+                || name.starts_with("libkrun.so.")
+                || name == "libkrun.dylib"
+                || (name.starts_with("libkrun.") && name.ends_with(".dylib"));
             if is_library {
                 let _ = std::fs::copy(&path, target_dir.join(file_name));
             }

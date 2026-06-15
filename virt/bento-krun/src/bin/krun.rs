@@ -207,6 +207,7 @@ fn start_enter(config: &KrunConfig) -> eyre::Result<()> {
 fn configure_ctx(ctx_id: u32, config: &KrunConfig) -> eyre::Result<()> {
     ctx::set_vm_config(ctx_id, config.cpus, config.memory_mib)?;
     ctx::disable_implicit_console(ctx_id)?;
+    ctx::disable_implicit_init(ctx_id)?;
     ctx::disable_implicit_vsock(ctx_id)?;
 
     if let Some(kernel) = config.kernel.as_ref() {
@@ -304,6 +305,7 @@ fn feature_name(feature: Feature) -> &'static str {
         Feature::IntelTdx => "INTEL_TDX",
         Feature::AwsNitro => "AWS_NITRO",
         Feature::VirglResourceMap2 => "VIRGL_RESOURCE_MAP2",
+        Feature::InitBlob => "INIT_BLOB",
     }
 }
 

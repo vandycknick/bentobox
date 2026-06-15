@@ -7,8 +7,9 @@ BentoBox treats the `krun` helper as an explicit VM launcher. A missing libkrun 
 Every helper-created context must do the following before adding optional devices:
 
 1. Call `krun_disable_implicit_console()`.
-2. Call `krun_disable_implicit_vsock()`.
-3. Add networking only when `--network` is not `none`.
+2. Call `krun_disable_implicit_init()`.
+3. Call `krun_disable_implicit_vsock()`.
+4. Add networking only when `--network` is not `none`.
 
 If a console is needed, the helper adds one explicitly with `krun_add_virtio_console_default()` and sets `console=hvc0`. If vsock ports are configured, the helper adds one explicit vsock device with `krun_add_vsock(ctx, 0)`, keeping TSI hijacking disabled.
 
@@ -19,6 +20,7 @@ If a console is needed, the helper adds one explicitly with `krun_add_virtio_con
 | Behavior | Trigger | Default libkrun behavior | BentoBox behavior | Platform notes |
 | --- | --- | --- | --- | --- |
 | Console device | Omit `krun_disable_implicit_console()` | Creates a console automatically | Always disabled, then explicitly added only for `--stdio-console` | Applies on Linux and macOS |
+| Init blob | Build libkrun with `init-blob` and omit `krun_disable_implicit_init()` | Injects `/init.krun` into the root virtiofs device | Built without `init-blob`; also disabled explicitly for full libkrun builds | Applies on Linux and macOS with libkrun 1.19.0+ |
 | Vsock device | Omit `krun_disable_implicit_vsock()` | Creates a vsock device automatically, with TSI selected heuristically | Always disabled, then explicitly added with TSI features `0` when vsock ports exist | Applies on Linux and macOS |
 | TSI networking | Add no virtio-net device and leave implicit vsock enabled | Falls back to Transparent Socket Impersonation | Disabled by disabling implicit vsock and never enabling TSI features | Applies on Linux and macOS |
 | TSI port remapping | Use TSI stream listens through libkrun's vsock path | May rewrite guest listen ports according to a libkrun port map | Not used; TSI is disabled and explicit virtio-net backends do not consume this map | Applies only to libkrun's vsock/TSI stream path |

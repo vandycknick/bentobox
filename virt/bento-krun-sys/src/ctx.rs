@@ -53,6 +53,7 @@ pub enum Feature {
     IntelTdx = sys::KRUN_FEATURE_INTEL_TDX as u64,
     AwsNitro = sys::KRUN_FEATURE_AWS_NITRO as u64,
     VirglResourceMap2 = sys::KRUN_FEATURE_VIRGL_RESOURCE_MAP2 as u64,
+    InitBlob = sys::KRUN_FEATURE_INIT_BLOB as u64,
 }
 
 struct CStringArray {
@@ -236,6 +237,12 @@ pub fn set_console_output(ctx: u32, path: &str) -> Result<()> {
 pub fn disable_implicit_console(ctx: u32) -> Result<()> {
     check("disable_implicit_console", unsafe {
         sys::krun_disable_implicit_console(ctx)
+    })
+}
+
+pub fn disable_implicit_init(ctx: u32) -> Result<()> {
+    check("disable_implicit_init", unsafe {
+        sys::krun_disable_implicit_init(ctx)
     })
 }
 

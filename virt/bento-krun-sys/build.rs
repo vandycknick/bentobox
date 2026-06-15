@@ -1,8 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-const LIBKRUN_VERSION: &str = "1.18.1";
-const LIBKRUNFW_VERSION: &str = "5.2.1";
+const LIBKRUN_VERSION: &str = "1.19.0";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=KRUN_DEPS_DIR");
@@ -49,21 +48,11 @@ fn create_versioned_symlinks(dir: &Path) {
             "libkrun.dylib",
             &format!("libkrun.{}.dylib", major(LIBKRUN_VERSION)),
         );
-        create_link(
-            dir,
-            "libkrunfw.dylib",
-            &format!("libkrunfw.{}.dylib", major(LIBKRUNFW_VERSION)),
-        );
     } else {
         create_link(
             dir,
             "libkrun.so",
             &format!("libkrun.so.{}", major(LIBKRUN_VERSION)),
-        );
-        create_link(
-            dir,
-            "libkrunfw.so",
-            &format!("libkrunfw.so.{}", major(LIBKRUNFW_VERSION)),
         );
     }
 }

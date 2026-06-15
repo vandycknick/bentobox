@@ -7,9 +7,7 @@ The expected layout is:
 ```text
 target/libs/krun/<target-triple>/
   libkrun.so        # Linux
-  libkrunfw.so      # Linux
   libkrun.dylib     # macOS
-  libkrunfw.dylib   # macOS
 ```
 
 ## Prerequisites
@@ -20,7 +18,7 @@ Use the Nix dev shell. Required native tools are provided by `flake.nix`; do not
 nix develop
 ```
 
-The shell provides the Rust toolchain plus native build tools such as `clang`, `libclang`, `pkg-config`, `make`, Docker, and platform-specific tools like `patchelf` on Linux.
+The shell provides the Rust toolchain plus native build tools such as `clang`, `libclang`, `pkg-config`, `make`, and platform-specific tools like `patchelf` on Linux.
 
 On macOS, `install_name_tool` and `codesign` come from Apple’s command line tools. If those are missing, install Xcode command line tools once with Apple’s normal developer tooling.
 
@@ -34,15 +32,14 @@ make build-libkrun
 
 The script does the following:
 
-1. Downloads upstream `libkrunfw-${ARCH}.tgz` for the pinned `LIBKRUNFW_VERSION`.
-2. Extracts it into `target/build/libkrun/<target-triple>/prefix`.
-3. Clones `containers/libkrun` at the pinned `LIBKRUN_VERSION` with submodules.
-4. Builds `libkrun` with `NET=1 BLK=1`.
-5. Installs into the local prefix.
-6. Copies `libkrun.so` and `libkrunfw.so` into `target/libs/krun/<target-triple>`.
-7. Fixes sonames with `patchelf` so the copied libraries are relocatable.
+1. Clones `libkrun/libkrun` at the pinned `LIBKRUN_VERSION` with submodules.
+2. Builds `libkrun` with Cargo features `blk` and `net`, with default features disabled.
+3. Copies `libkrun.so` into `target/libs/krun/<target-triple>`.
+4. Fixes the soname with `patchelf` so the copied library is relocatable.
 
-Linux does not build `libkrunfw` from source in this flow. It uses the upstream prebuilt `libkrunfw` release archive, matching the bux dependency pipeline.
+BentoBox intentionally builds `libkrun` without the upstream `init-blob` default feature. That avoids building and embedding libkrun's default guest init binary.
+
+BentoBox also does not fetch or package `libkrunfw`. `libkrun` loads `libkrunfw` dynamically only when the caller does not provide an external kernel, firmware, or kernel bundle. BentoBox's `krun` helper requires `--kernel` and calls `krun_set_kernel()`, so this fallback path is not used.
 
 ## Build On macOS
 
@@ -54,25 +51,13 @@ make build-libkrun
 
 The script does the following:
 
-1. Downloads upstream `libkrunfw-prebuilt-aarch64.tgz` for the pinned `LIBKRUNFW_VERSION`.
-2. Builds `libkrunfw.dylib` from that prebuilt kernel-payload source bundle.
-3. Clones `containers/libkrun` at the pinned `LIBKRUN_VERSION` with submodules.
-4. Builds `libkrun`’s Linux guest `init/init` ELF inside a Docker Linux container from `init/init.c` and `init/dhcp.c`.
-5. Builds `libkrun.dylib` on macOS with Cargo features `blk` and `net`, passing the Docker-built init through upstream's `KRUN_INIT_BINARY_PATH` hook.
-6. Copies `libkrun.dylib` and `libkrunfw.dylib` into `target/libs/krun/<target-triple>`.
-7. Rewrites install names to use `@rpath`.
-8. Rewrites `libkrun.dylib`’s dependency on `libkrunfw.dylib` to `@rpath/libkrunfw.dylib`.
-9. Ad-hoc codesigns both dylibs.
+1. Clones `libkrun/libkrun` at the pinned `LIBKRUN_VERSION` with submodules.
+2. Builds `libkrun.dylib` with Cargo features `blk` and `net`, with default features disabled.
+3. Copies `libkrun.dylib` into `target/libs/krun/<target-triple>`.
+4. Rewrites the install name to `@rpath/libkrun.dylib`.
+5. Ad-hoc codesigns the dylib.
 
-macOS does not build the embedded Linux kernel payload from scratch. Upstream `libkrunfw` documents that kernel generation should happen in Linux, normally through `krunvm`. The `libkrunfw-prebuilt-aarch64.tgz` archive contains the Linux-generated payload source needed to produce the final macOS dylib locally. Tiny distinction, giant footgun.
-
-`libkrun` also embeds a small Linux guest `init/init` binary with `include_bytes!`. Building that ELF with macOS clang/lld is fragile because the generated Debian sysroot and GNU target naming need to line up exactly. BentoBox instead builds only that Linux ELF inside Docker (`linux/arm64`) and then runs the normal macOS `libkrun.dylib` build locally, pointing Cargo at the Docker-built ELF with `KRUN_INIT_BINARY_PATH`. The host dependency is still just Docker from `flake.nix`; package installation happens inside the ephemeral container.
-
-The default Docker image is `fedora:latest`, matching upstream’s `krunvm` helper approach. Override it if needed:
-
-```bash
-KRUN_INIT_BUILDER_IMAGE=fedora:latest make build-libkrun
-```
+Because BentoBox disables libkrun's `init-blob` default feature and does not package `libkrunfw`, macOS no longer needs Docker, a Linux init-builder container, or the upstream `libkrunfw-prebuilt-aarch64.tgz` bundle for this dependency build.
 
 ## Use With Cargo
 
@@ -122,21 +107,20 @@ or:
 package-krun-runtime release target/krun-runtime-release
 ```
 
-The output directory contains the `krun` binary plus `libkrun` and `libkrunfw`, ready to copy together.
+The output directory contains the `krun` binary plus `libkrun`, ready to copy together.
 
 ## Version Pins
 
 The current script pins are:
 
 ```text
-LIBKRUN_VERSION=1.18.1
-LIBKRUNFW_VERSION=5.2.1
+LIBKRUN_VERSION=1.19.0
 ```
 
-Override them only when intentionally updating the native ABI and regenerated bindings:
+Override it only when intentionally updating the native ABI and regenerated bindings:
 
 ```bash
-LIBKRUN_VERSION=... LIBKRUNFW_VERSION=... make build-libkrun
+LIBKRUN_VERSION=... make build-libkrun
 ```
 
 If `libkrun.h` changes, regenerate or update `virt/bento-krun-sys/src/bindings.rs` and keep `virt/bento-krun-sys/include/libkrun.h` in sync.

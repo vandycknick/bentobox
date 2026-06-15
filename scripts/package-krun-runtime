@@ -24,16 +24,15 @@ if [ ! -d "$KRUN_DEPS_DIR" ]; then
 fi
 
 mkdir -p "$OUT_DIR"
+rm -f "$OUT_DIR"/libkrunfw*.so "$OUT_DIR"/libkrunfw*.so.* "$OUT_DIR"/libkrunfw*.dylib
 cp -f "$KRUN_BIN" "$OUT_DIR/krun"
 
 case "$(uname -s)" in
   Darwin)
     cp -f "$KRUN_DEPS_DIR/libkrun.dylib" "$OUT_DIR/libkrun.dylib"
-    cp -f "$KRUN_DEPS_DIR/libkrunfw.dylib" "$OUT_DIR/libkrunfw.dylib"
     ;;
   Linux)
     cp -f "$KRUN_DEPS_DIR/libkrun.so" "$OUT_DIR/libkrun.so"
-    cp -f "$KRUN_DEPS_DIR/libkrunfw.so" "$OUT_DIR/libkrunfw.so"
     ;;
   *)
     printf 'unsupported host OS: %s\n' "$(uname -s)" >&2

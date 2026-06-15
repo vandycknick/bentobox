@@ -71,6 +71,38 @@ This keeps vmmon logs useful and avoids raw negative libkrun return codes when t
 
 Feature checks must not live in the library. If they do, `vmmon` and other library users can acquire a runtime dependency on `libkrun.so` just by linking the launcher crate, which defeats the helper-process boundary.
 
+## libkrun Build Features
+
+BentoBox's intended libkrun build keeps the upstream library narrow while preserving the current krun backend behavior:
+
+```text
+--no-default-features --features blk --features net
+```
+
+That means BentoBox intentionally builds libkrun with these features enabled:
+
+| Feature | Purpose | BentoBox policy |
+| --- | --- | --- |
+| `blk` | Enables virtio-block devices. | Keep. Required for `--disk` and BentoBox disk images. |
+| `net` | Enables virtio-net devices for unixgram, unixstream, and tap networking. | Keep. Required for BentoBox networking modes. |
+
+BentoBox intentionally leaves these libkrun features disabled for now:
+
+| Feature | Purpose | BentoBox policy |
+| --- | --- | --- |
+| `init-blob` | Embeds libkrun's default guest init binary. This is an upstream default feature. | Disable with `--no-default-features`. BentoBox requires explicit boot inputs and the helper disables implicit init. |
+| `gpu` | Enables virtio-gpu, Venus, and native-context graphics support. | Disable. BentoBox has no krun GPU path today. |
+| `snd` | Enables virtio-snd audio support. | Disable. BentoBox has no krun audio path today. |
+| `input` | Enables input device support for GUI/input passthrough. | Disable. BentoBox has no krun input-device path today. |
+| `efi` | Enables EFI boot support and implies `blk` and `net`. | Disable. BentoBox uses explicit external kernel/initramfs boot instead of EFI firmware boot. |
+| `tee` | Enables trusted execution environment plumbing. | Disable unless BentoBox grows a confidential-compute krun backend. |
+| `amd-sev` | Enables AMD SEV, SEV-ES, and SEV-SNP support. Implies `blk` and `tee`. | Disable unless BentoBox grows an SEV backend. |
+| `tdx` | Enables Intel TDX support. Implies `blk` and `tee`. | Disable unless BentoBox grows a TDX backend. |
+| `aws-nitro` | Enables AWS Nitro Enclaves support and its specialized init path. | Disable unless BentoBox grows a Nitro backend. |
+| `virgl_resource_map2` | Enables an optional virglrenderer GPU API used by some virtio-gpu builds. | Disable with `gpu`. It has no use without the GPU path. |
+
+If a new krun feature is exposed through BentoBox, update this table and add a helper-side `krun_has_feature()` check before calling the feature-specific libkrun API. Do not enable upstream libkrun features speculatively. The tiny VM goblin gets one feature only when it can point to the code that uses it.
+
 ## Example
 
 ```rust,no_run

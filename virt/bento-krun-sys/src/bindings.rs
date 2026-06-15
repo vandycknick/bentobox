@@ -60,6 +60,7 @@ pub const KRUN_FEATURE_AMD_SEV: u32 = 7;
 pub const KRUN_FEATURE_INTEL_TDX: u32 = 8;
 pub const KRUN_FEATURE_AWS_NITRO: u32 = 9;
 pub const KRUN_FEATURE_VIRGL_RESOURCE_MAP2: u32 = 10;
+pub const KRUN_FEATURE_INIT_BLOB: u32 = 11;
 pub type __uint32_t = ::core::ffi::c_uint;
 pub type __darwin_gid_t = __uint32_t;
 pub type __darwin_uid_t = __uint32_t;
@@ -387,6 +388,31 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn krun_disable_implicit_console(ctx_id: u32) -> i32;
+}
+unsafe extern "C" {
+    pub fn krun_disable_implicit_init(ctx_id: u32) -> i32;
+}
+unsafe extern "C" {
+    pub fn krun_get_default_init(data_out: *mut *const u8, len_out: *mut usize) -> i32;
+}
+unsafe extern "C" {
+    pub fn krun_fs_add_overlay_file(
+        ctx_id: u32,
+        fs_tag: *const ::core::ffi::c_char,
+        path: *const ::core::ffi::c_char,
+        data: *const u8,
+        data_len: usize,
+        mode: u32,
+        one_shot: bool,
+    ) -> i32;
+}
+unsafe extern "C" {
+    pub fn krun_fs_add_overlay_dir(
+        ctx_id: u32,
+        fs_tag: *const ::core::ffi::c_char,
+        path: *const ::core::ffi::c_char,
+        mode: u32,
+    ) -> i32;
 }
 unsafe extern "C" {
     #[doc = " Disable the implicit vsock device.\n\n By default, libkrun creates a vsock device automatically. This function\n disables that behavior entirely - no vsock device will be created.\n\n Arguments:\n  \"ctx_id\" - the configuration context ID.\n\n Returns:\n  Zero on success or a negative error number on failure."]

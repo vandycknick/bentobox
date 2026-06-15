@@ -1,4 +1,6 @@
 //! Process-backed libkrun helper API for BentoBox.
+//!
+//! See `virt/bento-krun/README.md` for the libkrun build-feature policy.
 
 mod builder;
 mod config;
