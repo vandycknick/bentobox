@@ -362,3 +362,279 @@ pub(super) fn remove_file_if_exists(path: &Path) -> Result<(), LibVmError> {
         Err(err) => Err(err.into()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use bento_vm_spec::VmSpec;
+
+    use crate::lock_manager::LockId;
+    use crate::paths::LocalPaths;
+    use crate::store::models::MachineId;
+    use crate::store::models::{
+        MachineConfig, MachineNetworkConfig as ModelMachineNetworkConfig, NetworkAttachment,
+        NetworkDefinition as ModelNetworkDefinition,
+        NetworkDriverPreference as ModelNetworkDriverPreference, NetworkInstance,
+        NetworkInstanceState, NetworkTopology as ModelNetworkTopology,
+    };
+    use crate::store::MockDataStore;
+    use crate::{LibVmError, RuntimeNetworkingConfig};
+
+    use super::{
+        ensure_instance_network_link, prepare_network_runtime, reconcile_network_runtime,
+        DRIVER_VZNAT,
+    };
+
+    fn machine_config(
+        paths: &LocalPaths,
+        id: MachineId,
+        name: &str,
+        network: ModelMachineNetworkConfig,
+    ) -> MachineConfig {
+        MachineConfig {
+            id,
+            lock_id: LockId::from(0),
+            name: name.to_string(),
+            spec: VmSpec::current(),
+            instance_dir: paths.machine(id).dir().to_path_buf(),
+            created_at: 1,
+            modified_at: 1,
+            image_ref: String::new(),
+            root_disk_size: None,
+            labels: BTreeMap::new(),
+            metadata: BTreeMap::new(),
+            network,
+        }
+    }
+
+    fn attachment(machine_id: MachineId, network_instance_id: &str) -> NetworkAttachment {
+        NetworkAttachment {
+            machine_id,
+            network_instance_id: network_instance_id.to_string(),
+            guest_mac: "02:11:22:33:44:55".to_string(),
+            created_at: 1,
+            modified_at: 1,
+        }
+    }
+
+    fn instance(id: &str, runtime_dir: &std::path::Path) -> NetworkInstance {
+        NetworkInstance {
+            id: id.to_string(),
+            driver: DRIVER_VZNAT.to_string(),
+            definition_name: None,
+            runtime_dir: runtime_dir.display().to_string(),
+            attachment_json: r#"{"kind":"vznat"}"#.to_string(),
+            driver_state_json: "{}".to_string(),
+            state: NetworkInstanceState::Running,
+            created_at: 1,
+            modified_at: 1,
+        }
+    }
+
+    fn named_definition(name: &str, topology: ModelNetworkTopology) -> ModelNetworkDefinition {
+        ModelNetworkDefinition {
+            name: name.to_string(),
+            topology,
+            driver_preference: ModelNetworkDriverPreference::Auto,
+            created_at: 1,
+            modified_at: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_detaches_attachment_when_instance_is_missing() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = LocalPaths::new(temp.path().join("bento"));
+        let machine_id = MachineId::new();
+        let runtime_dir = temp.path().join("missing-runtime");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        std::fs::create_dir_all(paths.machine(machine_id).dir()).expect("create machine dir");
+        ensure_instance_network_link(&paths, machine_id, &runtime_dir)
+            .expect("create network link");
+        let metadata = machine_config(
+            &paths,
+            machine_id,
+            "devbox",
+            ModelMachineNetworkConfig::default(),
+        );
+        let mut store = MockDataStore::new();
+        store
+            .expect_network_attachment()
+            .withf(move |id| *id == machine_id)
+            .once()
+            .returning(move |_| Ok(Some(attachment(machine_id, "missing"))));
+        store
+            .expect_network_instance()
+            .withf(|network_id| network_id == "missing")
+            .once()
+            .returning(|_| Ok(None));
+        store
+            .expect_detach_network()
+            .withf(move |id| *id == machine_id)
+            .once()
+            .returning(|_| Ok(()));
+
+        reconcile_network_runtime(&paths, &store, &metadata, false)
+            .await
+            .expect("reconcile missing instance");
+
+        assert!(!paths.machine(machine_id).network_link().exists());
+        assert!(
+            runtime_dir.exists(),
+            "missing DB instance should not remove unrelated dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_removes_inactive_last_network_instance() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = LocalPaths::new(temp.path().join("bento"));
+        let machine_id = MachineId::new();
+        let runtime_dir = temp.path().join("runtime-dir");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        std::fs::create_dir_all(paths.machine(machine_id).dir()).expect("create machine dir");
+        ensure_instance_network_link(&paths, machine_id, &runtime_dir)
+            .expect("create network link");
+        let instance = instance("net-1", &runtime_dir);
+        let metadata = machine_config(
+            &paths,
+            machine_id,
+            "devbox",
+            ModelMachineNetworkConfig::default(),
+        );
+        let mut store = MockDataStore::new();
+        store
+            .expect_network_attachment()
+            .withf(move |id| *id == machine_id)
+            .once()
+            .returning(move |_| Ok(Some(attachment(machine_id, "net-1"))));
+        let instance_for_lookup = instance.clone();
+        store
+            .expect_network_instance()
+            .withf(|network_id| network_id == "net-1")
+            .once()
+            .return_once(move |_| Ok(Some(instance_for_lookup)));
+        store
+            .expect_detach_network()
+            .withf(move |id| *id == machine_id)
+            .once()
+            .returning(|_| Ok(()));
+        store
+            .expect_network_attachment_count()
+            .withf(|network_id| network_id == "net-1")
+            .once()
+            .returning(|_| Ok(0));
+        store
+            .expect_remove_network_instance()
+            .withf(|network_id| network_id == "net-1")
+            .once()
+            .returning(|_| Ok(()));
+
+        reconcile_network_runtime(&paths, &store, &metadata, false)
+            .await
+            .expect("reconcile inactive instance");
+
+        assert!(!paths.machine(machine_id).network_link().exists());
+        assert!(
+            !runtime_dir.exists(),
+            "last attachment should remove runtime dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_keeps_inactive_network_instance_with_other_attachments() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = LocalPaths::new(temp.path().join("bento"));
+        let machine_id = MachineId::new();
+        let runtime_dir = temp.path().join("shared-runtime-dir");
+        std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+        std::fs::create_dir_all(paths.machine(machine_id).dir()).expect("create machine dir");
+        ensure_instance_network_link(&paths, machine_id, &runtime_dir)
+            .expect("create network link");
+        let instance = instance("net-1", &runtime_dir);
+        let metadata = machine_config(
+            &paths,
+            machine_id,
+            "devbox",
+            ModelMachineNetworkConfig::default(),
+        );
+        let mut store = MockDataStore::new();
+        store
+            .expect_network_attachment()
+            .withf(move |id| *id == machine_id)
+            .once()
+            .returning(move |_| Ok(Some(attachment(machine_id, "net-1"))));
+        store
+            .expect_network_instance()
+            .withf(|network_id| network_id == "net-1")
+            .once()
+            .return_once(move |_| Ok(Some(instance)));
+        store
+            .expect_detach_network()
+            .withf(move |id| *id == machine_id)
+            .once()
+            .returning(|_| Ok(()));
+        store
+            .expect_network_attachment_count()
+            .withf(|network_id| network_id == "net-1")
+            .once()
+            .returning(|_| Ok(1));
+
+        reconcile_network_runtime(&paths, &store, &metadata, false)
+            .await
+            .expect("reconcile shared instance");
+
+        assert!(!paths.machine(machine_id).network_link().exists());
+        assert!(
+            runtime_dir.exists(),
+            "shared instance runtime dir should stay"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_named_bridge_network_fails_before_driver_setup() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = LocalPaths::new(temp.path().join("bento"));
+        let machine_id = MachineId::new();
+        let metadata = machine_config(
+            &paths,
+            machine_id,
+            "devbox",
+            ModelMachineNetworkConfig::Named {
+                name: "bridge-net".to_string(),
+            },
+        );
+        let mut store = MockDataStore::new();
+        store
+            .expect_network_attachment()
+            .withf(move |id| *id == machine_id)
+            .once()
+            .returning(|_| Ok(None));
+        store
+            .expect_network_definition()
+            .withf(|name| name == "bridge-net")
+            .once()
+            .returning(|_| {
+                Ok(Some(named_definition(
+                    "bridge-net",
+                    ModelNetworkTopology::Bridge,
+                )))
+            });
+
+        let err = prepare_network_runtime(
+            &paths,
+            &store,
+            &metadata,
+            &RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect_err("bridge topology should not be implemented yet");
+
+        assert!(matches!(
+            err,
+            LibVmError::NetworkRuntime { ref reference, ref message }
+                if reference == "devbox" && message.contains("bridge mode")
+        ));
+    }
+}
