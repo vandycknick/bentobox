@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::LibVmError;
 
@@ -13,6 +13,12 @@ pub(crate) fn resolve_default_data_dir() -> Result<PathBuf, LibVmError> {
     data_home
         .map(|path| path.join(APP_DIR_NAME))
         .ok_or(LibVmError::DataDirUnavailable)
+}
+
+pub(crate) fn resolve_default_run_dir(data_root: &Path) -> Result<PathBuf, LibVmError> {
+    env_absolute_path("XDG_RUNTIME_DIR")
+        .map(|runtime_dir| runtime_dir.map(|path| path.join(APP_DIR_NAME)))
+        .map(|runtime_dir| runtime_dir.unwrap_or_else(|| data_root.join("run")))
 }
 
 pub(crate) fn resolve_default_config_dir() -> Result<PathBuf, LibVmError> {

@@ -60,10 +60,7 @@ pub(super) async fn validate(
         &expected.state_db_path,
         &actual.state_db_path,
     )?;
-    Ok(LocalRoots::with_state_db_path(
-        actual.data_dir,
-        actual.state_db_path,
-    ))
+    Ok(LocalRoots::new(actual.data_dir))
 }
 
 struct ExpectedDbConfig {
@@ -83,7 +80,7 @@ impl ExpectedDbConfig {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
             data_dir: path_to_db_string(roots.data_dir()),
-            state_db_path: path_to_db_string(roots.state_db_path()),
+            state_db_path: path_to_db_string(&roots.state_db_path()),
         }
     }
 }

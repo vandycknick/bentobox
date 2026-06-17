@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::paths::defaults::resolve_default_data_dir;
+use crate::paths::defaults::{resolve_default_data_dir, resolve_default_run_dir};
 use crate::paths::machine::MachinePaths;
 use crate::paths::network::NetworkPaths;
 use crate::store::models::MachineId;
@@ -14,55 +14,79 @@ const LOCKS_DIR_NAME: &str = "locks";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalRoots {
-    data_dir: PathBuf,
-    state_db_path: PathBuf,
+    data_root: PathBuf,
+    run_root: PathBuf,
+    image_root: PathBuf,
 }
 
 impl LocalRoots {
-    pub(crate) fn new(data_dir: impl Into<PathBuf>) -> Self {
-        let data_dir = data_dir.into();
-        let state_db_path = data_dir.join(STATE_DB_FILE_NAME);
-        Self::with_state_db_path(data_dir, state_db_path)
+    pub(crate) fn new(data_root: impl Into<PathBuf>) -> Self {
+        let data_root = data_root.into();
+        let run_root = data_root.join("run");
+        let image_root = data_root.join(IMAGES_DIR_NAME);
+        Self::with_roots(data_root, run_root, image_root)
     }
 
-    pub(crate) fn with_state_db_path(
-        data_dir: impl Into<PathBuf>,
-        state_db_path: impl Into<PathBuf>,
+    pub(crate) fn with_roots(
+        data_root: impl Into<PathBuf>,
+        run_root: impl Into<PathBuf>,
+        image_root: impl Into<PathBuf>,
     ) -> Self {
         Self {
-            data_dir: data_dir.into(),
-            state_db_path: state_db_path.into(),
+            data_root: data_root.into(),
+            run_root: run_root.into(),
+            image_root: image_root.into(),
         }
     }
 
-    pub(crate) fn data_dir(&self) -> &Path {
-        &self.data_dir
+    pub(crate) fn from_env() -> Result<Self, LibVmError> {
+        let data_root = resolve_default_data_dir()?;
+        let run_root = resolve_default_run_dir(&data_root)?;
+        let image_root = data_root.join(IMAGES_DIR_NAME);
+        Ok(Self::with_roots(data_root, run_root, image_root))
     }
 
-    pub(crate) fn state_db_path(&self) -> &Path {
-        &self.state_db_path
+    pub(crate) fn data_root(&self) -> &Path {
+        &self.data_root
+    }
+
+    pub(crate) fn data_dir(&self) -> &Path {
+        self.data_root()
+    }
+
+    pub(crate) fn run_root(&self) -> &Path {
+        &self.run_root
+    }
+
+    pub(crate) fn image_root(&self) -> &Path {
+        &self.image_root
+    }
+
+    pub(crate) fn state_db_path(&self) -> PathBuf {
+        self.data_root.join(STATE_DB_FILE_NAME)
     }
 
     pub(crate) fn machines_dir(&self) -> PathBuf {
-        self.data_dir.join(MACHINES_DIR_NAME)
+        self.data_root.join(MACHINES_DIR_NAME)
     }
 
     pub(crate) fn images_dir(&self) -> PathBuf {
-        self.data_dir.join(IMAGES_DIR_NAME)
+        self.image_root().to_path_buf()
     }
 
     pub(crate) fn net_dir(&self) -> PathBuf {
-        self.data_dir.join(NET_DIR_NAME)
+        self.run_root().join(NET_DIR_NAME)
     }
 
     pub(crate) fn locks_dir(&self) -> PathBuf {
-        self.data_dir.join(LOCKS_DIR_NAME)
+        self.run_root().join(LOCKS_DIR_NAME)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalPaths {
     roots: LocalRoots,
+    state_db_path: PathBuf,
     machines_dir: PathBuf,
     images_dir: PathBuf,
     net_dir: PathBuf,
@@ -70,15 +94,17 @@ pub(crate) struct LocalPaths {
 }
 
 impl LocalPaths {
+    #[cfg(test)]
     pub(crate) fn new(data_dir: impl Into<PathBuf>) -> Self {
         Self::from_roots(LocalRoots::new(data_dir))
     }
 
     pub(crate) fn from_env() -> Result<Self, LibVmError> {
-        Ok(Self::new(resolve_default_data_dir()?))
+        Ok(Self::from_roots(LocalRoots::from_env()?))
     }
 
     pub(crate) fn from_roots(roots: LocalRoots) -> Self {
+        let state_db_path = roots.state_db_path();
         let machines_dir = roots.machines_dir();
         let images_dir = roots.images_dir();
         let net_dir = roots.net_dir();
@@ -86,6 +112,7 @@ impl LocalPaths {
 
         Self {
             roots,
+            state_db_path,
             machines_dir,
             images_dir,
             net_dir,
@@ -102,7 +129,7 @@ impl LocalPaths {
     }
 
     pub(crate) fn state_db_path(&self) -> &Path {
-        self.roots.state_db_path()
+        &self.state_db_path
     }
 
     pub(crate) fn machines_dir(&self) -> &Path {
@@ -158,26 +185,41 @@ mod tests {
         let roots = LocalRoots::new("/tmp/bento");
 
         assert_eq!(roots.data_dir(), PathBuf::from("/tmp/bento").as_path());
+        assert_eq!(roots.data_root(), PathBuf::from("/tmp/bento").as_path());
+        assert_eq!(roots.run_root(), PathBuf::from("/tmp/bento/run").as_path());
+        assert_eq!(
+            roots.image_root(),
+            PathBuf::from("/tmp/bento/images").as_path()
+        );
         assert_eq!(roots.state_db_path(), PathBuf::from("/tmp/bento/state.db"));
         assert_eq!(roots.machines_dir(), PathBuf::from("/tmp/bento/machines"));
         assert_eq!(roots.images_dir(), PathBuf::from("/tmp/bento/images"));
-        assert_eq!(roots.net_dir(), PathBuf::from("/tmp/bento/net"));
-        assert_eq!(roots.locks_dir(), PathBuf::from("/tmp/bento/locks"));
+        assert_eq!(roots.net_dir(), PathBuf::from("/tmp/bento/run/net"));
+        assert_eq!(roots.locks_dir(), PathBuf::from("/tmp/bento/run/locks"));
     }
 
     #[test]
-    fn local_roots_allow_state_db_outside_data_dir() {
-        let roots = LocalRoots::with_state_db_path("/tmp/bento", "/var/lib/bento/state.db");
+    fn local_roots_use_explicit_run_and_image_roots() {
+        let roots =
+            LocalRoots::with_roots("/tmp/bento", "/run/user/501/bento", "/var/lib/bento/images");
 
         assert_eq!(roots.data_dir(), PathBuf::from("/tmp/bento").as_path());
         assert_eq!(
-            roots.state_db_path(),
-            PathBuf::from("/var/lib/bento/state.db")
+            roots.run_root(),
+            PathBuf::from("/run/user/501/bento").as_path()
         );
+        assert_eq!(
+            roots.image_root(),
+            PathBuf::from("/var/lib/bento/images").as_path()
+        );
+        assert_eq!(roots.state_db_path(), PathBuf::from("/tmp/bento/state.db"));
         assert_eq!(roots.machines_dir(), PathBuf::from("/tmp/bento/machines"));
-        assert_eq!(roots.images_dir(), PathBuf::from("/tmp/bento/images"));
-        assert_eq!(roots.net_dir(), PathBuf::from("/tmp/bento/net"));
-        assert_eq!(roots.locks_dir(), PathBuf::from("/tmp/bento/locks"));
+        assert_eq!(roots.images_dir(), PathBuf::from("/var/lib/bento/images"));
+        assert_eq!(roots.net_dir(), PathBuf::from("/run/user/501/bento/net"));
+        assert_eq!(
+            roots.locks_dir(),
+            PathBuf::from("/run/user/501/bento/locks")
+        );
     }
 
     #[test]
@@ -201,7 +243,7 @@ mod tests {
             machine.dir(),
             PathBuf::from("/tmp/bento/machines").join(machine_id.to_string())
         );
-        assert_eq!(paths.locks_dir(), PathBuf::from("/tmp/bento/locks"));
-        assert_eq!(network.dir(), PathBuf::from("/tmp/bento/net/net123"));
+        assert_eq!(paths.locks_dir(), PathBuf::from("/tmp/bento/run/locks"));
+        assert_eq!(network.dir(), PathBuf::from("/tmp/bento/run/net/net123"));
     }
 }
