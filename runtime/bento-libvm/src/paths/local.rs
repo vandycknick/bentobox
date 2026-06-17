@@ -121,6 +121,7 @@ impl LocalPaths {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn roots(&self) -> &LocalRoots {
         &self.roots
     }

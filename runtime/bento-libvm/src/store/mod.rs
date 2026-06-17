@@ -1,4 +1,4 @@
-mod config;
+mod config_store;
 mod machine_store;
 pub(crate) mod models;
 mod network_store;
