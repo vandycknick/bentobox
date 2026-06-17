@@ -305,6 +305,22 @@ mod tests {
     }
 
     #[test]
+    fn run_image_only_resolve_leaves_name_to_libvm() {
+        let cmd = BentoCmd::try_parse_from(["bento", "run", "--image", "disk:./target/rootfs.img"])
+            .expect("run command should parse");
+        let run = match cmd.cmd {
+            Command::Run(cmd) => cmd,
+            other => panic!("expected run command, got {other:?}"),
+        };
+
+        let resolved = run.resolve().expect("resolve run command");
+
+        assert_eq!(resolved.image_ref, "disk:./target/rootfs.img");
+        assert!(resolved.labels.is_empty());
+        assert!(resolved.metadata.is_empty());
+    }
+
+    #[test]
     fn run_command_leaves_default_initramfs_for_libvm_generation() {
         let cmd = BentoCmd::try_parse_from([
             "bento",
