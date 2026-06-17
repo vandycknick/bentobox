@@ -69,17 +69,14 @@ impl Store {
         crate::store::machine::insert_config(self, config).await
     }
 
-    pub(crate) async fn get_machine_state(
+    pub(crate) async fn machine_state(
         &self,
         machine_id: MachineId,
     ) -> Result<Option<MachineState>, LibVmError> {
         crate::store::machine::get_state(self, machine_id).await
     }
 
-    pub(crate) async fn upsert_machine_state(
-        &self,
-        state: &MachineState,
-    ) -> Result<(), LibVmError> {
+    pub(crate) async fn save_machine_state(&self, state: &MachineState) -> Result<(), LibVmError> {
         crate::store::machine::upsert_state(self, state).await
     }
 
@@ -91,28 +88,28 @@ impl Store {
         crate::store::machine::remove_state(self, machine_id).await
     }
 
-    pub(crate) async fn update_machine_config(
+    pub(crate) async fn save_machine_config(
         &self,
         config: &MachineConfig,
     ) -> Result<(), LibVmError> {
         crate::store::machine::update_config(self, config).await
     }
 
-    pub(crate) async fn get_machine_config_by_id(
+    pub(crate) async fn machine_config(
         &self,
         id: MachineId,
     ) -> Result<Option<MachineConfig>, LibVmError> {
         crate::store::machine::get_config_by_id(self, id).await
     }
 
-    pub(crate) async fn get_machine_config_by_name(
+    pub(crate) async fn machine_config_by_name(
         &self,
         name: &str,
     ) -> Result<Option<MachineConfig>, LibVmError> {
         crate::store::machine::get_config_by_name(self, name).await
     }
 
-    pub(crate) async fn get_machine_config_by_id_prefix(
+    pub(crate) async fn machine_configs_by_id_prefix(
         &self,
         prefix: &str,
     ) -> Result<Vec<MachineConfig>, LibVmError> {
@@ -131,38 +128,35 @@ impl Store {
         crate::store::machine::remove_machine(self, machine).await
     }
 
-    pub(crate) async fn get_network_attachment(
+    pub(crate) async fn network_attachment(
         &self,
         machine_id: MachineId,
     ) -> Result<Option<NetworkAttachment>, LibVmError> {
         crate::store::network::get_attachment(self, machine_id).await
     }
 
-    pub(crate) async fn get_network_instance(
+    pub(crate) async fn network_instance(
         &self,
         network_id: &str,
     ) -> Result<Option<NetworkInstance>, LibVmError> {
         crate::store::network::get_instance(self, network_id).await
     }
 
-    pub(crate) async fn upsert_network_instance(
+    pub(crate) async fn save_network_instance(
         &self,
         instance: &NetworkInstance,
     ) -> Result<(), LibVmError> {
         crate::store::network::upsert_instance(self, instance).await
     }
 
-    pub(crate) async fn upsert_network_attachment(
+    pub(crate) async fn attach_network(
         &self,
         attachment: &NetworkAttachment,
     ) -> Result<(), LibVmError> {
         crate::store::network::upsert_attachment(self, attachment).await
     }
 
-    pub(crate) async fn remove_network_attachment(
-        &self,
-        machine_id: MachineId,
-    ) -> Result<(), LibVmError> {
+    pub(crate) async fn detach_network(&self, machine_id: MachineId) -> Result<(), LibVmError> {
         crate::store::network::remove_attachment(self, machine_id).await
     }
 
@@ -170,21 +164,21 @@ impl Store {
         crate::store::network::remove_instance(self, network_id).await
     }
 
-    pub(crate) async fn get_network_instance_by_definition(
+    pub(crate) async fn network_instance_by_definition(
         &self,
         definition_name: &str,
     ) -> Result<Option<NetworkInstance>, LibVmError> {
         crate::store::network::get_instance_by_definition(self, definition_name).await
     }
 
-    pub(crate) async fn count_network_attachments(
+    pub(crate) async fn network_attachment_count(
         &self,
         network_id: &str,
     ) -> Result<u32, LibVmError> {
         crate::store::network::count_attachments(self, network_id).await
     }
 
-    pub(crate) async fn upsert_network_definition(
+    pub(crate) async fn define_network(
         &self,
         definition: &NetworkDefinition,
     ) -> Result<(), LibVmError> {
@@ -197,7 +191,7 @@ impl Store {
         crate::store::network::list_definitions(self).await
     }
 
-    pub(crate) async fn get_network_definition(
+    pub(crate) async fn network_definition(
         &self,
         name: &str,
     ) -> Result<Option<NetworkDefinition>, LibVmError> {
@@ -411,13 +405,11 @@ mod tests {
             .expect("add machine");
 
         assert_eq!(
-            db.get_machine_config_by_id(id)
-                .await
-                .expect("lookup config"),
+            db.machine_config(id).await.expect("lookup config"),
             Some(metadata)
         );
         assert_eq!(
-            db.get_machine_state(id).await.expect("lookup state"),
+            db.machine_state(id).await.expect("lookup state"),
             Some(state)
         );
     }
@@ -445,7 +437,7 @@ mod tests {
             .expect_err("state insert should fail");
 
         assert!(db
-            .get_machine_config_by_id(id)
+            .machine_config(id)
             .await
             .expect("lookup config")
             .is_none());
@@ -460,7 +452,7 @@ mod tests {
 
         db.insert_machine_config(&metadata).await.expect("insert");
         let found = db
-            .get_machine_config_by_name("devbox")
+            .machine_config_by_name("devbox")
             .await
             .expect("lookup")
             .expect("should find machine");
@@ -477,7 +469,7 @@ mod tests {
 
         db.insert_machine_config(&metadata).await.expect("insert");
         let found = db
-            .get_machine_config_by_id(id)
+            .machine_config(id)
             .await
             .expect("lookup")
             .expect("should find machine");
@@ -497,7 +489,7 @@ mod tests {
         let id_str = id.to_string();
         let prefix = &id_str[..8];
         let found = db
-            .get_machine_config_by_id_prefix(prefix)
+            .machine_configs_by_id_prefix(prefix)
             .await
             .expect("lookup");
 
@@ -534,7 +526,7 @@ mod tests {
             .await
             .expect("insert machine");
         let found = db
-            .get_machine_config_by_id(id)
+            .machine_config(id)
             .await
             .expect("lookup")
             .expect("machine exists");
@@ -634,9 +626,9 @@ mod tests {
         db.add_machine(&metadata, &state).await.expect("insert");
         db.remove_machine(&metadata).await.expect("remove");
 
-        let found = db.get_machine_config_by_id(id).await.expect("lookup");
+        let found = db.machine_config(id).await.expect("lookup");
         assert!(found.is_none());
-        assert!(db.get_machine_state(id).await.expect("lookup").is_none());
+        assert!(db.machine_state(id).await.expect("lookup").is_none());
     }
 
     #[tokio::test]
@@ -654,10 +646,10 @@ mod tests {
             updated_at: 43,
             ..machine_state(id, MachineRuntimeState::Running)
         };
-        db.upsert_machine_state(&state).await.expect("upsert state");
+        db.save_machine_state(&state).await.expect("upsert state");
 
         assert_eq!(
-            db.get_machine_state(id)
+            db.machine_state(id)
                 .await
                 .expect("get state")
                 .expect("state exists"),
@@ -673,11 +665,11 @@ mod tests {
         assert_eq!(updated_at, Some(43));
 
         db.remove_machine_state(id).await.expect("remove state");
-        assert!(db.get_machine_state(id).await.expect("get state").is_none());
+        assert!(db.machine_state(id).await.expect("get state").is_none());
     }
 
     #[tokio::test]
-    async fn update_machine_config_persists_config_json() {
+    async fn save_machine_config_persists_config_json() {
         let (_dir, paths) = temp_paths();
         let db = Store::new(&paths).await.expect("open db");
         let id = MachineId::new();
@@ -691,12 +683,12 @@ mod tests {
             .expect("sample config should include hardware")
             .cpus = Some(8);
         metadata.modified_at = 2;
-        db.update_machine_config(&metadata)
+        db.save_machine_config(&metadata)
             .await
             .expect("update config");
 
         let found = db
-            .get_machine_config_by_id(id)
+            .machine_config(id)
             .await
             .expect("lookup")
             .expect("machine exists");
@@ -742,32 +734,32 @@ mod tests {
             modified_at: 44,
         };
 
-        db.upsert_network_instance(&instance)
+        db.save_network_instance(&instance)
             .await
             .expect("upsert network instance");
-        db.upsert_network_attachment(&attachment)
+        db.attach_network(&attachment)
             .await
             .expect("upsert network attachment");
         assert_eq!(
-            db.get_network_instance(&network_id)
+            db.network_instance(&network_id)
                 .await
                 .expect("get network instance")
                 .expect("network instance exists"),
             instance
         );
         assert_eq!(
-            db.get_network_attachment(id)
+            db.network_attachment(id)
                 .await
                 .expect("get network attachment")
                 .expect("network attachment exists"),
             attachment
         );
 
-        db.remove_network_attachment(id)
+        db.detach_network(id)
             .await
             .expect("remove network attachment");
         assert!(db
-            .get_network_attachment(id)
+            .network_attachment(id)
             .await
             .expect("get network attachment")
             .is_none());
@@ -775,7 +767,7 @@ mod tests {
             .await
             .expect("remove network instance");
         assert!(db
-            .get_network_instance(&network_id)
+            .network_instance(&network_id)
             .await
             .expect("get network instance")
             .is_none());
@@ -844,7 +836,7 @@ mod tests {
         .expect("insert via db1");
 
         let found = db2
-            .get_machine_config_by_name("shared")
+            .machine_config_by_name("shared")
             .await
             .expect("lookup via db2")
             .expect("should find machine from other connection");

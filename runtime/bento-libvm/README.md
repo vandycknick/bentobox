@@ -34,13 +34,13 @@ The main shapes are:
 - `MachineCreate` and `MachineUpdate`, request DTOs for caller input.
 - `MachineInspectData`, an owned snapshot returned by inspect and mutation calls.
 
-## Runtime Roots Plan
+## Runtime Roots
 
 The first runtime open resolves root defaults from process configuration,
 creates `state.db`, and stores the resolved root contract in `db_config`. Later
 opens use that row to keep existing installs stable even if code defaults change.
 
-The persisted root contract should store only main roots:
+The persisted root contract stores only main roots:
 
 - `data_root`: durable manager state. `state.db`, machines, assets, keys, and
   `secrets.json` derive from this root.
@@ -48,8 +48,10 @@ The persisted root contract should store only main roots:
   derive from this root.
 - `image_root`: local image and cache storage.
 
-Derived paths should not be duplicated in `db_config` unless they become
-independently configurable. The intended derivation is:
+`db_config` is a singleton row with `id = 1`. It records `schema_version`, the
+host `os`, `data_root`, `run_root`, `image_root`, `created_at`, and
+`modified_at`. Derived paths are not duplicated in the row unless they become
+independently configurable. The derivation is:
 
 | Path           | Derived from             |
 | -------------- | ------------------------ |

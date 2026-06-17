@@ -300,7 +300,7 @@ impl Runtime {
 
         if self
             .db
-            .get_machine_config_by_name(name.as_str())
+            .machine_config_by_name(name.as_str())
             .await?
             .is_some()
         {
@@ -370,7 +370,7 @@ impl Runtime {
                 name: definition.name.clone(),
                 reason,
             })?;
-        self.db.upsert_network_definition(&definition.into()).await
+        self.db.define_network(&definition.into()).await
     }
 
     /// Lists all named network definitions.
@@ -389,7 +389,7 @@ impl Runtime {
         &self,
         name: &str,
     ) -> Result<Option<NetworkDefinition>, LibVmError> {
-        Ok(self.db.get_network_definition(name).await?.map(Into::into))
+        Ok(self.db.network_definition(name).await?.map(Into::into))
     }
 
     /// Removes a named network definition.
@@ -403,21 +403,22 @@ impl Runtime {
     ) -> Result<MachineConfig, LibVmError> {
         match machine.kind() {
             MachineRefKind::Id(id) => {
-                self.db.get_machine_config_by_id(*id).await?.ok_or_else(|| {
-                    LibVmError::MachineNotFound {
+                self.db
+                    .machine_config(*id)
+                    .await?
+                    .ok_or_else(|| LibVmError::MachineNotFound {
                         reference: id.to_string(),
+                    })
+            }
+            MachineRefKind::Name(name) => {
+                self.db.machine_config_by_name(name).await?.ok_or_else(|| {
+                    LibVmError::MachineNotFound {
+                        reference: name.clone(),
                     }
                 })
             }
-            MachineRefKind::Name(name) => self
-                .db
-                .get_machine_config_by_name(name)
-                .await?
-                .ok_or_else(|| LibVmError::MachineNotFound {
-                    reference: name.clone(),
-                }),
             MachineRefKind::IdPrefix(prefix) => {
-                let matches = self.db.get_machine_config_by_id_prefix(prefix).await?;
+                let matches = self.db.machine_configs_by_id_prefix(prefix).await?;
                 match matches.len() {
                     0 => Err(LibVmError::MachineNotFound {
                         reference: prefix.clone(),
@@ -472,7 +473,7 @@ impl Runtime {
         &self,
         metadata: &MachineConfig,
     ) -> Result<RuntimeStatus, LibVmError> {
-        let persisted = self.db.get_machine_state(metadata.id).await?;
+        let persisted = self.db.machine_state(metadata.id).await?;
         let observed = self
             .observe_machine_state(metadata, persisted.as_ref())
             .await?;
@@ -490,12 +491,12 @@ impl Runtime {
         &self,
         metadata: &MachineConfig,
     ) -> Result<RuntimeStatus, LibVmError> {
-        let persisted = self.db.get_machine_state(metadata.id).await?;
+        let persisted = self.db.machine_state(metadata.id).await?;
         let observed = self
             .observe_machine_state(metadata, persisted.as_ref())
             .await?;
         if machine_state_needs_writeback(persisted.as_ref(), &observed) {
-            self.db.upsert_machine_state(&observed).await?;
+            self.db.save_machine_state(&observed).await?;
         }
         Ok(RuntimeStatus::from_machine_state(&observed))
     }
@@ -613,7 +614,7 @@ impl Runtime {
         last_error: Option<String>,
     ) -> Result<(), LibVmError> {
         self.db
-            .upsert_machine_state(&MachineState {
+            .save_machine_state(&MachineState {
                 machine_id,
                 status,
                 vmmon_pid,
@@ -640,7 +641,7 @@ impl Runtime {
         event: transitions::Event,
     ) -> Result<MachineState, LibVmError> {
         let next = transitions::reduce(state, event, current_unix()).map_err(transition_error)?;
-        self.db.upsert_machine_state(&next).await?;
+        self.db.save_machine_state(&next).await?;
         Ok(next)
     }
 
@@ -779,7 +780,7 @@ impl Runtime {
             Err(TransitionError::StaleGeneration) => return Ok(()),
             Err(err) => return Err(transition_error(err)),
         };
-        self.db.upsert_machine_state(&next).await?;
+        self.db.save_machine_state(&next).await?;
         self.cleanup_machine_resources_locked(config).await
     }
 
@@ -795,12 +796,13 @@ impl Runtime {
         network: &ModelMachineNetworkConfig,
     ) -> Result<(), LibVmError> {
         if let ModelMachineNetworkConfig::Named { name } = network {
-            self.db.get_network_definition(name).await?.ok_or_else(|| {
-                LibVmError::NetworkRuntime {
+            self.db
+                .network_definition(name)
+                .await?
+                .ok_or_else(|| LibVmError::NetworkRuntime {
                     reference: name.clone(),
                     message: format!("named network {:?} is not defined", name),
-                }
-            })?;
+                })?;
         }
         Ok(())
     }
@@ -849,18 +851,18 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) async fn update_machine_config(
+    pub(crate) async fn save_machine_config(
         &self,
         config: &MachineConfig,
     ) -> Result<(), LibVmError> {
-        self.db.update_machine_config(config).await
+        self.db.save_machine_config(config).await
     }
 
     pub(crate) async fn machine_config_by_name(
         &self,
         name: &str,
     ) -> Result<Option<MachineConfig>, LibVmError> {
-        self.db.get_machine_config_by_name(name).await
+        self.db.machine_config_by_name(name).await
     }
 
     pub(crate) async fn remove_machine_records(
@@ -876,7 +878,7 @@ impl Runtime {
         &self,
         machine_id: MachineId,
     ) -> Result<MachineState, LibVmError> {
-        if let Some(state) = self.db.get_machine_state(machine_id).await? {
+        if let Some(state) = self.db.machine_state(machine_id).await? {
             return Ok(state);
         }
 
@@ -2301,7 +2303,7 @@ mod tests {
         let stale_age = i64::try_from(STALE_STARTING_TIMEOUT.as_secs()).expect("timeout fits i64");
         runtime
             .db
-            .upsert_machine_state(&MachineState {
+            .save_machine_state(&MachineState {
                 machine_id: machine.id,
                 status: MachineRuntimeState::Starting,
                 vmmon_pid: None,
@@ -2350,7 +2352,7 @@ mod tests {
         let stale_age = i64::try_from(STALE_STARTING_TIMEOUT.as_secs()).expect("timeout fits i64");
         runtime
             .db
-            .upsert_machine_state(&MachineState {
+            .save_machine_state(&MachineState {
                 machine_id: machine.id,
                 status: MachineRuntimeState::Starting,
                 vmmon_pid: None,

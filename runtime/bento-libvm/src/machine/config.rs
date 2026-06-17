@@ -24,7 +24,7 @@ impl Machine {
         config.spec = spec;
         config.modified_at = current_unix();
         write_machine_config(&config.instance_dir, &config.name, &config.spec)?;
-        if let Err(err) = runtime.update_machine_config(&config).await {
+        if let Err(err) = runtime.save_machine_config(&config).await {
             let _ = write_machine_config(&config.instance_dir, &config.name, &previous_spec);
             return Err(err);
         }
@@ -48,7 +48,7 @@ impl Machine {
         }
         config.network = network;
         config.modified_at = current_unix();
-        runtime.update_machine_config(&config).await?;
+        runtime.save_machine_config(&config).await?;
         runtime.machine_inspect_data(config).await
     }
 
@@ -146,7 +146,7 @@ impl Machine {
         if spec_changed {
             write_machine_config(&config.instance_dir, &config.name, &config.spec)?;
         }
-        if let Err(err) = runtime.update_machine_config(&config).await {
+        if let Err(err) = runtime.save_machine_config(&config).await {
             if spec_changed {
                 let _ = write_machine_config(&config.instance_dir, &config.name, &previous_spec);
             }

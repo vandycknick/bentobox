@@ -82,10 +82,7 @@ async fn prepare_netd_runtime(
     }
 
     if let Some(definition_name) = request.definition_name() {
-        if let Some(instance) = db
-            .get_network_instance_by_definition(definition_name)
-            .await?
-        {
+        if let Some(instance) = db.network_instance_by_definition(definition_name).await? {
             if instance_is_alive(&instance) {
                 return attach_existing_runtime(paths, db, metadata, &instance).await;
             }
@@ -178,7 +175,7 @@ async fn prepare_netd_runtime(
         pcap_path: pcap_path.clone(),
     };
     let now = now_unix();
-    db.upsert_network_instance(&NetworkInstance {
+    db.save_network_instance(&NetworkInstance {
         id: network_id.clone(),
         driver: DRIVER_NETD.to_string(),
         definition_name: request.definition_name().map(str::to_string),
@@ -190,7 +187,7 @@ async fn prepare_netd_runtime(
         modified_at: now,
     })
     .await?;
-    db.upsert_network_attachment(&NetworkAttachment {
+    db.attach_network(&NetworkAttachment {
         machine_id: metadata.id,
         network_instance_id: network_id,
         guest_mac: format_mac(mac),
@@ -233,7 +230,7 @@ async fn attach_existing_runtime(
     let now = now_unix();
     let mac = format_mac(mac_from_machine_id(metadata.id));
     let attachment = network_attachment_from_instance(instance, mac.clone())?;
-    db.upsert_network_attachment(&NetworkAttachment {
+    db.attach_network(&NetworkAttachment {
         machine_id: metadata.id,
         network_instance_id: instance.id.clone(),
         guest_mac: mac.clone(),

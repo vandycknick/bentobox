@@ -91,12 +91,13 @@ pub(crate) async fn prepare_network_runtime(
             .await
         }
         ModelMachineNetworkConfig::Named { name } => {
-            let definition = db.get_network_definition(&name).await?.ok_or_else(|| {
-                LibVmError::NetworkRuntime {
-                    reference: metadata.name.clone(),
-                    message: format!("named network {:?} is not defined", name),
-                }
-            })?;
+            let definition =
+                db.network_definition(&name)
+                    .await?
+                    .ok_or_else(|| LibVmError::NetworkRuntime {
+                        reference: metadata.name.clone(),
+                        message: format!("named network {:?} is not defined", name),
+                    })?;
             resolve_named_network(paths, db, metadata, &definition, config).await
         }
     }
@@ -108,15 +109,12 @@ pub(crate) async fn reconcile_network_runtime(
     metadata: &MachineConfig,
     monitor_running: bool,
 ) -> Result<(), LibVmError> {
-    let Some(attachment) = db.get_network_attachment(metadata.id).await? else {
+    let Some(attachment) = db.network_attachment(metadata.id).await? else {
         return Ok(());
     };
-    let Some(instance) = db
-        .get_network_instance(&attachment.network_instance_id)
-        .await?
-    else {
+    let Some(instance) = db.network_instance(&attachment.network_instance_id).await? else {
         remove_instance_network_link(paths, metadata.id)?;
-        db.remove_network_attachment(metadata.id).await?;
+        db.detach_network(metadata.id).await?;
         return Ok(());
     };
 
@@ -125,9 +123,9 @@ pub(crate) async fn reconcile_network_runtime(
         return Ok(());
     }
 
-    db.remove_network_attachment(metadata.id).await?;
+    db.detach_network(metadata.id).await?;
     remove_instance_network_link(paths, metadata.id)?;
-    if db.count_network_attachments(&instance.id).await? == 0 {
+    if db.network_attachment_count(&instance.id).await? == 0 {
         terminate_network_instance(&instance)?;
         db.remove_network_instance(&instance.id).await?;
         remove_runtime_dir(Path::new(&instance.runtime_dir))?;
@@ -237,17 +235,15 @@ pub(super) async fn remove_attached_network(
     db: &Store,
     machine_id: MachineId,
 ) -> Result<(), LibVmError> {
-    let Some(attachment) = db.get_network_attachment(machine_id).await? else {
+    let Some(attachment) = db.network_attachment(machine_id).await? else {
         remove_instance_network_link(paths, machine_id)?;
         return Ok(());
     };
-    let instance = db
-        .get_network_instance(&attachment.network_instance_id)
-        .await?;
-    db.remove_network_attachment(machine_id).await?;
+    let instance = db.network_instance(&attachment.network_instance_id).await?;
+    db.detach_network(machine_id).await?;
     remove_instance_network_link(paths, machine_id)?;
     if let Some(instance) = instance {
-        if db.count_network_attachments(&instance.id).await? == 0 {
+        if db.network_attachment_count(&instance.id).await? == 0 {
             terminate_network_instance(&instance)?;
             db.remove_network_instance(&instance.id).await?;
             remove_runtime_dir(Path::new(&instance.runtime_dir))?;

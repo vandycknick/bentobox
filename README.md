@@ -207,9 +207,15 @@ bento list
 bento ls --json
 ```
 
+## Local Runtime Storage
+
+BentoBox keeps durable VM state under a data root, transient runtime state under a run root, and local image storage under an image root. By default, the data root is `XDG_DATA_HOME/bento` or `~/.local/share/bento`, the run root is `XDG_RUNTIME_DIR/bento` when available or `data_root/run`, and the image root is `data_root/images`.
+
+The local state database is always `data_root/state.db`. On first open, BentoBox stores the resolved roots in `db_config`; later opens reuse that contract so existing installs do not move if defaults change. Derived directories stay predictable: machines, assets, keys, and `secrets.json` live below the data root; locks and network runtime directories live below the run root; image cache files live below the image root.
+
 ## Images
 
-BentoBox creates VMs from raw disk images registered in `~/.local/share/bento/images/registry.json`. The registry is intentionally small and manually editable:
+BentoBox creates VMs from raw disk images registered in the image root, which defaults to `~/.local/share/bento/images`. The registry is intentionally small and manually editable:
 
 ```json
 {
@@ -220,7 +226,7 @@ BentoBox creates VMs from raw disk images registered in `~/.local/share/bento/im
 }
 ```
 
-Registry paths are relative to `~/.local/share/bento/images` and must point to a `rootfs.img` file. For the example above, BentoBox clones or copies `~/.local/share/bento/images/sha256-abc123/rootfs.img` into the VM when creating from `ghcr.io/vandycknick/archlinuxarm:latest`.
+Registry paths are relative to the image root and must point to a `rootfs.img` file. With the default image root, the example above makes BentoBox clone or copy `~/.local/share/bento/images/sha256-abc123/rootfs.img` into the VM when creating from `ghcr.io/vandycknick/archlinuxarm:latest`.
 
 ## Introspection
 
