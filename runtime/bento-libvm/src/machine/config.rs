@@ -2,10 +2,9 @@ use bento_vm_spec::VmSpec;
 
 use crate::machine::{validate_machine_name, Machine, MachineData, MachineUpdate};
 use crate::network::MachineNetworkConfig;
-use crate::runtime::core::{
-    current_unix, empty_hardware, validate_root_disk_growth, write_machine_config,
-};
+use crate::runtime::core::{empty_hardware, validate_root_disk_growth, write_machine_config};
 use crate::store::models::MachineNetworkConfig as ModelMachineNetworkConfig;
+use crate::utils::now_unix;
 use crate::LibVmError;
 
 impl Machine {
@@ -22,7 +21,7 @@ impl Machine {
 
         let previous_spec = config.spec.clone();
         config.spec = spec;
-        config.modified_at = current_unix();
+        config.modified_at = now_unix();
         write_machine_config(&config.instance_dir, &config.name, &config.spec)?;
         if let Err(err) = runtime.save_machine_config(&config).await {
             let _ = write_machine_config(&config.instance_dir, &config.name, &previous_spec);
@@ -47,7 +46,7 @@ impl Machine {
             });
         }
         config.network = network;
-        config.modified_at = current_unix();
+        config.modified_at = now_unix();
         runtime.save_machine_config(&config).await?;
         runtime.machine_inspect_data(config).await
     }
@@ -142,7 +141,7 @@ impl Machine {
             config.network = network;
         }
 
-        config.modified_at = current_unix();
+        config.modified_at = now_unix();
         if spec_changed {
             write_machine_config(&config.instance_dir, &config.name, &config.spec)?;
         }

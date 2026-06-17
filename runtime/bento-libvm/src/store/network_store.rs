@@ -1,9 +1,8 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crate::store::models::MachineId;
 use crate::store::models::{NetworkAttachment, NetworkDefinition, NetworkInstance};
 use crate::store::row::{DbNetworkAttachment, DbNetworkDefinition, DbNetworkInstance};
 use crate::store::Store;
+use crate::utils::now_unix;
 use crate::LibVmError;
 
 impl Store {
@@ -142,7 +141,7 @@ impl Store {
         &self,
         definition: &NetworkDefinition,
     ) -> Result<(), LibVmError> {
-        let now = Self::now_unix();
+        let now = now_unix();
         sqlx::query(
             "INSERT INTO network_definitions (name, mode, driver_preference, created_at, modified_at)
              VALUES (?1, ?2, ?3, ?4, ?5)
@@ -218,12 +217,5 @@ impl Store {
             name: definition.name.clone(),
             reason: format!("serialize {field}: {err}"),
         })
-    }
-
-    fn now_unix() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64
     }
 }

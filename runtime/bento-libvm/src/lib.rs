@@ -31,6 +31,7 @@ mod paths;
 mod root_disk;
 mod runtime;
 mod store;
+mod utils;
 mod vmmon;
 
 pub use crate::error::LibVmError;

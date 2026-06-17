@@ -17,11 +17,12 @@ use crate::store::models::{
     MachineConfig, NetworkAttachment, NetworkInstance, NetworkInstanceState,
 };
 use crate::store::Store;
+use crate::utils::now_unix;
 use crate::{LibVmError, NetdRuntimeConfig, NetworkPolicyRef};
 
 use super::core::{NetworkAttachmentRequest, NetworkDriver, NetworkDriverContext};
 use super::{
-    ensure_instance_network_link, mac_from_machine_id, network_attachment_from_instance, now_unix,
+    ensure_instance_network_link, mac_from_machine_id, network_attachment_from_instance,
     remove_file_if_exists, remove_runtime_dir, serialize_json, DRIVER_NETD,
 };
 

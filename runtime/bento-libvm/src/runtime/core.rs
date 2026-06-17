@@ -31,6 +31,7 @@ use crate::store::models::{
     MachineState,
 };
 use crate::store::Store;
+use crate::utils::now_unix;
 use crate::vmmon::exit_status::{self, VmmonExitOutcome, VmmonExitStatus};
 use crate::vmmon::process::{self, ProcessIdentity};
 use crate::vmmon::Vmmon;
@@ -554,7 +555,7 @@ impl Runtime {
                 transitions::reduce(
                     stored_state,
                     transitions::Event::ExitObserved { clean, error },
-                    current_unix(),
+                    now_unix(),
                 )
                 .map_err(transition_error)?
             }
@@ -573,21 +574,19 @@ impl Runtime {
                             started_at,
                             run_id,
                         },
-                        current_unix(),
+                        now_unix(),
                     )
                     .map_err(transition_error)?
                 }
-                None if stale_starting => transitions::reduce(
-                    stored_state,
-                    transitions::Event::StartTimedOut,
-                    current_unix(),
-                )
-                .map_err(transition_error)?,
+                None if stale_starting => {
+                    transitions::reduce(stored_state, transitions::Event::StartTimedOut, now_unix())
+                        .map_err(transition_error)?
+                }
                 None if current_state == MachineRuntimeState::Starting => MachineState {
                     vmmon_pid: None,
                     started_at: None,
                     last_error: None,
-                    updated_at: current_unix(),
+                    updated_at: now_unix(),
                     ..stored_state
                 },
                 None => {
@@ -595,7 +594,7 @@ impl Runtime {
                     transitions::reduce(
                         stored_state,
                         transitions::Event::MonitorGone { last_error },
-                        current_unix(),
+                        now_unix(),
                     )
                     .map_err(transition_error)?
                 }
@@ -621,7 +620,7 @@ impl Runtime {
                 started_at,
                 run_id,
                 last_error,
-                updated_at: current_unix(),
+                updated_at: now_unix(),
             })
             .await
     }
@@ -640,7 +639,7 @@ impl Runtime {
         state: MachineState,
         event: transitions::Event,
     ) -> Result<MachineState, LibVmError> {
-        let next = transitions::reduce(state, event, current_unix()).map_err(transition_error)?;
+        let next = transitions::reduce(state, event, now_unix()).map_err(transition_error)?;
         self.db.save_machine_state(&next).await?;
         Ok(next)
     }
@@ -774,7 +773,7 @@ impl Runtime {
                 run_id: generation.run_id,
                 last_error,
             },
-            current_unix(),
+            now_unix(),
         ) {
             Ok(next) => next,
             Err(TransitionError::StaleGeneration) => return Ok(()),
@@ -1110,7 +1109,7 @@ fn exit_observed_event(status: &VmmonExitStatus) -> (bool, Option<String>) {
 
 fn state_is_older_than(state: &MachineState, age: Duration) -> bool {
     let age = i64::try_from(age.as_secs()).unwrap_or(i64::MAX);
-    current_unix().saturating_sub(state.updated_at) >= age
+    now_unix().saturating_sub(state.updated_at) >= age
 }
 
 fn machine_state_needs_writeback(
@@ -1173,13 +1172,6 @@ pub(crate) fn pid_file_mtime(pid_path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn current_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
 fn stopped_machine_state(machine_id: MachineId, last_error: Option<String>) -> MachineState {
     MachineState {
         machine_id,
@@ -1188,7 +1180,7 @@ fn stopped_machine_state(machine_id: MachineId, last_error: Option<String>) -> M
         started_at: None,
         run_id: None,
         last_error,
-        updated_at: current_unix(),
+        updated_at: now_unix(),
     }
 }
 
@@ -1217,7 +1209,7 @@ impl PendingMachine {
             }
         };
 
-        let now = current_unix();
+        let now = now_unix();
         let config = MachineConfig {
             id: self.id,
             lock_id: lock.id(),
@@ -1288,10 +1280,11 @@ fn create_staging_dir(paths: &LocalPaths) -> Result<PathBuf, LibVmError> {
 mod tests {
     use crate::paths::{root_disk_relative_path, LocalPaths};
     use crate::runtime::core::{
-        assign_mount_tags, current_unix, read_monitor_pid, PendingMachine, PendingMachineRequest,
-        Runtime, ROOT_DISK_KERNEL_ARG, STALE_STARTING_TIMEOUT,
+        assign_mount_tags, read_monitor_pid, PendingMachine, PendingMachineRequest, Runtime,
+        ROOT_DISK_KERNEL_ARG, STALE_STARTING_TIMEOUT,
     };
     use crate::store::models::{MachineId, MachineRuntimeState, MachineState};
+    use crate::utils::now_unix;
     use crate::vmmon::process::ProcessIdentity;
     use crate::{
         LibVmError, MachineCreate, MachineRef, MachineStatus, MachineUpdate,
@@ -2310,7 +2303,7 @@ mod tests {
                 started_at: None,
                 run_id: Some("run-1".to_string()),
                 last_error: None,
-                updated_at: current_unix() - stale_age - 1,
+                updated_at: now_unix() - stale_age - 1,
             })
             .await
             .expect("set stale starting state");
@@ -2359,7 +2352,7 @@ mod tests {
                 started_at: None,
                 run_id: Some("run-1".to_string()),
                 last_error: None,
-                updated_at: current_unix() - stale_age - 1,
+                updated_at: now_unix() - stale_age - 1,
             })
             .await
             .expect("set stale starting state");

@@ -1,12 +1,12 @@
 use std::env::consts::OS;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqlx::{Row, SqlitePool};
 
 use crate::paths::LocalRoots;
 use crate::store::models::DbConfig;
+use crate::utils::now_unix;
 use crate::{LibVmError, PathChoice, RuntimeConfig};
 
 const DB_CONFIG_ID: i64 = 1;
@@ -234,11 +234,4 @@ fn normalize_absolute_path(path: &Path) -> PathBuf {
         }
     }
     normalized
-}
-
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }

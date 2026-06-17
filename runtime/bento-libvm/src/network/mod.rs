@@ -1,7 +1,6 @@
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 mod api;
 mod core;
@@ -358,11 +357,4 @@ pub(super) fn remove_file_if_exists(path: &Path) -> Result<(), LibVmError> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err.into()),
     }
-}
-
-pub(super) fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
