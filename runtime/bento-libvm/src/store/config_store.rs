@@ -1,27 +1,26 @@
+use async_trait::async_trait;
 use sqlx::Row;
 
 use crate::store::models::DbConfig;
-use crate::store::Store;
+use crate::store::{ConfigStore, Store};
 use crate::utils::now_unix;
 use crate::LibVmError;
 
 const DB_CONFIG_ID: i64 = 1;
 
-impl Store {
-    pub(crate) async fn db_config(&self) -> Result<Option<DbConfig>, LibVmError> {
+#[async_trait]
+impl ConfigStore for Store {
+    async fn db_config(&self) -> Result<Option<DbConfig>, LibVmError> {
         self.read_single_db_config().await
     }
 
-    pub(crate) async fn read_or_seed_db_config(
-        &self,
-        seed: &DbConfig,
-    ) -> Result<DbConfig, LibVmError> {
-        if let Some(config) = self.db_config().await? {
+    async fn read_or_seed_db_config(&self, seed: &DbConfig) -> Result<DbConfig, LibVmError> {
+        if let Some(config) = self.read_single_db_config().await? {
             return Ok(config);
         }
 
         self.insert_db_config(seed).await?;
-        self.db_config()
+        self.read_single_db_config()
             .await?
             .ok_or(LibVmError::StateDatabaseConfigMismatch {
                 field: "db_config.row_count",
@@ -29,7 +28,9 @@ impl Store {
                 actual: "0".to_string(),
             })
     }
+}
 
+impl Store {
     async fn insert_db_config(&self, seed: &DbConfig) -> Result<(), LibVmError> {
         let now = now_unix();
         sqlx::query(

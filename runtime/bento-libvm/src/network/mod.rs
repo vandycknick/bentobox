@@ -22,7 +22,7 @@ use crate::store::models::{
     NetworkDriverPreference as ModelNetworkDriverPreference, NetworkInstance,
     NetworkTopology as ModelNetworkTopology,
 };
-use crate::store::Store;
+use crate::store::DataStore;
 use crate::{LibVmError, RuntimeNetworkingConfig};
 
 use self::core::{NetworkAttachmentRequest, NetworkDriver, NetworkDriverContext};
@@ -64,15 +64,15 @@ impl VmmonNetworkAttachment {
 
 pub(crate) async fn prepare_network_runtime(
     paths: &LocalPaths,
-    db: &Store,
+    store: &dyn DataStore,
     metadata: &MachineConfig,
     config: &RuntimeNetworkingConfig,
 ) -> Result<VmmonNetworkAttachment, LibVmError> {
-    reconcile_network_runtime(paths, db, metadata, false).await?;
+    reconcile_network_runtime(paths, store, metadata, false).await?;
 
     match metadata.network.clone() {
         ModelMachineNetworkConfig::None => {
-            remove_attached_network(paths, db, metadata.id).await?;
+            remove_attached_network(paths, store, metadata.id).await?;
             Ok(VmmonNetworkAttachment::None)
         }
         ModelMachineNetworkConfig::Private { policy_ref } => {
@@ -81,7 +81,7 @@ pub(crate) async fn prepare_network_runtime(
                 selected_private_driver(config.private_driver),
                 &NetworkDriverContext {
                     paths,
-                    db,
+                    store,
                     metadata,
                     config,
                 },
@@ -90,30 +90,32 @@ pub(crate) async fn prepare_network_runtime(
             .await
         }
         ModelMachineNetworkConfig::Named { name } => {
-            let definition =
-                db.network_definition(&name)
-                    .await?
-                    .ok_or_else(|| LibVmError::NetworkRuntime {
-                        reference: metadata.name.clone(),
-                        message: format!("named network {:?} is not defined", name),
-                    })?;
-            resolve_named_network(paths, db, metadata, &definition, config).await
+            let definition = store.network_definition(&name).await?.ok_or_else(|| {
+                LibVmError::NetworkRuntime {
+                    reference: metadata.name.clone(),
+                    message: format!("named network {:?} is not defined", name),
+                }
+            })?;
+            resolve_named_network(paths, store, metadata, &definition, config).await
         }
     }
 }
 
 pub(crate) async fn reconcile_network_runtime(
     paths: &LocalPaths,
-    db: &Store,
+    store: &dyn DataStore,
     metadata: &MachineConfig,
     monitor_running: bool,
 ) -> Result<(), LibVmError> {
-    let Some(attachment) = db.network_attachment(metadata.id).await? else {
+    let Some(attachment) = store.network_attachment(metadata.id).await? else {
         return Ok(());
     };
-    let Some(instance) = db.network_instance(&attachment.network_instance_id).await? else {
+    let Some(instance) = store
+        .network_instance(&attachment.network_instance_id)
+        .await?
+    else {
         remove_instance_network_link(paths, metadata.id)?;
-        db.detach_network(metadata.id).await?;
+        store.detach_network(metadata.id).await?;
         return Ok(());
     };
 
@@ -122,11 +124,11 @@ pub(crate) async fn reconcile_network_runtime(
         return Ok(());
     }
 
-    db.detach_network(metadata.id).await?;
+    store.detach_network(metadata.id).await?;
     remove_instance_network_link(paths, metadata.id)?;
-    if db.network_attachment_count(&instance.id).await? == 0 {
+    if store.network_attachment_count(&instance.id).await? == 0 {
         terminate_network_instance(&instance)?;
-        db.remove_network_instance(&instance.id).await?;
+        store.remove_network_instance(&instance.id).await?;
         remove_runtime_dir(Path::new(&instance.runtime_dir))?;
     }
     Ok(())
@@ -134,7 +136,7 @@ pub(crate) async fn reconcile_network_runtime(
 
 async fn resolve_named_network(
     paths: &LocalPaths,
-    db: &Store,
+    store: &dyn DataStore,
     metadata: &MachineConfig,
     definition: &ModelNetworkDefinition,
     config: &RuntimeNetworkingConfig,
@@ -152,7 +154,7 @@ async fn resolve_named_network(
                 selected_private_driver(driver),
                 &NetworkDriverContext {
                     paths,
-                    db,
+                    store,
                     metadata,
                     config,
                 },
@@ -231,20 +233,22 @@ async fn prepare_with_driver(
 
 pub(super) async fn remove_attached_network(
     paths: &LocalPaths,
-    db: &Store,
+    store: &dyn DataStore,
     machine_id: MachineId,
 ) -> Result<(), LibVmError> {
-    let Some(attachment) = db.network_attachment(machine_id).await? else {
+    let Some(attachment) = store.network_attachment(machine_id).await? else {
         remove_instance_network_link(paths, machine_id)?;
         return Ok(());
     };
-    let instance = db.network_instance(&attachment.network_instance_id).await?;
-    db.detach_network(machine_id).await?;
+    let instance = store
+        .network_instance(&attachment.network_instance_id)
+        .await?;
+    store.detach_network(machine_id).await?;
     remove_instance_network_link(paths, machine_id)?;
     if let Some(instance) = instance {
-        if db.network_attachment_count(&instance.id).await? == 0 {
+        if store.network_attachment_count(&instance.id).await? == 0 {
             terminate_network_instance(&instance)?;
-            db.remove_network_instance(&instance.id).await?;
+            store.remove_network_instance(&instance.id).await?;
             remove_runtime_dir(Path::new(&instance.runtime_dir))?;
         }
     }

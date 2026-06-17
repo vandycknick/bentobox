@@ -31,7 +31,7 @@ impl NetworkDriver for VzNatDriver {
         ctx: &NetworkDriverContext<'_>,
         _request: &NetworkAttachmentRequest<'_>,
     ) -> Result<VmmonNetworkAttachment, LibVmError> {
-        remove_attached_network(ctx.paths, ctx.db, ctx.metadata.id).await?;
+        remove_attached_network(ctx.paths, ctx.store, ctx.metadata.id).await?;
         let runtime_dir = ctx.paths.machine(ctx.metadata.id).network_link();
         fs::create_dir_all(&runtime_dir)?;
         Ok(VmmonNetworkAttachment::VzNat { mac: None })
@@ -51,7 +51,7 @@ mod tests {
     use crate::paths::LocalPaths;
     use crate::store::models::MachineId;
     use crate::store::models::{MachineConfig, MachineNetworkConfig};
-    use crate::store::Store;
+    use crate::store::MockDataStore;
     use crate::{NetdRuntimeConfig, RuntimeNetworkingConfig};
     use bento_vm_spec::VmSpec;
 
@@ -108,8 +108,13 @@ mod tests {
     async fn vznat_prepare_writes_instance_runtime_file() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let paths = LocalPaths::new(dir.path());
-        let db = Store::new(&paths).await.expect("open db");
         let machine_id = MachineId::new();
+        let mut store = MockDataStore::new();
+        store
+            .expect_network_attachment()
+            .withf(move |id| *id == machine_id)
+            .once()
+            .returning(|_| Ok(None));
         let metadata = machine_from_path(
             machine_id,
             "devbox".to_string(),
@@ -126,7 +131,7 @@ mod tests {
             .prepare(
                 &NetworkDriverContext {
                     paths: &paths,
-                    db: &db,
+                    store: &store,
                     metadata: &metadata,
                     config: &config,
                 },

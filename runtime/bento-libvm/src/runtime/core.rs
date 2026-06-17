@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::instance::prepare_instance_runtime;
@@ -30,7 +31,7 @@ use crate::store::models::{
     MachineConfig, MachineNetworkConfig as ModelMachineNetworkConfig, MachineRuntimeState,
     MachineState,
 };
-use crate::store::Store;
+use crate::store::{ConfigStore, DataStore, Store};
 use crate::utils::now_unix;
 use crate::vmmon::exit_status::{self, VmmonExitOutcome, VmmonExitStatus};
 use crate::vmmon::process::{self, ProcessIdentity};
@@ -81,7 +82,7 @@ impl RuntimeStatus {
 #[derive(Debug, Clone)]
 pub struct Runtime {
     paths: LocalPaths,
-    db: Store,
+    store: Arc<dyn DataStore>,
     lock_manager: LockManager,
     networking: RuntimeNetworkingConfig,
     vmmon: Vmmon,
@@ -128,17 +129,17 @@ impl Runtime {
     /// Opens a local runtime from explicit configuration.
     pub async fn new(config: RuntimeConfig) -> Result<Self, LibVmError> {
         let bootstrap_paths = config.bootstrap_paths()?;
-        let db = Store::open(bootstrap_paths.state_db_path()).await?;
-        let stored = match db.db_config().await? {
+        let store = Store::open(bootstrap_paths.state_db_path()).await?;
+        let stored = match store.db_config().await? {
             Some(stored) => stored,
             None => {
                 let seed = config.seed_db_config()?;
-                db.read_or_seed_db_config(&seed).await?
+                store.read_or_seed_db_config(&seed).await?
             }
         };
         let roots = config.resolve_store_roots(&stored, bootstrap_paths.state_db_path())?;
         let paths = LocalPaths::from_roots(roots);
-        Self::from_store(paths, db, config.networking).await
+        Self::from_store(paths, Arc::new(store), config.networking).await
     }
 
     /// Opens the default local runtime from the process environment.
@@ -151,19 +152,19 @@ impl Runtime {
         paths: LocalPaths,
         networking: RuntimeNetworkingConfig,
     ) -> Result<Self, LibVmError> {
-        let db = Store::new(&paths).await?;
-        Self::from_store(paths, db, networking).await
+        let store = Store::new(&paths).await?;
+        Self::from_store(paths, Arc::new(store), networking).await
     }
 
     async fn from_store(
         paths: LocalPaths,
-        db: Store,
+        store: Arc<dyn DataStore>,
         networking: RuntimeNetworkingConfig,
     ) -> Result<Self, LibVmError> {
         let lock_manager = LockManager::open(paths.locks_dir().to_path_buf())?;
         let runtime = Self {
             paths,
-            db,
+            store,
             lock_manager,
             networking,
             vmmon: Vmmon::new(),
@@ -310,7 +311,7 @@ impl Runtime {
         validate_machine_name(&name)?;
 
         if self
-            .db
+            .store
             .machine_config_by_name(name.as_str())
             .await?
             .is_some()
@@ -358,7 +359,7 @@ impl Runtime {
     }
 
     pub(crate) async fn list_machine_configs(&self) -> Result<Vec<MachineConfig>, LibVmError> {
-        let machines = self.db.list_machine_configs().await?;
+        let machines = self.store.list_machine_configs().await?;
         for config in &machines {
             self.reconcile_machine_runtime_best_effort(config).await?;
         }
@@ -367,7 +368,7 @@ impl Runtime {
 
     /// Allocates an unused generated machine name using the provided prefix.
     pub async fn allocate_ephemeral_name(&self, prefix: &str) -> Result<String, LibVmError> {
-        self.db.allocate_ephemeral_name(prefix).await
+        self.store.allocate_ephemeral_name(prefix).await
     }
 
     /// Creates a named network definition.
@@ -381,13 +382,13 @@ impl Runtime {
                 name: definition.name.clone(),
                 reason,
             })?;
-        self.db.define_network(&definition.into()).await
+        self.store.define_network(&definition.into()).await
     }
 
     /// Lists all named network definitions.
     pub async fn list_network_definitions(&self) -> Result<Vec<NetworkDefinition>, LibVmError> {
         Ok(self
-            .db
+            .store
             .list_network_definitions()
             .await?
             .into_iter()
@@ -400,12 +401,12 @@ impl Runtime {
         &self,
         name: &str,
     ) -> Result<Option<NetworkDefinition>, LibVmError> {
-        Ok(self.db.network_definition(name).await?.map(Into::into))
+        Ok(self.store.network_definition(name).await?.map(Into::into))
     }
 
     /// Removes a named network definition.
     pub async fn remove_network_definition(&self, name: &str) -> Result<(), LibVmError> {
-        self.db.remove_network_definition(name).await
+        self.store.remove_network_definition(name).await
     }
 
     pub(crate) async fn resolve_machine_config(
@@ -414,22 +415,22 @@ impl Runtime {
     ) -> Result<MachineConfig, LibVmError> {
         match machine.kind() {
             MachineRefKind::Id(id) => {
-                self.db
+                self.store
                     .machine_config(*id)
                     .await?
                     .ok_or_else(|| LibVmError::MachineNotFound {
                         reference: id.to_string(),
                     })
             }
-            MachineRefKind::Name(name) => {
-                self.db.machine_config_by_name(name).await?.ok_or_else(|| {
-                    LibVmError::MachineNotFound {
-                        reference: name.clone(),
-                    }
-                })
-            }
+            MachineRefKind::Name(name) => self
+                .store
+                .machine_config_by_name(name)
+                .await?
+                .ok_or_else(|| LibVmError::MachineNotFound {
+                    reference: name.clone(),
+                }),
             MachineRefKind::IdPrefix(prefix) => {
-                let matches = self.db.machine_configs_by_id_prefix(prefix).await?;
+                let matches = self.store.machine_configs_by_id_prefix(prefix).await?;
                 match matches.len() {
                     0 => Err(LibVmError::MachineNotFound {
                         reference: prefix.clone(),
@@ -484,7 +485,7 @@ impl Runtime {
         &self,
         metadata: &MachineConfig,
     ) -> Result<RuntimeStatus, LibVmError> {
-        let persisted = self.db.machine_state(metadata.id).await?;
+        let persisted = self.store.machine_state(metadata.id).await?;
         let observed = self
             .observe_machine_state(metadata, persisted.as_ref())
             .await?;
@@ -502,18 +503,18 @@ impl Runtime {
         &self,
         metadata: &MachineConfig,
     ) -> Result<RuntimeStatus, LibVmError> {
-        let persisted = self.db.machine_state(metadata.id).await?;
+        let persisted = self.store.machine_state(metadata.id).await?;
         let observed = self
             .observe_machine_state(metadata, persisted.as_ref())
             .await?;
         if machine_state_needs_writeback(persisted.as_ref(), &observed) {
-            self.db.save_machine_state(&observed).await?;
+            self.store.save_machine_state(&observed).await?;
         }
         Ok(RuntimeStatus::from_machine_state(&observed))
     }
 
     async fn refresh_active_machine_states(&self) -> Result<(), LibVmError> {
-        for config in self.db.list_machine_configs().await? {
+        for config in self.store.list_machine_configs().await? {
             let state = self.machine_state(config.id).await?;
             if !RuntimeStatus::from_machine_state(&state).is_active() {
                 continue;
@@ -523,7 +524,13 @@ impl Runtime {
                 continue;
             };
             let status = self.reconcile_machine_runtime_locked(&config).await?;
-            reconcile_network_runtime(&self.paths, &self.db, &config, status.is_active()).await?;
+            reconcile_network_runtime(
+                &self.paths,
+                self.store.as_ref(),
+                &config,
+                status.is_active(),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -622,7 +629,7 @@ impl Runtime {
         run_id: Option<String>,
         last_error: Option<String>,
     ) -> Result<(), LibVmError> {
-        self.db
+        self.store
             .save_machine_state(&MachineState {
                 machine_id,
                 status,
@@ -650,7 +657,7 @@ impl Runtime {
         event: transitions::Event,
     ) -> Result<MachineState, LibVmError> {
         let next = transitions::reduce(state, event, now_unix()).map_err(transition_error)?;
-        self.db.save_machine_state(&next).await?;
+        self.store.save_machine_state(&next).await?;
         Ok(next)
     }
 
@@ -789,7 +796,7 @@ impl Runtime {
             Err(TransitionError::StaleGeneration) => return Ok(()),
             Err(err) => return Err(transition_error(err)),
         };
-        self.db.save_machine_state(&next).await?;
+        self.store.save_machine_state(&next).await?;
         self.cleanup_machine_resources_locked(config).await
     }
 
@@ -797,7 +804,7 @@ impl Runtime {
         &self,
         config: &MachineConfig,
     ) -> Result<(), LibVmError> {
-        reconcile_network_runtime(&self.paths, &self.db, config, false).await
+        reconcile_network_runtime(&self.paths, self.store.as_ref(), config, false).await
     }
 
     pub(crate) async fn validate_machine_network_config(
@@ -805,13 +812,12 @@ impl Runtime {
         network: &ModelMachineNetworkConfig,
     ) -> Result<(), LibVmError> {
         if let ModelMachineNetworkConfig::Named { name } = network {
-            self.db
-                .network_definition(name)
-                .await?
-                .ok_or_else(|| LibVmError::NetworkRuntime {
+            self.store.network_definition(name).await?.ok_or_else(|| {
+                LibVmError::NetworkRuntime {
                     reference: name.clone(),
                     message: format!("named network {:?} is not defined", name),
-                })?;
+                }
+            })?;
         }
         Ok(())
     }
@@ -820,7 +826,7 @@ impl Runtime {
         &self,
         config: &MachineConfig,
     ) -> Result<VmmonNetworkAttachment, LibVmError> {
-        prepare_network_runtime(&self.paths, &self.db, config, &self.networking).await
+        prepare_network_runtime(&self.paths, self.store.as_ref(), config, &self.networking).await
     }
 
     pub(crate) async fn reconcile_machine_network(
@@ -828,7 +834,7 @@ impl Runtime {
         config: &MachineConfig,
         monitor_running: bool,
     ) -> Result<(), LibVmError> {
-        reconcile_network_runtime(&self.paths, &self.db, config, monitor_running).await
+        reconcile_network_runtime(&self.paths, self.store.as_ref(), config, monitor_running).await
     }
 
     pub(crate) fn prepare_machine_instance_runtime(
@@ -864,21 +870,21 @@ impl Runtime {
         &self,
         config: &MachineConfig,
     ) -> Result<(), LibVmError> {
-        self.db.save_machine_config(config).await
+        self.store.save_machine_config(config).await
     }
 
     pub(crate) async fn machine_config_by_name(
         &self,
         name: &str,
     ) -> Result<Option<MachineConfig>, LibVmError> {
-        self.db.machine_config_by_name(name).await
+        self.store.machine_config_by_name(name).await
     }
 
     pub(crate) async fn remove_machine_records(
         &self,
         config: &MachineConfig,
     ) -> Result<(), LibVmError> {
-        self.db.remove_machine(config).await?;
+        self.store.remove_machine(config).await?;
         self.lock_manager.free(config.lock_id)?;
         Ok(())
     }
@@ -887,7 +893,7 @@ impl Runtime {
         &self,
         machine_id: MachineId,
     ) -> Result<MachineState, LibVmError> {
-        if let Some(state) = self.db.machine_state(machine_id).await? {
+        if let Some(state) = self.store.machine_state(machine_id).await? {
             return Ok(state);
         }
 
@@ -1235,7 +1241,7 @@ impl PendingMachine {
             network: self.network.clone(),
         };
         let initial_state = stopped_machine_state(self.id, None);
-        if let Err(err) = runtime.db.add_machine(&config, &initial_state).await {
+        if let Err(err) = runtime.store.add_machine(&config, &initial_state).await {
             let _ = lock.free();
             let _ = fs::remove_dir_all(&self.final_dir);
             return Err(err);
@@ -1293,7 +1299,10 @@ mod tests {
         assign_mount_tags, read_monitor_pid, PendingMachine, PendingMachineRequest, Runtime,
         ROOT_DISK_KERNEL_ARG, STALE_STARTING_TIMEOUT,
     };
-    use crate::store::models::{MachineId, MachineRuntimeState, MachineState};
+    use crate::store::models::{
+        MachineId, MachineNetworkConfig, MachineRuntimeState, MachineState,
+    };
+    use crate::store::MockDataStore;
     use crate::utils::now_unix;
     use crate::vmmon::process::ProcessIdentity;
     use crate::{
@@ -1303,6 +1312,7 @@ mod tests {
     use bento_vm_spec::{Boot, Guest, GuestOs, Hardware, Kernel, Mount, Storage, VmSpec};
     use std::io::Read;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn sample_vm_spec() -> VmSpec {
@@ -1498,6 +1508,39 @@ mod tests {
         machine_ref: MachineRef,
     ) -> Result<crate::MachineData, LibVmError> {
         runtime.get_machine(&machine_ref).await?.inspect().await
+    }
+
+    #[tokio::test]
+    async fn validate_named_network_config_uses_store_boundary() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let paths = LocalPaths::new(temp.path().join("bento"));
+        let mut store = MockDataStore::new();
+        store
+            .expect_list_machine_configs()
+            .once()
+            .returning(|| Ok(Vec::new()));
+        store
+            .expect_network_definition()
+            .withf(|name| name == "devnet")
+            .once()
+            .returning(|_| Ok(None));
+        let runtime =
+            Runtime::from_store(paths, Arc::new(store), RuntimeNetworkingConfig::default())
+                .await
+                .expect("create runtime with mock store");
+
+        let err = runtime
+            .validate_machine_network_config(&MachineNetworkConfig::Named {
+                name: "devnet".to_string(),
+            })
+            .await
+            .expect_err("missing named network should fail validation");
+
+        assert!(matches!(
+            err,
+            LibVmError::NetworkRuntime { ref reference, ref message }
+                if reference == "devnet" && message.contains("not defined")
+        ));
     }
 
     #[tokio::test]
@@ -2305,7 +2348,7 @@ mod tests {
             .expect("commit machine");
         let stale_age = i64::try_from(STALE_STARTING_TIMEOUT.as_secs()).expect("timeout fits i64");
         runtime
-            .db
+            .store
             .save_machine_state(&MachineState {
                 machine_id: machine.id,
                 status: MachineRuntimeState::Starting,
@@ -2354,7 +2397,7 @@ mod tests {
             .expect("commit machine");
         let stale_age = i64::try_from(STALE_STARTING_TIMEOUT.as_secs()).expect("timeout fits i64");
         runtime
-            .db
+            .store
             .save_machine_state(&MachineState {
                 machine_id: machine.id,
                 status: MachineRuntimeState::Starting,

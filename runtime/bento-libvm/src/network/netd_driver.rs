@@ -16,7 +16,7 @@ use crate::store::models::MachineId;
 use crate::store::models::{
     MachineConfig, NetworkAttachment, NetworkInstance, NetworkInstanceState,
 };
-use crate::store::Store;
+use crate::store::DataStore;
 use crate::utils::now_unix;
 use crate::{LibVmError, NetdRuntimeConfig, NetworkPolicyRef};
 
@@ -72,7 +72,7 @@ async fn prepare_netd_runtime(
     request: &NetworkAttachmentRequest<'_>,
 ) -> Result<super::VmmonNetworkAttachment, LibVmError> {
     let paths = ctx.paths;
-    let db = ctx.db;
+    let store = ctx.store;
     let metadata = ctx.metadata;
     let config = ctx.config.netd.clone();
     if !host_uses_user_network_runtime() {
@@ -83,11 +83,14 @@ async fn prepare_netd_runtime(
     }
 
     if let Some(definition_name) = request.definition_name() {
-        if let Some(instance) = db.network_instance_by_definition(definition_name).await? {
+        if let Some(instance) = store
+            .network_instance_by_definition(definition_name)
+            .await?
+        {
             if instance_is_alive(&instance) {
-                return attach_existing_runtime(paths, db, metadata, &instance).await;
+                return attach_existing_runtime(paths, store, metadata, &instance).await;
             }
-            db.remove_network_instance(&instance.id).await?;
+            store.remove_network_instance(&instance.id).await?;
             remove_runtime_dir(Path::new(&instance.runtime_dir))?;
         }
     }
@@ -176,26 +179,28 @@ async fn prepare_netd_runtime(
         pcap_path: pcap_path.clone(),
     };
     let now = now_unix();
-    db.save_network_instance(&NetworkInstance {
-        id: network_id.clone(),
-        driver: DRIVER_NETD.to_string(),
-        definition_name: request.definition_name().map(str::to_string),
-        runtime_dir: runtime_dir.display().to_string(),
-        attachment_json: serialize_json(&network, "network attachment")?,
-        driver_state_json: serialize_json(&driver_state, "netd driver state")?,
-        state: NetworkInstanceState::Running,
-        created_at: now,
-        modified_at: now,
-    })
-    .await?;
-    db.attach_network(&NetworkAttachment {
-        machine_id: metadata.id,
-        network_instance_id: network_id,
-        guest_mac: format_mac(mac),
-        created_at: now,
-        modified_at: now,
-    })
-    .await?;
+    store
+        .save_network_instance(&NetworkInstance {
+            id: network_id.clone(),
+            driver: DRIVER_NETD.to_string(),
+            definition_name: request.definition_name().map(str::to_string),
+            runtime_dir: runtime_dir.display().to_string(),
+            attachment_json: serialize_json(&network, "network attachment")?,
+            driver_state_json: serialize_json(&driver_state, "netd driver state")?,
+            state: NetworkInstanceState::Running,
+            created_at: now,
+            modified_at: now,
+        })
+        .await?;
+    store
+        .attach_network(&NetworkAttachment {
+            machine_id: metadata.id,
+            network_instance_id: network_id,
+            guest_mac: format_mac(mac),
+            created_at: now,
+            modified_at: now,
+        })
+        .await?;
     Ok(network)
 }
 
@@ -223,7 +228,7 @@ fn host_uses_user_network_runtime() -> bool {
 
 async fn attach_existing_runtime(
     paths: &LocalPaths,
-    db: &Store,
+    store: &dyn DataStore,
     metadata: &MachineConfig,
     instance: &NetworkInstance,
 ) -> Result<super::VmmonNetworkAttachment, LibVmError> {
@@ -231,14 +236,15 @@ async fn attach_existing_runtime(
     let now = now_unix();
     let mac = format_mac(mac_from_machine_id(metadata.id));
     let attachment = network_attachment_from_instance(instance, mac.clone())?;
-    db.attach_network(&NetworkAttachment {
-        machine_id: metadata.id,
-        network_instance_id: instance.id.clone(),
-        guest_mac: mac.clone(),
-        created_at: now,
-        modified_at: now,
-    })
-    .await?;
+    store
+        .attach_network(&NetworkAttachment {
+            machine_id: metadata.id,
+            network_instance_id: instance.id.clone(),
+            guest_mac: mac.clone(),
+            created_at: now,
+            modified_at: now,
+        })
+        .await?;
     Ok(attachment)
 }
 

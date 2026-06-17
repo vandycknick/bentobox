@@ -8,6 +8,8 @@ use sqlx::SqlitePool;
 use crate::paths::LocalPaths;
 #[cfg(test)]
 use crate::store::models::DbConfig;
+#[cfg(test)]
+use crate::store::ConfigStore;
 use crate::LibVmError;
 
 #[derive(Debug, Clone)]
@@ -67,7 +69,7 @@ mod tests {
         MachineConfig, MachineNetworkConfig, MachineRuntimeState, MachineState, NetworkAttachment,
         NetworkInstance, NetworkInstanceState,
     };
-    use crate::store::Store;
+    use crate::store::{ConfigStore, MachineStore, NetworkStore, Store};
 
     fn temp_paths() -> (tempfile::TempDir, LocalPaths) {
         let dir = tempfile::tempdir().expect("create temp dir");

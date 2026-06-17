@@ -8,6 +8,7 @@ bento-agent-spec = { path = "../../specs/bento-agent-spec" }
 bento-protocol = { path = "../../specs/bento-protocol" }
 bento-vm-spec = { path = "../../specs/bento-vm-spec" }
 bento-utils = { path = "../../common/bento-utils" }
+async-trait = "0.1.89"
 eyre = "0.6.12"
 getrandom = "0.4.2"
 hyper-util = "0.1.20"
@@ -26,4 +27,5 @@ tower = "0.5.3"
 uuid = { version = "1.19.0", features = ["v4", "serde"] }
 
 [dev-dependencies]
+mockall = "0.14.0"
 tempfile = "3.27.0"

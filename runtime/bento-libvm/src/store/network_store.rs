@@ -1,12 +1,15 @@
+use async_trait::async_trait;
+
 use crate::store::models::MachineId;
 use crate::store::models::{NetworkAttachment, NetworkDefinition, NetworkInstance};
 use crate::store::row::{DbNetworkAttachment, DbNetworkDefinition, DbNetworkInstance};
-use crate::store::Store;
+use crate::store::{NetworkStore, Store};
 use crate::utils::now_unix;
 use crate::LibVmError;
 
-impl Store {
-    pub(crate) async fn network_attachment(
+#[async_trait]
+impl NetworkStore for Store {
+    async fn network_attachment(
         &self,
         machine_id: MachineId,
     ) -> Result<Option<NetworkAttachment>, LibVmError> {
@@ -20,7 +23,7 @@ impl Store {
         Ok(attachment.map(|DbNetworkAttachment(attachment)| attachment))
     }
 
-    pub(crate) async fn network_instance(
+    async fn network_instance(
         &self,
         network_id: &str,
     ) -> Result<Option<NetworkInstance>, LibVmError> {
@@ -35,10 +38,7 @@ impl Store {
         Ok(instance.map(|DbNetworkInstance(instance)| instance))
     }
 
-    pub(crate) async fn save_network_instance(
-        &self,
-        instance: &NetworkInstance,
-    ) -> Result<(), LibVmError> {
+    async fn save_network_instance(&self, instance: &NetworkInstance) -> Result<(), LibVmError> {
         sqlx::query(
             "INSERT INTO network_instances
                 (id, driver, definition_name, runtime_dir, attachment_json, driver_state_json,
@@ -67,10 +67,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) async fn attach_network(
-        &self,
-        attachment: &NetworkAttachment,
-    ) -> Result<(), LibVmError> {
+    async fn attach_network(&self, attachment: &NetworkAttachment) -> Result<(), LibVmError> {
         sqlx::query(
             "INSERT INTO network_attachments
                 (machine_id, network_instance_id, guest_mac, created_at, modified_at)
@@ -90,7 +87,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) async fn detach_network(&self, machine_id: MachineId) -> Result<(), LibVmError> {
+    async fn detach_network(&self, machine_id: MachineId) -> Result<(), LibVmError> {
         sqlx::query("DELETE FROM network_attachments WHERE machine_id = ?1")
             .bind(machine_id.to_string())
             .execute(&self.pool)
@@ -98,7 +95,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) async fn remove_network_instance(&self, network_id: &str) -> Result<(), LibVmError> {
+    async fn remove_network_instance(&self, network_id: &str) -> Result<(), LibVmError> {
         sqlx::query("DELETE FROM network_instances WHERE id = ?1")
             .bind(network_id)
             .execute(&self.pool)
@@ -106,7 +103,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) async fn network_instance_by_definition(
+    async fn network_instance_by_definition(
         &self,
         definition_name: &str,
     ) -> Result<Option<NetworkInstance>, LibVmError> {
@@ -121,10 +118,7 @@ impl Store {
         Ok(instance.map(|DbNetworkInstance(instance)| instance))
     }
 
-    pub(crate) async fn network_attachment_count(
-        &self,
-        network_id: &str,
-    ) -> Result<u32, LibVmError> {
+    async fn network_attachment_count(&self, network_id: &str) -> Result<u32, LibVmError> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM network_attachments WHERE network_instance_id = ?1",
         )
@@ -137,10 +131,7 @@ impl Store {
         })
     }
 
-    pub(crate) async fn define_network(
-        &self,
-        definition: &NetworkDefinition,
-    ) -> Result<(), LibVmError> {
+    async fn define_network(&self, definition: &NetworkDefinition) -> Result<(), LibVmError> {
         let now = now_unix();
         sqlx::query(
             "INSERT INTO network_definitions (name, mode, driver_preference, created_at, modified_at)
@@ -168,9 +159,7 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) async fn list_network_definitions(
-        &self,
-    ) -> Result<Vec<NetworkDefinition>, LibVmError> {
+    async fn list_network_definitions(&self) -> Result<Vec<NetworkDefinition>, LibVmError> {
         let rows = sqlx::query_as::<_, DbNetworkDefinition>(
             "SELECT name, mode, driver_preference, created_at, modified_at
              FROM network_definitions ORDER BY name",
@@ -183,7 +172,7 @@ impl Store {
             .collect())
     }
 
-    pub(crate) async fn network_definition(
+    async fn network_definition(
         &self,
         name: &str,
     ) -> Result<Option<NetworkDefinition>, LibVmError> {
@@ -197,14 +186,16 @@ impl Store {
         Ok(definition.map(|DbNetworkDefinition(definition)| definition))
     }
 
-    pub(crate) async fn remove_network_definition(&self, name: &str) -> Result<(), LibVmError> {
+    async fn remove_network_definition(&self, name: &str) -> Result<(), LibVmError> {
         sqlx::query("DELETE FROM network_definitions WHERE name = ?1")
             .bind(name)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
+}
 
+impl Store {
     fn serialize_definition_field<T>(
         definition: &NetworkDefinition,
         field: &str,
