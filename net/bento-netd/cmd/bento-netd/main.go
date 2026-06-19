@@ -8,14 +8,17 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/transport"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/config"
+	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/audit"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/forwarder"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/hooks"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/gateway/router"
+	"github.com/nickvan/bentobox/net/bento-netd/internal/policy"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/secrets"
 	"github.com/nickvan/bentobox/net/bento-netd/internal/virtualnetwork"
 	log "github.com/sirupsen/logrus"
@@ -41,6 +44,7 @@ func run(args []string) error {
 	if err := configureLogging(cfg.LogFile); err != nil {
 		return err
 	}
+	logPolicyWarnings(cfg.Policy)
 	if cfg.PIDFile != "" {
 		if err := writePIDFile(cfg.PIDFile); err != nil {
 			return err
@@ -52,7 +56,12 @@ func run(args []string) error {
 	defer cancel()
 
 	hook := hooks.NewPolicyHook(cfg.Policy)
-	route := router.New(hook, nil)
+	auditLog, err := openAuditLogger(cfg.LogFile)
+	if err != nil {
+		return err
+	}
+	defer auditLog.Close()
+	route := router.New(hook, auditLog)
 	var secretStore secrets.Store
 	if cfg.SecretStore != "" {
 		secretStore = secrets.NewFileStore(cfg.SecretStore)
@@ -91,6 +100,34 @@ func run(args []string) error {
 	})
 	slog.Info("netd ready", "listen_vfkit", cfg.ListenVfkit, "subnet", cfg.Stack.Subnet)
 	return group.Wait()
+}
+
+func logPolicyWarnings(compiled *policy.Policy) {
+	if compiled == nil {
+		return
+	}
+	for _, warning := range compiled.Warnings() {
+		slog.Warn("policy load warning", "warning", warning)
+	}
+}
+
+func openAuditLogger(logFile string) (*audit.Logger, error) {
+	auditPath := auditPathForLogFile(logFile)
+	if auditPath == "" {
+		return nil, nil
+	}
+	auditLog, err := audit.Open(auditPath)
+	if err != nil {
+		return nil, fmt.Errorf("open audit log %s: %w", auditPath, err)
+	}
+	return auditLog, nil
+}
+
+func auditPathForLogFile(logFile string) string {
+	if logFile == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(logFile), "audit.jsonl")
 }
 
 func configureLogging(logFile string) error {

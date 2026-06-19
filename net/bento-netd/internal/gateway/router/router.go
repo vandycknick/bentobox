@@ -31,6 +31,7 @@ func (r *Router) Decide(ctx context.Context, flow hooks.Flow) (hooks.RouteDecisi
 	if err != nil {
 		return hooks.RouteDecision{}, err
 	}
+	r.audit.RecordFlow(flow, decision)
 	slog.Info("network flow decision",
 		"action", decision.Action,
 		"layer", decision.Layer,
@@ -89,6 +90,7 @@ func (r *Router) DecideHTTP(ctx context.Context, request hooks.HTTPRequest) (hoo
 	if err != nil {
 		return hooks.RouteDecision{}, err
 	}
+	r.audit.RecordHTTP(request, decision)
 	slog.Info("http flow decision",
 		"action", decision.Action,
 		"layer", decision.Layer,
