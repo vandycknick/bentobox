@@ -129,6 +129,24 @@ endpoint "http" "metadata" {
 	assertNoUpstreamAccept(t, acceptedCh)
 }
 
+func TestRequestPathUsesParsedPath(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "http://metadata.internal/%7Euser?raw=%2Fignored", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := requestPath(request); got != "/~user" {
+		t.Fatalf("expected parsed path /~user, got %q", got)
+	}
+
+	request, err = http.NewRequest(http.MethodGet, "http://metadata.internal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := requestPath(request); got != "/" {
+		t.Fatalf("expected empty path fallback /, got %q", got)
+	}
+}
+
 func testRoute(t *testing.T, text string) *router.Router {
 	t.Helper()
 	dir := t.TempDir()

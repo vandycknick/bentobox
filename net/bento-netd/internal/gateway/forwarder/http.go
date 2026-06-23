@@ -101,7 +101,7 @@ func proxyPlainHTTPRequest(client net.Conn, target string, req *http.Request) er
 }
 
 func requestPath(req *http.Request) string {
-	path := req.URL.EscapedPath()
+	path := req.URL.Path
 	if path == "" {
 		return "/"
 	}

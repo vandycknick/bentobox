@@ -2,6 +2,7 @@ package policy
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -147,6 +148,78 @@ rule "http-family-read" {
 	https := compiled.EvaluateHTTP(HTTPRequest{EndpointKind: "https", Host: "api.github.com:443", Method: http.MethodGet, Path: "/repos"})
 	if https.Action != ActionAllow || https.EndpointKind != "https" {
 		t.Fatalf("expected https allow, got %#v", https)
+	}
+}
+
+func TestHTTPCELRequestFacets(t *testing.T) {
+	request := HTTPRequest{
+		EndpointKind: "https",
+		Host:         "api.example.com:443",
+		Method:       "gEt",
+		Path:         "/decoded/path",
+		Query:        "tag=one&tag=two&space=a+b&encoded=x%2Fy",
+		Header: http.Header{
+			"Authorization": {"Bearer token"},
+			"X-Token":       {"secret"},
+			"x-token":       {"second"},
+		},
+	}
+
+	tests := []struct {
+		name      string
+		condition string
+	}{
+		{name: "method equality", condition: "http.method == 'GET'"},
+		{name: "method reversed equality", condition: "'GeT' == http.method"},
+		{name: "method membership", condition: "http.method in ['POST', 'GET']"},
+		{name: "method prefix", condition: "http.method.startsWith('GE')"},
+		{name: "host", condition: "http.host == 'api.example.com'"},
+		{name: "path", condition: "http.path == '/decoded/path'"},
+		{name: "query repeated", condition: "http.query['tag'] == ['one', 'two']"},
+		{name: "query percent decoded", condition: "http.query['space'][0] == 'a b' && http.query['encoded'][0] == 'x/y'"},
+		{name: "query missing", condition: "size(http.query['missing']) == 0"},
+		{name: "query field select", condition: "http.query.tag[1] == 'two'"},
+		{name: "headers case insensitive", condition: "http.headers['x-token'][0] == 'secret' && http.headers['X-TOKEN'][1] == 'second'"},
+		{name: "headers missing", condition: "size(http.headers['missing']) == 0"},
+		{name: "headers field select", condition: "http.headers.authorization[0] == 'Bearer token'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			compiled := loadPolicy(t, httpConditionPolicy(tt.condition))
+			decision := compiled.EvaluateHTTP(request)
+			if decision.Action != ActionAllow || decision.RuleName != "allow" {
+				_, matchErr := compiled.httpRules[0].matchesHTTP(request)
+				t.Fatalf("expected condition %q to allow, got %#v (condition error: %v)", tt.condition, decision, matchErr)
+			}
+		})
+	}
+}
+
+func TestHTTPCELRequestFacetLoadErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		condition string
+	}{
+		{name: "parse error", condition: "http.method =="},
+		{name: "body unavailable", condition: "http.body == ''"},
+		{name: "body json unavailable", condition: "http.body_json.enabled == true"},
+		{name: "scalar header alias unavailable", condition: "http.header.authorization == 'Bearer token'"},
+		{name: "raw path unavailable", condition: "http.raw_path == '/raw'"},
+		{name: "escaped path unavailable", condition: "http.escaped_path == '/escaped'"},
+		{name: "unknown variable", condition: "http.unknown == 'value'"},
+		{name: "non bool result", condition: "http.method"},
+		{name: "query type mismatch", condition: "http.query == 'tag=one'"},
+		{name: "header list scalar mismatch", condition: "http.headers['authorization'] == 'Bearer token'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadPolicyError(t, httpConditionPolicy(tt.condition))
+			if err == nil {
+				t.Fatalf("expected condition %q to fail policy load", tt.condition)
+			}
+		})
 	}
 }
 
@@ -658,6 +731,10 @@ endpoint "https" "api" {
 
 func TestConditionRuntimeErrorsFailClosed(t *testing.T) {
 	compiled := loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
 endpoint "https" "api" {
   hosts = ["api.example.com"]
 }
@@ -666,11 +743,18 @@ rule "bad-condition" {
   endpoint = https.api
   condition = "http.headers['x-missing'][0] == 'yes'"
   verdict = "allow"
+  priority = 20
+}
+
+rule "lower-allow" {
+  endpoint = https.api
+  verdict = "allow"
+  priority = 10
 }
 `)
 
 	decision := compiled.EvaluateHTTP(HTTPRequest{EndpointKind: "https", Host: "api.example.com", Method: http.MethodGet, Path: "/"})
-	if decision.Action != ActionDeny || decision.Reason != "condition_error" {
+	if decision.Action != ActionDeny || decision.Reason != "condition_error" || decision.RuleName != "bad-condition" {
 		t.Fatalf("expected condition error deny, got %#v", decision)
 	}
 }
@@ -766,6 +850,24 @@ func loadPolicy(t *testing.T, text string) *Policy {
 func loadPolicyError(t *testing.T, text string) (*Policy, error) {
 	t.Helper()
 	return LoadReader("policy.hcl", strings.NewReader(text))
+}
+
+func httpConditionPolicy(condition string) string {
+	return fmt.Sprintf(`
+settings {
+  default_action = "deny"
+}
+
+endpoint "https" "api" {
+  hosts = ["api.example.com"]
+}
+
+rule "allow" {
+  endpoint = https.api
+  condition = %q
+  verdict = "allow"
+}
+`, condition)
 }
 
 func l4Flow(protocol string, destPort uint16) Flow {
