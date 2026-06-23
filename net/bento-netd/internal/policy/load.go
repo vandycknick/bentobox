@@ -408,11 +408,11 @@ func compileIPEndpoint(name string, raw rawIPEndpoint) (*IPEndpoint, error) {
 		if len(raw.Ports) > 0 {
 			return nil, fmt.Errorf("protocol any cannot be combined with ports")
 		}
-	case "tcp", "udp", "icmp":
+	case "tcp", "udp":
 	default:
 		return nil, fmt.Errorf("unsupported protocol %q", protocol)
 	}
-	endpoint := &IPEndpoint{Name: name, Protocol: protocol, Ports: raw.Ports}
+	endpoint := &IPEndpoint{Name: name, Protocol: protocol, Ports: normalizePortRanges(raw.Ports)}
 	for _, cidr := range raw.Source {
 		prefix, err := netip.ParsePrefix(cidr)
 		if err != nil {
@@ -428,6 +428,36 @@ func compileIPEndpoint(name string, raw rawIPEndpoint) (*IPEndpoint, error) {
 		endpoint.DestinationPrefixes = append(endpoint.DestinationPrefixes, prefix)
 	}
 	return endpoint, nil
+}
+
+func normalizePortRanges(ranges []PortRange) []PortRange {
+	if len(ranges) == 0 {
+		return nil
+	}
+	normalized := make([]PortRange, len(ranges))
+	copy(normalized, ranges)
+	sort.Slice(normalized, func(i int, j int) bool {
+		if normalized[i].Start == normalized[j].Start {
+			return normalized[i].End < normalized[j].End
+		}
+		return normalized[i].Start < normalized[j].Start
+	})
+	merged := normalized[:0]
+	for _, current := range normalized {
+		if len(merged) == 0 {
+			merged = append(merged, current)
+			continue
+		}
+		last := &merged[len(merged)-1]
+		if uint32(current.Start) <= uint32(last.End)+1 {
+			if current.End > last.End {
+				last.End = current.End
+			}
+			continue
+		}
+		merged = append(merged, current)
+	}
+	return merged
 }
 
 func decodeHTTPEndpoint(kind string, name string, transport Transport, defaultPort uint16, block *hcl.Block) (*HTTPEndpoint, hcl.Diagnostics) {

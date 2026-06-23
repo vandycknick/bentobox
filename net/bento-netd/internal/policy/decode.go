@@ -104,11 +104,7 @@ func parsePortRange(value string) (PortRange, error) {
 		return PortRange{}, fmt.Errorf("port range must not be empty")
 	}
 	if !strings.Contains(value, "-") {
-		port, err := parsePort(value)
-		if err != nil {
-			return PortRange{}, err
-		}
-		return PortRange{Start: port, End: port}, nil
+		return PortRange{}, fmt.Errorf("invalid port range %q", value)
 	}
 	startText, endText, ok := strings.Cut(value, "-")
 	if !ok || strings.Contains(endText, "-") {

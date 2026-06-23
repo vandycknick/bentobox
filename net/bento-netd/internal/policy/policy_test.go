@@ -245,6 +245,294 @@ endpoint "ip" "private" {
 	}
 }
 
+func TestIPEndpointExactTCPPortMatches(t *testing.T) {
+	compiled := loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "ip" "private" {
+  destination = ["10.0.0.0/8"]
+  protocol = "tcp"
+  ports = [443]
+}
+
+rule "allow-private" {
+  endpoint = ip.private
+  verdict = "allow"
+}
+`)
+
+	decision := compiled.EvaluateFlow(l4Flow("tcp", 443))
+	if decision.Action != ActionAllow || decision.RuleName != "allow-private" {
+		t.Fatalf("expected tcp 443 allow, got %#v", decision)
+	}
+	assertL4Match(t, decision, L4Match{EndpointProtocol: "tcp", DestPort: 443, PortRange: PortRange{Start: 443, End: 443}, Kind: L4MatchExactPort})
+
+	decision = compiled.EvaluateFlow(l4Flow("tcp", 444))
+	if decision.Action != ActionDeny || decision.Source != DecisionSourceDefault {
+		t.Fatalf("expected tcp 444 default deny, got %#v", decision)
+	}
+	if decision.MatchedL4 != nil {
+		t.Fatalf("default decision must not carry l4 metadata, got %#v", decision.MatchedL4)
+	}
+}
+
+func TestIPEndpointExactUDPPortMatches(t *testing.T) {
+	compiled := loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "ip" "dns" {
+  destination = ["10.0.0.0/8"]
+  protocol = "udp"
+  ports = [53]
+}
+
+rule "allow-dns" {
+  endpoint = ip.dns
+  verdict = "allow"
+}
+`)
+
+	decision := compiled.EvaluateFlow(l4Flow("udp", 53))
+	if decision.Action != ActionAllow || decision.RuleName != "allow-dns" {
+		t.Fatalf("expected udp 53 allow, got %#v", decision)
+	}
+	assertL4Match(t, decision, L4Match{EndpointProtocol: "udp", DestPort: 53, PortRange: PortRange{Start: 53, End: 53}, Kind: L4MatchExactPort})
+
+	decision = compiled.EvaluateFlow(l4Flow("tcp", 53))
+	if decision.Action != ActionDeny || decision.Source != DecisionSourceDefault {
+		t.Fatalf("expected tcp 53 to miss udp endpoint, got %#v", decision)
+	}
+}
+
+func TestIPEndpointPortRangesAreInclusive(t *testing.T) {
+	compiled := loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "ip" "app" {
+  destination = ["10.0.0.0/8"]
+  protocol = "tcp"
+  ports = ["8000-8002"]
+}
+
+rule "allow-app" {
+  endpoint = ip.app
+  verdict = "allow"
+}
+`)
+
+	for _, port := range []uint16{8000, 8001, 8002} {
+		decision := compiled.EvaluateFlow(l4Flow("tcp", port))
+		if decision.Action != ActionAllow || decision.RuleName != "allow-app" {
+			t.Fatalf("expected tcp %d allow, got %#v", port, decision)
+		}
+		assertL4Match(t, decision, L4Match{EndpointProtocol: "tcp", DestPort: port, PortRange: PortRange{Start: 8000, End: 8002}, Kind: L4MatchRange})
+	}
+
+	for _, port := range []uint16{7999, 8003} {
+		decision := compiled.EvaluateFlow(l4Flow("tcp", port))
+		if decision.Action != ActionDeny || decision.Source != DecisionSourceDefault {
+			t.Fatalf("expected tcp %d default deny, got %#v", port, decision)
+		}
+	}
+}
+
+func TestIPEndpointBoundaryPortsMatch(t *testing.T) {
+	compiled := loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "ip" "boundaries" {
+  destination = ["10.0.0.0/8"]
+  protocol = "tcp"
+  ports = [1, 65535]
+}
+
+rule "allow-boundaries" {
+  endpoint = ip.boundaries
+  verdict = "allow"
+}
+`)
+
+	for _, port := range []uint16{1, 65535} {
+		decision := compiled.EvaluateFlow(l4Flow("tcp", port))
+		if decision.Action != ActionAllow || decision.RuleName != "allow-boundaries" {
+			t.Fatalf("expected tcp %d allow, got %#v", port, decision)
+		}
+		assertL4Match(t, decision, L4Match{EndpointProtocol: "tcp", DestPort: port, PortRange: PortRange{Start: port, End: port}, Kind: L4MatchExactPort})
+	}
+}
+
+func TestIPEndpointDefaultProtocolMatchesAnyWithoutPorts(t *testing.T) {
+	compiled := loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "ip" "private" {
+  destination = ["10.0.0.0/8"]
+}
+
+rule "allow-private" {
+  endpoint = ip.private
+  verdict = "allow"
+}
+`)
+
+	for _, protocol := range []string{"tcp", "udp"} {
+		decision := compiled.EvaluateFlow(l4Flow(protocol, 8443))
+		if decision.Action != ActionAllow || decision.RuleName != "allow-private" {
+			t.Fatalf("expected %s flow allow, got %#v", protocol, decision)
+		}
+		assertL4Match(t, decision, L4Match{EndpointProtocol: "any", DestPort: 8443, Kind: L4MatchProtocolOnly})
+	}
+}
+
+func TestIPEndpointPortRangesAreCanonicalized(t *testing.T) {
+	compiled := loadPolicy(t, `
+endpoint "ip" "canonical" {
+  destination = ["10.0.0.0/8"]
+  protocol = "tcp"
+  ports = [443, "8000-8002", "8001-8003", 443, "444-445", "446-446"]
+}
+`)
+
+	endpoint := compiled.ipEndpoints["ip.canonical"]
+	if endpoint == nil {
+		t.Fatal("expected ip.canonical endpoint")
+	}
+	want := []PortRange{{Start: 443, End: 446}, {Start: 8000, End: 8003}}
+	if len(endpoint.Ports) != len(want) {
+		t.Fatalf("expected canonical ports %#v, got %#v", want, endpoint.Ports)
+	}
+	for i := range want {
+		if endpoint.Ports[i] != want[i] {
+			t.Fatalf("expected canonical ports %#v, got %#v", want, endpoint.Ports)
+		}
+	}
+}
+
+func TestInvalidIPEndpointL4PolicyIsRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "ports default to protocol any",
+			body: `
+endpoint "ip" "bad" {
+  destination = ["10.0.0.0/8"]
+  ports = [443]
+}
+`,
+			want: "protocol any cannot be combined with ports",
+		},
+		{
+			name: "ports with protocol any",
+			body: `
+endpoint "ip" "bad" {
+  destination = ["10.0.0.0/8"]
+  protocol = "any"
+  ports = [443]
+}
+`,
+			want: "protocol any cannot be combined with ports",
+		},
+		{
+			name: "port zero",
+			body: `
+endpoint "ip" "bad" {
+  destination = ["10.0.0.0/8"]
+  protocol = "tcp"
+  ports = [0]
+}
+`,
+			want: "port 0 is out of range",
+		},
+		{
+			name: "port too high",
+			body: `
+endpoint "ip" "bad" {
+  destination = ["10.0.0.0/8"]
+  protocol = "tcp"
+  ports = [65536]
+}
+`,
+			want: "port 65536 is out of range",
+		},
+		{
+			name: "reversed range",
+			body: `
+endpoint "ip" "bad" {
+  destination = ["10.0.0.0/8"]
+  protocol = "tcp"
+  ports = ["9000-8000"]
+}
+`,
+			want: `port range "9000-8000" ends before it starts`,
+		},
+		{
+			name: "malformed range",
+			body: `
+endpoint "ip" "bad" {
+  destination = ["10.0.0.0/8"]
+  protocol = "tcp"
+  ports = ["8000-9000-10000"]
+}
+`,
+			want: `invalid port range "8000-9000-10000"`,
+		},
+		{
+			name: "quoted exact port",
+			body: `
+endpoint "ip" "bad" {
+  destination = ["10.0.0.0/8"]
+  protocol = "tcp"
+  ports = ["443"]
+}
+`,
+			want: `invalid port range "443"`,
+		},
+		{
+			name: "non integer range",
+			body: `
+endpoint "ip" "bad" {
+  destination = ["10.0.0.0/8"]
+  protocol = "tcp"
+  ports = ["53.5-54"]
+}
+`,
+			want: `port "53.5" is out of range`,
+		},
+		{
+			name: "unsupported protocol",
+			body: `
+endpoint "ip" "bad" {
+  destination = ["10.0.0.0/8"]
+  protocol = "icmp"
+}
+`,
+			want: `unsupported protocol "icmp"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := loadPolicyError(t, test.body)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("expected error containing %q, got %v", test.want, err)
+			}
+		})
+	}
+}
+
 func TestExplicitIPDenyIsTerminalBeforeL7Classification(t *testing.T) {
 	compiled := loadPolicy(t, `
 settings {
@@ -426,4 +714,23 @@ func loadPolicy(t *testing.T, text string) *Policy {
 func loadPolicyError(t *testing.T, text string) (*Policy, error) {
 	t.Helper()
 	return LoadReader("policy.hcl", strings.NewReader(text))
+}
+
+func l4Flow(protocol string, destPort uint16) Flow {
+	return Flow{
+		Protocol: protocol,
+		SourceIP: net.ParseIP("192.168.127.2"),
+		DestIP:   net.ParseIP("10.1.2.3"),
+		DestPort: destPort,
+	}
+}
+
+func assertL4Match(t *testing.T, decision Decision, want L4Match) {
+	t.Helper()
+	if decision.MatchedL4 == nil {
+		t.Fatalf("expected l4 match %#v, got nil", want)
+	}
+	if *decision.MatchedL4 != want {
+		t.Fatalf("expected l4 match %#v, got %#v", want, *decision.MatchedL4)
+	}
 }

@@ -13,7 +13,7 @@ func (p *Policy) EvaluateFlow(flow Flow) Decision {
 		return Decision{Action: ActionAllow, Layer: DecisionLayerFlow, Source: DecisionSourceDefault, DefaultAction: ActionAllow, MatchedFlow: flow}
 	}
 	for _, rule := range p.ipRules {
-		endpoint := p.matchIPRule(rule, flow)
+		endpoint, l4Match := p.matchIPRule(rule, flow)
 		if endpoint == nil {
 			continue
 		}
@@ -27,6 +27,7 @@ func (p *Policy) EvaluateFlow(flow Flow) Decision {
 			Reason:                    rule.Reason,
 			EndpointKind:              "ip",
 			EndpointName:              endpoint.Name,
+			MatchedL4:                 l4Match,
 			MatchedFlow:               flow,
 		}
 	}
@@ -121,14 +122,18 @@ func defaultReason(action Action) string {
 	return "default_" + string(action)
 }
 
-func (p *Policy) matchIPRule(rule *Rule, flow Flow) *IPEndpoint {
+func (p *Policy) matchIPRule(rule *Rule, flow Flow) (*IPEndpoint, *L4Match) {
 	for _, ref := range rule.Endpoints {
 		endpoint := p.ipEndpoints[ref.String()]
-		if endpoint != nil && endpoint.matches(flow) {
-			return endpoint
+		if endpoint == nil {
+			continue
+		}
+		l4Match, ok := endpoint.match(flow)
+		if ok {
+			return endpoint, &l4Match
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func (p *Policy) selectedCredential(endpoint Ref) *Credential {

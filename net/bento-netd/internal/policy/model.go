@@ -89,6 +89,21 @@ type PortRange struct {
 	End   uint16
 }
 
+type L4MatchKind string
+
+const (
+	L4MatchProtocolOnly L4MatchKind = "protocol_only"
+	L4MatchExactPort    L4MatchKind = "exact_port"
+	L4MatchRange        L4MatchKind = "range"
+)
+
+type L4Match struct {
+	EndpointProtocol string
+	DestPort         uint16
+	PortRange        PortRange
+	Kind             L4MatchKind
+}
+
 type HTTPEndpoint struct {
 	Kind        string
 	Name        string
@@ -154,6 +169,7 @@ type Decision struct {
 	Reason                        string
 	EndpointKind                  string
 	EndpointName                  string
+	MatchedL4                     *L4Match
 	MatchedFlow                   Flow
 	MatchedRequest                *HTTPRequest
 	SelectedCredential            *Credential
@@ -290,39 +306,58 @@ func (p *Policy) httpFamilyEndpoints(kind string) map[string]*HTTPEndpoint {
 	}
 }
 
-func (e *IPEndpoint) matches(flow Flow) bool {
-	if !e.matchesProtocol(flow.Protocol) || !e.matchesPort(flow.DestPort) {
-		return false
+func (e *IPEndpoint) match(flow Flow) (L4Match, bool) {
+	if !e.matchesProtocol(flow.Protocol) {
+		return L4Match{}, false
+	}
+	portRange, ok := e.matchPort(flow.DestPort)
+	if !ok {
+		return L4Match{}, false
 	}
 	if len(e.SourcePrefixes) > 0 {
 		source, ok := addrFromIP(flow.SourceIP)
 		if !ok || !prefixesContain(e.SourcePrefixes, source) {
-			return false
+			return L4Match{}, false
 		}
 	}
 	if len(e.DestinationPrefixes) > 0 {
 		dest, ok := addrFromIP(flow.DestIP)
 		if !ok || !prefixesContain(e.DestinationPrefixes, dest) {
-			return false
+			return L4Match{}, false
 		}
 	}
-	return true
+	return L4Match{
+		EndpointProtocol: e.Protocol,
+		DestPort:         flow.DestPort,
+		PortRange:        portRange,
+		Kind:             l4MatchKind(portRange),
+	}, true
 }
 
 func (e *IPEndpoint) matchesProtocol(protocol string) bool {
 	return e.Protocol == "any" || e.Protocol == strings.ToLower(protocol)
 }
 
-func (e *IPEndpoint) matchesPort(port uint16) bool {
+func (e *IPEndpoint) matchPort(port uint16) (PortRange, bool) {
 	if len(e.Ports) == 0 {
-		return true
+		return PortRange{}, true
 	}
 	for _, portRange := range e.Ports {
 		if port >= portRange.Start && port <= portRange.End {
-			return true
+			return portRange, true
 		}
 	}
-	return false
+	return PortRange{}, false
+}
+
+func l4MatchKind(portRange PortRange) L4MatchKind {
+	if portRange.Start == 0 && portRange.End == 0 {
+		return L4MatchProtocolOnly
+	}
+	if portRange.Start == portRange.End {
+		return L4MatchExactPort
+	}
+	return L4MatchRange
 }
 
 func (b HostBinding) matches(authority authority) bool {

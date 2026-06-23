@@ -86,6 +86,17 @@ func routeDecisionFromPolicy(decision policy.Decision) RouteDecision {
 			Name: decision.SelectedCredential.Name,
 		}
 	}
+	if decision.MatchedL4 != nil {
+		converted.MatchedL4 = &L4Match{
+			EndpointProtocol: decision.MatchedL4.EndpointProtocol,
+			DestPort:         decision.MatchedL4.DestPort,
+			PortRange: PortRange{
+				Start: decision.MatchedL4.PortRange.Start,
+				End:   decision.MatchedL4.PortRange.End,
+			},
+			Kind: L4MatchKind(decision.MatchedL4.Kind),
+		}
+	}
 	return converted
 }
 

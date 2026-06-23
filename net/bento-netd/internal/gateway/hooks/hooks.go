@@ -40,6 +40,26 @@ type Credential struct {
 	Secret string
 }
 
+type PortRange struct {
+	Start uint16
+	End   uint16
+}
+
+type L4MatchKind string
+
+const (
+	L4MatchProtocolOnly L4MatchKind = "protocol_only"
+	L4MatchExactPort    L4MatchKind = "exact_port"
+	L4MatchRange        L4MatchKind = "range"
+)
+
+type L4Match struct {
+	EndpointProtocol string
+	DestPort         uint16
+	PortRange        PortRange
+	Kind             L4MatchKind
+}
+
 type RouteDecision struct {
 	Action                    RouteAction
 	Layer                     string
@@ -50,6 +70,7 @@ type RouteDecision struct {
 	RuleName                  string
 	EndpointKind              string
 	EndpointName              string
+	MatchedL4                 *L4Match
 	Credential                *Credential
 }
 
