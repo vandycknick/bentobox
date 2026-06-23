@@ -1,7 +1,12 @@
+use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStderr, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use bento_utils::format_mac;
@@ -31,6 +36,7 @@ const NETD_BINARY_NAME: &str = "netd";
 const NETD_DISABLE_SSH_PORT: &str = "-1";
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const STDERR_CAPTURE_LIMIT: usize = 64 * 1024;
 
 pub(super) struct NetdDriver;
 
@@ -137,7 +143,7 @@ async fn prepare_netd_runtime(
     command
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
-        .stderr(Stdio::from(log));
+        .stderr(Stdio::piped());
 
     unsafe {
         command.pre_exec(|| {
@@ -150,18 +156,22 @@ async fn prepare_netd_runtime(
         reference: metadata.name.clone(),
         message: format!("spawn userspace network helper: {err}"),
     })?;
+    let stderr_capture = child.stderr.take().map(CapturedStderr::spawn);
     let pid = i32::try_from(child.id()).map_err(|_| LibVmError::NetworkRuntime {
         reference: metadata.name.clone(),
         message: "userspace network helper pid does not fit in i32".to_string(),
     })?;
 
-    if let Err(err) = wait_for_socket(&socket_path).await {
+    if let Err(err) = wait_for_netd_startup(&socket_path, &mut child).await {
         let _ = child.kill();
         let _ = child.wait();
+        let stderr_lines = stderr_capture
+            .map(CapturedStderr::finish)
+            .unwrap_or_default();
         let _ = super::remove_instance_network_link(paths, metadata.id);
         return Err(LibVmError::NetworkRuntime {
             reference: metadata.name.clone(),
-            message: format!("{err} (preserved runtime dir: {})", runtime_dir.display()),
+            message: format_netd_startup_failure(&err, &stderr_lines, &log_path),
         });
     }
 
@@ -357,11 +367,24 @@ fn resolve_certificate_authority_paths(
     }
 }
 
-async fn wait_for_socket(path: &Path) -> Result<(), String> {
+async fn wait_for_netd_startup(path: &Path, child: &mut Child) -> Result<(), String> {
     let deadline = std::time::Instant::now() + READY_TIMEOUT;
     loop {
         if path.exists() {
             return Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "userspace network helper exited during startup with status {status}"
+                ));
+            }
+            Ok(None) => {}
+            Err(err) => {
+                return Err(format!(
+                    "check userspace network helper startup status: {err}"
+                ));
+            }
         }
         if std::time::Instant::now() >= deadline {
             return Err(format!(
@@ -371,6 +394,157 @@ async fn wait_for_socket(path: &Path) -> Result<(), String> {
         }
         sleep(READY_POLL_INTERVAL).await;
     }
+}
+
+fn format_netd_startup_failure(reason: &str, stderr_lines: &[String], log_path: &Path) -> String {
+    let mut message = "netd failed during startup".to_string();
+    if let Some(stderr) = render_netd_startup_stderr(stderr_lines) {
+        message.push_str("\n\n");
+        message.push_str(&stderr);
+    } else if !reason.trim().is_empty() {
+        message.push_str("\n\n");
+        message.push_str(reason.trim());
+    }
+    message.push_str(&format!("\n\nnetd log: {}", log_path.display()));
+    message
+}
+
+fn render_netd_startup_stderr(lines: &[String]) -> Option<String> {
+    let mut records = Vec::new();
+    let mut raw_lines = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<NetdStartupErrorRecord>(trimmed) {
+            Ok(record) => records.push(record),
+            Err(_) => raw_lines.push(trimmed.to_string()),
+        }
+    }
+    if records.is_empty() && raw_lines.is_empty() {
+        return None;
+    }
+
+    let mut output = String::new();
+    for record in records {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        render_netd_startup_error_record(&mut output, &record);
+    }
+    for line in raw_lines {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&line);
+    }
+    Some(output)
+}
+
+fn render_netd_startup_error_record(output: &mut String, record: &NetdStartupErrorRecord) {
+    if let Some(file) = record.file.as_deref().filter(|file| !file.is_empty()) {
+        output.push_str(file);
+        if let Some(line) = record.line.filter(|line| *line > 0) {
+            let _ = write!(output, ":{line}");
+            if let Some(column) = record.column.filter(|column| *column > 0) {
+                let _ = write!(output, ":{column}");
+            }
+        }
+        output.push_str(": ");
+    }
+    output.push_str(record.message.trim());
+    let detail = record.detail.trim();
+    if detail.is_empty() {
+        return;
+    }
+    for line in detail.lines() {
+        output.push('\n');
+        output.push_str("  ");
+        output.push_str(line);
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct NetdStartupErrorRecord {
+    #[serde(rename = "type")]
+    _kind: String,
+    message: String,
+    #[serde(default)]
+    detail: String,
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    line: Option<u32>,
+    #[serde(default)]
+    column: Option<u32>,
+}
+
+struct CapturedStderr {
+    lines: Arc<Mutex<CapturedStderrLines>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct CapturedStderrLines {
+    lines: VecDeque<String>,
+    byte_len: usize,
+}
+
+impl CapturedStderr {
+    fn spawn(stderr: ChildStderr) -> Self {
+        let lines = Arc::new(Mutex::new(CapturedStderrLines::default()));
+        let thread_lines = Arc::clone(&lines);
+        let handle = thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                let Ok(mut captured) = thread_lines.lock() else {
+                    break;
+                };
+                append_bounded_stderr_line(&mut captured, line);
+            }
+        });
+        Self {
+            lines,
+            handle: Some(handle),
+        }
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let Ok(captured) = self.lines.lock() else {
+            return Vec::new();
+        };
+        captured.lines.iter().cloned().collect()
+    }
+}
+
+fn append_bounded_stderr_line(captured: &mut CapturedStderrLines, line: String) {
+    let line = if line.len() > STDERR_CAPTURE_LIMIT {
+        let bytes = line.as_bytes();
+        String::from_utf8_lossy(&bytes[bytes.len() - STDERR_CAPTURE_LIMIT..]).to_string()
+    } else {
+        line
+    };
+    let line_len = line.len();
+    while captured.byte_len.saturating_add(line_len) > STDERR_CAPTURE_LIMIT {
+        if captured.lines.is_empty() {
+            captured.byte_len = 0;
+            break;
+        }
+        let Some(removed) = captured.lines.pop_front() else {
+            captured.byte_len = 0;
+            break;
+        };
+        captured.byte_len = captured.byte_len.saturating_sub(removed.len());
+    }
+    captured.byte_len = captured.byte_len.saturating_add(line_len);
+    captured.lines.push_back(line);
 }
 
 fn resolve_netd_binary() -> String {
@@ -419,8 +593,9 @@ fn terminate_helper(pid: i32) -> Result<(), LibVmError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        configure_network_helper_command, resolve_certificate_authority_paths,
-        NetworkHelperCommandConfig,
+        append_bounded_stderr_line, configure_network_helper_command, format_netd_startup_failure,
+        resolve_certificate_authority_paths, CapturedStderrLines, NetworkHelperCommandConfig,
+        STDERR_CAPTURE_LIMIT,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -504,6 +679,60 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|window| window[0] == "--tls-ca-key" && window[1] == "/tmp/bento-net/ca-key.pem"));
+    }
+
+    #[test]
+    fn netd_startup_failure_renders_json_stderr_and_paths() {
+        let stderr_lines = vec![
+            "{\"type\":\"policy_error\",\"message\":\"Unsupported endpoint kind\",\"detail\":\"unsupported endpoint kind \\\"invalid_endpoint\\\"\",\"file\":\"/tmp/policy.hcl\",\"line\":3,\"column\":10}".to_string(),
+            "{\"type\":\"policy_error\",\"message\":\"Invalid rule\",\"detail\":\"rule \\\"deny-private\\\": references unknown endpoint \\\"ip.private\\\"\",\"file\":\"/tmp/policy.hcl\",\"line\":9,\"column\":1}".to_string(),
+        ];
+        let message = format_netd_startup_failure(
+            "userspace network helper exited during startup with status exit status: 1",
+            &stderr_lines,
+            Path::new("/tmp/bento/netd.log"),
+        );
+
+        let expected = "\
+netd failed during startup
+
+/tmp/policy.hcl:3:10: Unsupported endpoint kind
+  unsupported endpoint kind \"invalid_endpoint\"
+/tmp/policy.hcl:9:1: Invalid rule
+  rule \"deny-private\": references unknown endpoint \"ip.private\"
+
+netd log: /tmp/bento/netd.log";
+        assert_eq!(message, expected);
+    }
+
+    #[test]
+    fn netd_startup_failure_falls_back_to_raw_stderr() {
+        let stderr_lines = vec!["plain old panic".to_string()];
+        let message = format_netd_startup_failure(
+            "userspace network helper exited during startup with status exit status: 1",
+            &stderr_lines,
+            Path::new("/tmp/bento/netd.log"),
+        );
+
+        let expected = "\
+netd failed during startup
+
+plain old panic
+
+netd log: /tmp/bento/netd.log";
+        assert_eq!(message, expected);
+    }
+
+    #[test]
+    fn bounded_stderr_lines_keep_recent_lines() {
+        let mut captured = CapturedStderrLines::default();
+
+        append_bounded_stderr_line(&mut captured, "a".repeat(STDERR_CAPTURE_LIMIT - 2));
+        append_bounded_stderr_line(&mut captured, "bcdef".to_string());
+
+        assert!(captured.byte_len <= STDERR_CAPTURE_LIMIT);
+        let lines = captured.lines.into_iter().collect::<Vec<_>>();
+        assert_eq!(lines, vec!["bcdef".to_string()]);
     }
 
     #[test]

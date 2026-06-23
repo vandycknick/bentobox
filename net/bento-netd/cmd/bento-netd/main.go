@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +15,8 @@ import (
 	"syscall"
 
 	"github.com/containers/gvisor-tap-vsock/pkg/transport"
+	"github.com/hashicorp/hcl/v2"
+	log "github.com/sirupsen/logrus"
 	"github.com/vandycknick/bentobox/net/bento-netd/internal/config"
 	"github.com/vandycknick/bentobox/net/bento-netd/internal/gateway/audit"
 	"github.com/vandycknick/bentobox/net/bento-netd/internal/gateway/forwarder"
@@ -21,28 +25,57 @@ import (
 	"github.com/vandycknick/bentobox/net/bento-netd/internal/policy"
 	"github.com/vandycknick/bentobox/net/bento-netd/internal/secrets"
 	"github.com/vandycknick/bentobox/net/bento-netd/internal/virtualnetwork"
-	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
 
 func main() {
-	if err := configureLogging(""); err != nil {
-		fmt.Fprintf(os.Stderr, "configure logging: %v\n", err)
+	cfg, err := config.Parse(os.Args[1:])
+	logFile := ""
+	if cfg != nil {
+		logFile = cfg.LogFile
+	}
+	logCloser, logErr := configureLogging(logFile)
+	if logErr != nil {
+		writeErrorRecords(os.Stderr, fmt.Errorf("configure logging: %w", logErr))
 		os.Exit(1)
 	}
-	if err := run(os.Args[1:]); err != nil {
-		slog.Error("netd failed", "error", err)
-		os.Exit(1)
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
+	if err != nil {
+		reportAndExitStartupError(os.Stderr, cfg, logCloser, err)
+	}
+	if err := config.LoadPolicy(cfg); err != nil {
+		reportAndExitStartupError(os.Stderr, cfg, logCloser, err)
+	}
+	if err := run(cfg); err != nil {
+		reportAndExitStartupError(os.Stderr, cfg, logCloser, err)
 	}
 }
 
-func run(args []string) error {
-	cfg, err := config.Parse(args)
-	if err != nil {
-		return err
+func reportStartupError(writer io.Writer, cfg *config.Config, err error) {
+	if cfg != nil && cfg.LogFile != "" {
+		slog.Error("netd failed", "error", err)
 	}
-	if err := configureLogging(cfg.LogFile); err != nil {
-		return err
+	writeErrorRecords(writer, err)
+}
+
+func reportAndExitStartupError(writer io.Writer, cfg *config.Config, logCloser io.Closer, err error) {
+	reportStartupError(writer, cfg, err)
+	if logCloser != nil {
+		_ = logCloser.Close()
+	}
+	os.Exit(1)
+}
+
+func run(cfg *config.Config) error {
+	if cfg == nil {
+		return errors.New("missing configuration")
+	}
+	if cfg.Policy == nil {
+		if err := config.LoadPolicy(cfg); err != nil {
+			return err
+		}
 	}
 	logPolicyWarnings(cfg.Policy)
 	if cfg.PIDFile != "" {
@@ -102,6 +135,55 @@ func run(args []string) error {
 	return group.Wait()
 }
 
+type errorRecord struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Detail  string `json:"detail,omitempty"`
+	File    string `json:"file,omitempty"`
+	Line    int    `json:"line,omitempty"`
+	Column  int    `json:"column,omitempty"`
+}
+
+func writeErrorRecords(writer io.Writer, err error) {
+	encoder := json.NewEncoder(writer)
+	var loadErr *policy.LoadError
+	if errors.As(err, &loadErr) {
+		wrote := false
+		for _, diagnostic := range loadErr.Diagnostics {
+			if diagnostic.Severity != hcl.DiagError {
+				continue
+			}
+			_ = encoder.Encode(policyDiagnosticToErrorRecord(loadErr.Filename, diagnostic))
+			wrote = true
+		}
+		if wrote {
+			return
+		}
+	}
+	_ = encoder.Encode(errorRecord{Type: "startup_error", Message: err.Error()})
+}
+
+func policyDiagnosticToErrorRecord(filename string, diagnostic *hcl.Diagnostic) errorRecord {
+	record := errorRecord{Type: "policy_error", Message: "Invalid policy"}
+	if diagnostic == nil {
+		record.File = filename
+		return record
+	}
+	if diagnostic.Summary != "" {
+		record.Message = diagnostic.Summary
+	}
+	record.Detail = diagnostic.Detail
+	if diagnostic.Subject != nil {
+		record.File = diagnostic.Subject.Filename
+		record.Line = diagnostic.Subject.Start.Line
+		record.Column = diagnostic.Subject.Start.Column
+	}
+	if record.File == "" {
+		record.File = filename
+	}
+	return record
+}
+
 func logPolicyWarnings(compiled *policy.Policy) {
 	if compiled == nil {
 		return
@@ -130,19 +212,31 @@ func auditPathForLogFile(logFile string) string {
 	return filepath.Join(filepath.Dir(logFile), "audit.jsonl")
 }
 
-func configureLogging(logFile string) error {
+func configureLogging(logFile string) (io.Closer, error) {
 	var output io.Writer = os.Stderr
 	if logFile == "" {
 		configureStructuredLoggers(output)
-		return nil
+		return nil, nil
 	}
-	f, err := os.Create(logFile)
+	f, err := openLogFile(logFile)
 	if err != nil {
-		return fmt.Errorf("open log file %s: %w", logFile, err)
+		return nil, err
 	}
 	output = f
 	configureStructuredLoggers(output)
-	return nil
+	return f, nil
+}
+
+func openLogFile(logFile string) (*os.File, error) {
+	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open log file %s: %w", logFile, err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("set log file permissions %s: %w", logFile, err)
+	}
+	return f, nil
 }
 
 func configureStructuredLoggers(output io.Writer) {

@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -75,7 +76,11 @@ func decodePortRangesAttr(attr *hcl.Attribute) ([]PortRange, error) {
 		}
 		switch element.Type() {
 		case cty.Number:
-			port, _ := element.AsBigFloat().Int64()
+			number := element.AsBigFloat()
+			port, accuracy := number.Int64()
+			if accuracy != big.Exact {
+				return nil, fmt.Errorf("port %s must be an integer", number.Text('f', -1))
+			}
 			if port < 1 || port > 65535 {
 				return nil, fmt.Errorf("port %d is out of range", port)
 			}

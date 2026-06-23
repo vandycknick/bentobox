@@ -1,10 +1,9 @@
 package policy
 
 import (
+	"errors"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -204,32 +203,45 @@ rule "mixed" {
 	}
 }
 
-func TestUnknownFieldsAndRemovedSyntaxAreRejected(t *testing.T) {
+func TestUnknownFieldsAndUnsupportedSyntaxAreRejected(t *testing.T) {
 	_, err := loadPolicyError(t, `
-endpoint "cidr" "private" {
-  cidrs = ["10.0.0.0/8"]
+endpoint "invalid_endpoint" "private" {
+  destination = ["10.0.0.0/8"]
 }
 `)
-	if err == nil || !strings.Contains(err.Error(), `endpoint "ip"`) {
-		t.Fatalf("expected endpoint ip migration error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), `unsupported endpoint kind "invalid_endpoint"`) {
+		t.Fatalf("expected unsupported endpoint kind error, got %v", err)
 	}
 
 	_, err = loadPolicyError(t, `
 settings {
-  audit_log = "/tmp/old.jsonl"
+  surprise = "/tmp/nope"
 }
 `)
-	if err == nil || !strings.Contains(err.Error(), "audit_log") {
-		t.Fatalf("expected unknown audit_log error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "surprise") {
+		t.Fatalf("expected unknown settings field error, got %v", err)
 	}
 
 	_, err = loadPolicyError(t, `
 endpoint "ip" "private" {
-  cidrs = ["10.0.0.0/8"]
+  surprise = ["10.0.0.0/8"]
 }
 `)
-	if err == nil || !strings.Contains(err.Error(), "cidrs") {
-		t.Fatalf("expected unknown cidrs error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "surprise") {
+		t.Fatalf("expected unknown endpoint field error, got %v", err)
+	}
+}
+
+func TestPortNumbersMustBeIntegers(t *testing.T) {
+	_, err := loadPolicyError(t, `
+endpoint "ip" "private" {
+  destination = ["10.0.0.0/8"]
+  protocol = "tcp"
+  ports = [443.5]
+}
+`)
+	if err == nil || !strings.Contains(err.Error(), "port 443.5 must be an integer") {
+		t.Fatalf("expected fractional port error, got %v", err)
 	}
 }
 
@@ -357,6 +369,51 @@ settings {
 	}
 }
 
+func TestLoadFileReportsMultipleDiagnosticsWithRanges(t *testing.T) {
+	_, err := loadPolicyError(t, `
+settings {
+  surprise = "/tmp/nope"
+}
+
+endpoint "invalid_endpoint" "private" {
+  destination = ["10.0.0.0/8"]
+}
+
+endpoint "https" "api" {
+  secret = "not-here"
+}
+
+credential "bearer_token" "api" {
+  endpoint = https.api
+  secret = "api-token"
+}
+`)
+	if err == nil {
+		t.Fatal("expected invalid policy to fail")
+	}
+	var loadErr *LoadError
+	if !errors.As(err, &loadErr) {
+		t.Fatalf("expected LoadError, got %T", err)
+	}
+	if len(loadErr.Diagnostics) < 4 {
+		t.Fatalf("expected multiple diagnostics, got %#v", loadErr.Diagnostics)
+	}
+	expected := `load policy file policy.hcl failed with 5 errors:
+policy.hcl:3:3: Unsupported argument
+  An argument named "surprise" is not expected here.
+policy.hcl:6:10: Unsupported endpoint kind
+  unsupported endpoint kind "invalid_endpoint"
+policy.hcl:11:3: Unsupported argument
+  An argument named "secret" is not expected here.
+policy.hcl:10:1: Missing hosts
+  hosts is required
+policy.hcl:16:3: Unsupported argument
+  An argument named "secret" is not expected here.`
+	if err.Error() != expected {
+		t.Fatalf("unexpected error text\nwant:\n%s\n got:\n%s", expected, err.Error())
+	}
+}
+
 func loadPolicy(t *testing.T, text string) *Policy {
 	t.Helper()
 	compiled, err := loadPolicyError(t, text)
@@ -368,15 +425,5 @@ func loadPolicy(t *testing.T, text string) *Policy {
 
 func loadPolicyError(t *testing.T, text string) (*Policy, error) {
 	t.Helper()
-	dir := t.TempDir()
-	policyPath := filepath.Join(dir, "policy.hcl")
-	writePolicy(t, policyPath, text)
-	return LoadFile(policyPath)
-}
-
-func writePolicy(t *testing.T, path string, text string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	return LoadReader("policy.hcl", strings.NewReader(text))
 }
