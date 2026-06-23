@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"context"
+	"net"
 
 	"github.com/vandycknick/bentobox/net/bento-netd/internal/policy"
 )
@@ -45,8 +46,26 @@ func (h *PolicyHook) HasHTTPS() bool {
 	return h.policy.HasHTTPS()
 }
 
+func (h *PolicyHook) ShouldInterceptHTTPS(port uint16) bool {
+	return h.policy.ShouldInterceptHTTPS(port)
+}
+
 func (h *PolicyHook) MatchHTTPSHost(host string) bool {
 	return h.policy.MatchHTTPSHost(host)
+}
+
+func (h *PolicyHook) ResolveHTTPSHost(host string, port uint16) (string, string, string, bool) {
+	ref, authority, certHost, ok := h.policy.ResolveHTTPSHost(host, port)
+	return ref.Name, authority, certHost, ok
+}
+
+func (h *PolicyHook) ResolveHTTPSRawIP(destIP net.IP, destPort uint16) (string, string, string, bool) {
+	ref, authority, certHost, ok := h.policy.ResolveHTTPSRawIP(destIP, destPort)
+	return ref.Name, authority, certHost, ok
+}
+
+func (h *PolicyHook) MatchHTTPSAuthority(host string, authority string) bool {
+	return h.policy.MatchHTTPSAuthority(host, authority)
 }
 
 func (h *PolicyHook) DecideHTTP(_ context.Context, request HTTPRequest) (RouteDecision, error) {

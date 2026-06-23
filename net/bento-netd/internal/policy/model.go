@@ -225,7 +225,17 @@ func (p *Policy) ShouldInterceptHTTP(port uint16) bool {
 }
 
 func (p *Policy) ShouldInterceptHTTPS(port uint16) bool {
-	return p != nil && port == 443 && len(p.httpsEndpoints) > 0
+	if p == nil {
+		return false
+	}
+	for _, endpoint := range p.httpsEndpoints {
+		for _, binding := range endpoint.Hosts {
+			if binding.Port == port {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *Policy) MatchHTTPHost(host string) bool {
@@ -239,30 +249,82 @@ func (p *Policy) MatchHTTPSHost(host string) bool {
 }
 
 func (p *Policy) MatchHTTPFamilyHost(kind string, host string) (Ref, *HTTPEndpoint, bool) {
-	if p == nil {
-		return Ref{}, nil, false
-	}
-	endpoints := p.httpFamilyEndpoints(kind)
-	if len(endpoints) == 0 {
-		return Ref{}, nil, false
-	}
 	defaultPort := uint16(80)
 	if kind == "https" {
 		defaultPort = 443
 	}
-	authority, err := parseAuthority(host, defaultPort)
-	if err != nil || authority.Host == "" {
-		return Ref{}, nil, false
+	ref, endpoint, _, ok := p.matchHTTPFamilyHost(kind, host, defaultPort)
+	return ref, endpoint, ok
+}
+
+func (p *Policy) ResolveHTTPSHost(host string, port uint16) (Ref, string, string, bool) {
+	if port == 0 {
+		port = 443
+	}
+	ref, _, authority, ok := p.matchHTTPFamilyHost("https", host, port)
+	if !ok {
+		return Ref{}, "", "", false
+	}
+	return ref, formatAuthority(authority, 443), authority.Host, true
+}
+
+func (p *Policy) ResolveHTTPSRawIP(destIP net.IP, destPort uint16) (Ref, string, string, bool) {
+	if p == nil {
+		return Ref{}, "", "", false
+	}
+	dest, ok := addrFromIP(destIP)
+	if !ok {
+		return Ref{}, "", "", false
+	}
+	for _, endpoint := range p.httpsEndpoints {
+		for _, binding := range endpoint.Hosts {
+			if binding.Wildcard || binding.Port != destPort {
+				continue
+			}
+			bindingAddr, err := netip.ParseAddr(binding.Host)
+			if err != nil || bindingAddr.Unmap() != dest {
+				continue
+			}
+			authority := authority{Host: dest.String(), Port: binding.Port}
+			return Ref{Kind: endpoint.Kind, Name: endpoint.Name}, formatAuthority(authority, 443), authority.Host, true
+		}
+	}
+	return Ref{}, "", "", false
+}
+
+func (p *Policy) MatchHTTPSAuthority(host string, selected string) bool {
+	hostAuthority, err := parseAuthority(host, 443)
+	if err != nil || hostAuthority.Host == "" {
+		return false
+	}
+	selectedAuthority, err := parseAuthority(selected, 443)
+	if err != nil || selectedAuthority.Host == "" {
+		return false
+	}
+	return hostAuthority == selectedAuthority
+}
+
+func (p *Policy) matchHTTPFamilyHost(kind string, host string, defaultPort uint16) (Ref, *HTTPEndpoint, authority, bool) {
+	if p == nil {
+		return Ref{}, nil, authority{}, false
+	}
+	endpoints := p.httpFamilyEndpoints(kind)
+	if len(endpoints) == 0 {
+		return Ref{}, nil, authority{}, false
+	}
+	parsedAuthority, err := parseAuthority(host, defaultPort)
+	if err != nil || parsedAuthority.Host == "" {
+		return Ref{}, nil, authority{}, false
 	}
 	var wildcardMatch *hostMatch
 	for _, endpoint := range endpoints {
 		for _, binding := range endpoint.Hosts {
-			if !binding.matches(authority) {
+			if !binding.matches(parsedAuthority) {
 				continue
 			}
 			ref := Ref{Kind: endpoint.Kind, Name: endpoint.Name}
 			if !binding.Wildcard {
-				return ref, endpoint, true
+				return ref, endpoint, parsedAuthority, true
 			}
 			match := &hostMatch{ref: ref, endpoint: endpoint, suffixLength: len(binding.Host)}
 			if wildcardMatch == nil || match.suffixLength > wildcardMatch.suffixLength {
@@ -271,9 +333,9 @@ func (p *Policy) MatchHTTPFamilyHost(kind string, host string) (Ref, *HTTPEndpoi
 		}
 	}
 	if wildcardMatch != nil {
-		return wildcardMatch.ref, wildcardMatch.endpoint, true
+		return wildcardMatch.ref, wildcardMatch.endpoint, parsedAuthority, true
 	}
-	return Ref{}, nil, false
+	return Ref{}, nil, authority{}, false
 }
 
 type hostMatch struct {
@@ -391,6 +453,22 @@ func addrFromIP(ip net.IP) (netip.Addr, bool) {
 type authority struct {
 	Host string
 	Port uint16
+}
+
+func formatAuthority(authority authority, defaultPort uint16) string {
+	if authority.Port == defaultPort {
+		return formatAuthorityHost(authority.Host)
+	}
+	return net.JoinHostPort(authority.Host, strconv.Itoa(int(authority.Port)))
+}
+
+func formatAuthorityHost(host string) string {
+	if strings.Contains(host, ":") {
+		if _, err := netip.ParseAddr(host); err == nil {
+			return "[" + host + "]"
+		}
+	}
+	return host
 }
 
 func parseHostBinding(pattern string, defaultPort uint16) (HostBinding, error) {

@@ -134,6 +134,32 @@ rule "allow-api" {
 	}
 }
 
+func TestRouterExposesHTTPSPortAndRawIPResolution(t *testing.T) {
+	compiled := loadRouterPolicy(t, `
+endpoint "https" "proxmox" {
+  hosts = ["203.0.113.10:8006"]
+}
+`)
+	route := New(hooks.NewPolicyHook(compiled), nil)
+
+	if !route.ShouldInterceptHTTPS(8006) {
+		t.Fatal("expected route to intercept configured https port 8006")
+	}
+	if route.ShouldInterceptHTTPS(8443) {
+		t.Fatal("did not expect route to intercept unconfigured https port 8443")
+	}
+	endpointName, authority, certHost, ok := route.ResolveHTTPSRawIP(net.ParseIP("203.0.113.10"), 8006)
+	if !ok || endpointName != "proxmox" || authority != "203.0.113.10:8006" || certHost != "203.0.113.10" {
+		t.Fatalf("raw IP route resolution = (%q, %q, %q, %v), want proxmox 203.0.113.10:8006 203.0.113.10 true", endpointName, authority, certHost, ok)
+	}
+	if !route.MatchHTTPSAuthority("203.0.113.10:8006", authority) {
+		t.Fatal("expected exact raw IP authority to match")
+	}
+	if route.MatchHTTPSAuthority("203.0.113.10", authority) {
+		t.Fatal("did not expect default-port authority to match non-default raw IP binding")
+	}
+}
+
 func readAuditEvent(t *testing.T, path string) audit.Event {
 	t.Helper()
 	file, err := os.Open(path)

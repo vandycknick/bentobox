@@ -27,10 +27,9 @@ import (
 	"github.com/vandycknick/bentobox/net/bento-netd/internal/secrets"
 )
 
-const (
-	httpsPort                      uint16 = 443
-	certificateRefreshBeforeExpiry        = time.Hour
-)
+const certificateRefreshBeforeExpiry = time.Hour
+
+var errMissingSNI = errors.New("missing_sni")
 
 type HTTPSProxy struct {
 	route             *router.Router
@@ -50,28 +49,58 @@ func NewHTTPSProxy(route *router.Router, certPath string, keyPath string, store 
 	return &HTTPSProxy{route: route, ca: ca, credentialManager: credentials.NewManager(store)}, nil
 }
 
-func (p *HTTPSProxy) ShouldHandle(port uint16) bool {
-	return p != nil && p.route.HasHTTPS() && port == httpsPort
+func (p *HTTPSProxy) ShouldHandle(flow hooks.Flow, decision hooks.RouteDecision) bool {
+	return p != nil && decision.Action == hooks.RouteClassify && p.route.ShouldInterceptHTTPS(flow.DestPort)
+}
+
+type httpsSelection struct {
+	endpointName       string
+	certificateHost    string
+	upstreamServerName string
+	forwardHost        string
+	rawAuthority       string
 }
 
 func (p *HTTPSProxy) Handle(ctx context.Context, inbound net.Conn, flow hooks.Flow, target string, flowDecision hooks.RouteDecision) error {
 	sni, replayed, err := peekClientHello(inbound)
 	if err != nil {
-		if flowAllowsRawFallback(flowDecision) {
+		if errors.Is(err, errMissingSNI) {
+			endpointName, authority, certHost, ok := p.route.ResolveHTTPSRawIP(flow.DestIP, flow.DestPort)
+			if ok {
+				return p.proxyHTTPS(ctx, replayed, flow, target, httpsSelection{
+					endpointName:       endpointName,
+					certificateHost:    certHost,
+					upstreamServerName: certHost,
+					forwardHost:        authority,
+					rawAuthority:       authority,
+				})
+			}
+			if flowAllowsExplicitRawFallback(flowDecision) {
+				return p.proxyDirect(replayed, target)
+			}
+			_ = replayed.Close()
+			return err
+		}
+		if flowAllowsExplicitRawFallback(flowDecision) {
 			return p.proxyDirect(replayed, target)
 		}
 		_ = replayed.Close()
 		return err
 	}
-	_, endpointName, ok := p.route.ResolveHTTPHost("https", sni)
+	endpointName, authority, certHost, ok := p.route.ResolveHTTPSHost(sni, flow.DestPort)
 	if !ok {
 		if flowAllowsRawFallback(flowDecision) {
 			return p.proxyDirect(replayed, target)
 		}
 		_ = replayed.Close()
-		return fmt.Errorf("https sni %q does not match a policy endpoint", sni)
+		return fmt.Errorf("unclassified_https: sni %q does not match a policy endpoint", sni)
 	}
-	return p.proxyHTTPS(ctx, replayed, flow, target, sni, endpointName)
+	return p.proxyHTTPS(ctx, replayed, flow, target, httpsSelection{
+		endpointName:       endpointName,
+		certificateHost:    certHost,
+		upstreamServerName: certHost,
+		forwardHost:        authority,
+	})
 }
 
 func flowAllowsRawFallback(decision hooks.RouteDecision) bool {
@@ -87,6 +116,13 @@ func flowAllowsRawFallback(decision hooks.RouteDecision) bool {
 	return decision.DefaultAction == "allow"
 }
 
+func flowAllowsExplicitRawFallback(decision hooks.RouteDecision) bool {
+	if decision.Action == hooks.RouteAllowDirect {
+		return true
+	}
+	return decision.Action == hooks.RouteClassify && decision.Source == "rule"
+}
+
 func (p *HTTPSProxy) proxyDirect(inbound net.Conn, target string) error {
 	outbound, err := net.Dial("tcp", target)
 	if err != nil {
@@ -97,14 +133,14 @@ func (p *HTTPSProxy) proxyDirect(inbound net.Conn, target string) error {
 	return nil
 }
 
-func (p *HTTPSProxy) proxyHTTPS(ctx context.Context, inbound net.Conn, flow hooks.Flow, target string, serverName string, endpointName string) error {
+func (p *HTTPSProxy) proxyHTTPS(ctx context.Context, inbound net.Conn, flow hooks.Flow, target string, selection httpsSelection) error {
 	serverTLS := tls.Server(inbound, &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		NextProtos: []string{"http/1.1"},
 		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			host := hello.ServerName
 			if host == "" {
-				host = serverName
+				host = selection.certificateHost
 			}
 			return p.ca.CertificateFor(host)
 		},
@@ -113,10 +149,10 @@ func (p *HTTPSProxy) proxyHTTPS(ctx context.Context, inbound net.Conn, flow hook
 		_ = serverTLS.Close()
 		return err
 	}
-	return p.proxyHTTP(ctx, serverTLS, flow, target, serverName, endpointName)
+	return p.proxyHTTP(ctx, serverTLS, flow, target, selection)
 }
 
-func (p *HTTPSProxy) proxyHTTP(ctx context.Context, client *tls.Conn, flow hooks.Flow, target string, serverName string, endpointName string) error {
+func (p *HTTPSProxy) proxyHTTP(ctx context.Context, client *tls.Conn, flow hooks.Flow, target string, selection httpsSelection) error {
 	defer client.Close()
 
 	clientReader := bufio.NewReader(client)
@@ -132,10 +168,17 @@ func (p *HTTPSProxy) proxyHTTP(ctx context.Context, client *tls.Conn, flow hooks
 			_ = req.Body.Close()
 			return writeHTTPStatus(client, http.StatusBadRequest, "missing_host")
 		}
-		_, hostEndpointName, ok := p.route.ResolveHTTPHost("https", req.Host)
-		if !ok || hostEndpointName != endpointName {
-			_ = req.Body.Close()
-			return writeHTTPStatus(client, http.StatusMisdirectedRequest, "host_mismatch")
+		if selection.rawAuthority != "" {
+			if !p.route.MatchHTTPSAuthority(req.Host, selection.rawAuthority) {
+				_ = req.Body.Close()
+				return writeHTTPStatus(client, http.StatusMisdirectedRequest, "host_mismatch")
+			}
+		} else {
+			_, hostEndpointName, ok := p.route.ResolveHTTPHost("https", req.Host)
+			if !ok || hostEndpointName != selection.endpointName {
+				_ = req.Body.Close()
+				return writeHTTPStatus(client, http.StatusMisdirectedRequest, "host_mismatch")
+			}
 		}
 
 		decision, err := p.route.DecideHTTP(ctx, hooks.HTTPRequest{
@@ -160,13 +203,13 @@ func (p *HTTPSProxy) proxyHTTP(ctx context.Context, client *tls.Conn, flow hooks
 			MinVersion: tls.VersionTLS12,
 			NextProtos: []string{"http/1.1"},
 			RootCAs:    p.upstreamRootCAs,
-			ServerName: serverName,
+			ServerName: selection.upstreamServerName,
 		})
 		if err != nil {
 			_ = req.Body.Close()
 			return writeHTTPStatus(client, http.StatusBadGateway, "upstream_error")
 		}
-		if err := p.proxyHTTPSRequest(ctx, client, upstream, req, decision, serverName); err != nil {
+		if err := p.proxyHTTPSRequest(ctx, client, upstream, req, decision, selection.forwardHost); err != nil {
 			return err
 		}
 		if req.Close {
@@ -292,7 +335,7 @@ func parseClientHelloSNI(body []byte) (string, error) {
 		}
 		pos += extensionLength
 	}
-	return "", fmt.Errorf("tls client hello has no sni")
+	return "", errMissingSNI
 }
 
 func parseServerNameExtension(data []byte) (string, error) {
@@ -313,11 +356,15 @@ func parseServerNameExtension(data []byte) (string, error) {
 			return "", fmt.Errorf("truncated server name")
 		}
 		if nameType == 0 {
-			return strings.ToLower(string(data[pos : pos+nameLength])), nil
+			serverName := strings.ToLower(string(data[pos : pos+nameLength]))
+			if serverName == "" {
+				return "", errMissingSNI
+			}
+			return serverName, nil
 		}
 		pos += nameLength
 	}
-	return "", fmt.Errorf("server name extension has no dns name")
+	return "", errMissingSNI
 }
 
 type certificateAuthority struct {

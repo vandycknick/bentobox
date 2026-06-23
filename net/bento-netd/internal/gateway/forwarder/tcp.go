@@ -75,7 +75,7 @@ func TCP(s *stack.Stack, nat map[tcpip.Address]tcpip.Address, natLock *sync.Mute
 			}
 			return
 		}
-		if httpsProxy != nil && httpsProxy.ShouldHandle(id.LocalPort) {
+		if httpsProxy != nil && httpsProxy.ShouldHandle(flow, decision) {
 			if err := httpsProxy.Handle(context.Background(), inbound, flow, target, decision); err != nil {
 				slog.Debug("https proxy failed", "error", err, "target", target)
 			}

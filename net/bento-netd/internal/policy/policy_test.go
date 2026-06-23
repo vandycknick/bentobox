@@ -604,6 +604,58 @@ rule "allow-metadata" {
 	}
 }
 
+func TestHTTPSClassificationUsesConfiguredEndpointPorts(t *testing.T) {
+	compiled := loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "https" "api" {
+  hosts = ["api.example.com:8443"]
+}
+`)
+
+	if !compiled.ShouldInterceptHTTPS(8443) {
+		t.Fatal("expected explicitly configured https port 8443 to be intercepted")
+	}
+	if compiled.ShouldInterceptHTTPS(443) {
+		t.Fatal("did not expect port 443 interception without a port 443 https binding")
+	}
+
+	decision := compiled.EvaluateFlow(Flow{Protocol: "tcp", SourceIP: net.ParseIP("192.168.127.2"), DestIP: net.ParseIP("203.0.113.10"), DestPort: 8443})
+	if decision.Action != ActionDeny || decision.Source != DecisionSourceDefault || !decision.ClassificationOpportunity {
+		t.Fatalf("expected default-deny classification on configured port, got %#v", decision)
+	}
+
+	decision = compiled.EvaluateFlow(Flow{Protocol: "tcp", SourceIP: net.ParseIP("192.168.127.2"), DestIP: net.ParseIP("203.0.113.10"), DestPort: 443})
+	if decision.Action != ActionDeny || decision.ClassificationOpportunity {
+		t.Fatalf("expected unconfigured port to remain flow default deny, got %#v", decision)
+	}
+}
+
+func TestResolveHTTPSRawIPMatchesOnlyExactIPBindings(t *testing.T) {
+	compiled := loadPolicy(t, `
+endpoint "https" "proxmox" {
+  hosts = ["203.0.113.10:8006"]
+}
+
+endpoint "https" "api" {
+  hosts = ["api.example.com", "*.example.net"]
+}
+`)
+
+	ref, authority, certHost, ok := compiled.ResolveHTTPSRawIP(net.ParseIP("203.0.113.10"), 8006)
+	if !ok || ref.Name != "proxmox" || authority != "203.0.113.10:8006" || certHost != "203.0.113.10" {
+		t.Fatalf("raw IP resolution = (%#v, %q, %q, %v), want proxmox 203.0.113.10:8006 203.0.113.10 true", ref, authority, certHost, ok)
+	}
+	if _, _, _, ok := compiled.ResolveHTTPSRawIP(net.ParseIP("203.0.113.10"), 8443); ok {
+		t.Fatal("did not expect raw IP binding to match the wrong port")
+	}
+	if _, _, _, ok := compiled.ResolveHTTPSRawIP(net.ParseIP("203.0.113.11"), 8006); ok {
+		t.Fatal("did not expect raw IP binding to match the wrong IP")
+	}
+}
+
 func TestConditionRuntimeErrorsFailClosed(t *testing.T) {
 	compiled := loadPolicy(t, `
 endpoint "https" "api" {

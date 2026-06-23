@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"log/slog"
+	"net"
 
 	"github.com/vandycknick/bentobox/net/bento-netd/internal/gateway/audit"
 	"github.com/vandycknick/bentobox/net/bento-netd/internal/gateway/hooks"
@@ -18,7 +19,11 @@ type httpsHook interface {
 	MatchHTTPHost(host string) bool
 	ResolveHTTPHost(kind string, host string) (string, string, bool)
 	HasHTTPS() bool
+	ShouldInterceptHTTPS(port uint16) bool
 	MatchHTTPSHost(host string) bool
+	ResolveHTTPSHost(host string, port uint16) (string, string, string, bool)
+	ResolveHTTPSRawIP(destIP net.IP, destPort uint16) (string, string, string, bool)
+	MatchHTTPSAuthority(host string, authority string) bool
 	DecideHTTP(ctx context.Context, request hooks.HTTPRequest) (hooks.RouteDecision, error)
 }
 
@@ -76,9 +81,35 @@ func (r *Router) HasHTTPS() bool {
 	return ok && resolver.HasHTTPS()
 }
 
+func (r *Router) ShouldInterceptHTTPS(port uint16) bool {
+	resolver, ok := r.hook.(httpsHook)
+	return ok && resolver.ShouldInterceptHTTPS(port)
+}
+
 func (r *Router) MatchHTTPSHost(host string) bool {
 	resolver, ok := r.hook.(httpsHook)
 	return ok && resolver.MatchHTTPSHost(host)
+}
+
+func (r *Router) ResolveHTTPSHost(host string, port uint16) (string, string, string, bool) {
+	resolver, ok := r.hook.(httpsHook)
+	if !ok {
+		return "", "", "", false
+	}
+	return resolver.ResolveHTTPSHost(host, port)
+}
+
+func (r *Router) ResolveHTTPSRawIP(destIP net.IP, destPort uint16) (string, string, string, bool) {
+	resolver, ok := r.hook.(httpsHook)
+	if !ok {
+		return "", "", "", false
+	}
+	return resolver.ResolveHTTPSRawIP(destIP, destPort)
+}
+
+func (r *Router) MatchHTTPSAuthority(host string, authority string) bool {
+	resolver, ok := r.hook.(httpsHook)
+	return ok && resolver.MatchHTTPSAuthority(host, authority)
 }
 
 func (r *Router) DecideHTTP(ctx context.Context, request hooks.HTTPRequest) (hooks.RouteDecision, error) {
