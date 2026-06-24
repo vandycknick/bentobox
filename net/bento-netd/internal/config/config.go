@@ -117,9 +117,6 @@ func LoadPolicy(cfg *Config) error {
 			return errors.New("--tls-ca-cert and --tls-ca-key are required when policy contains https endpoints")
 		}
 	}
-	if compiledPolicy.HasCredentials() && cfg.SecretStore == "" {
-		return errors.New("--secret-store-file is required when policy contains credentials")
-	}
 	cfg.Policy = compiledPolicy
 	return nil
 }

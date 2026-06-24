@@ -199,49 +199,21 @@ func (p *HTTPSProxy) proxyHTTP(ctx context.Context, client *tls.Conn, flow hooks
 			return writeDeny(client, decision.Reason)
 		}
 
-		upstream, err := tls.DialWithDialer(&net.Dialer{}, "tcp", target, &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			NextProtos: []string{"http/1.1"},
-			RootCAs:    p.upstreamRootCAs,
-			ServerName: selection.upstreamServerName,
-		})
-		if err != nil {
-			_ = req.Body.Close()
-			return writeHTTPStatus(client, http.StatusBadGateway, "upstream_error")
-		}
-		if err := p.proxyHTTPSRequest(ctx, client, upstream, req, decision, selection.forwardHost); err != nil {
+		upgrade := isWebSocketUpgrade(req)
+		if err := forwardHTTPFamilyRequest(ctx, client, clientReader, req, "https", selection.forwardHost, p.credentialManager, decision.Credential, func() (net.Conn, error) {
+			return tls.DialWithDialer(&net.Dialer{}, "tcp", target, &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				NextProtos: []string{"http/1.1"},
+				RootCAs:    p.upstreamRootCAs,
+				ServerName: selection.upstreamServerName,
+			})
+		}); err != nil {
 			return err
 		}
-		if req.Close {
+		if upgrade || req.Close {
 			return nil
 		}
 	}
-}
-
-func (p *HTTPSProxy) proxyHTTPSRequest(ctx context.Context, client net.Conn, upstream *tls.Conn, req *http.Request, decision hooks.RouteDecision, serverName string) error {
-	defer upstream.Close()
-	upstreamReader := bufio.NewReader(upstream)
-	if err := p.credentialManager.Apply(ctx, req, decision.Credential); err != nil {
-		_ = req.Body.Close()
-		return writeHTTPStatus(client, http.StatusBadGateway, "credential_error")
-	}
-
-	prepareForwardRequest(req, "https", serverName)
-	if err := req.Write(upstream); err != nil {
-		_ = req.Body.Close()
-		return err
-	}
-
-	resp, err := http.ReadResponse(upstreamReader, req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	resp.Header.Del("Alt-Svc")
-	if err := resp.Write(client); err != nil {
-		return err
-	}
-	return nil
 }
 
 type replayConn struct {

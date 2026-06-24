@@ -17,6 +17,7 @@ type Router struct {
 type httpsHook interface {
 	HasHTTP() bool
 	MatchHTTPHost(host string) bool
+	MatchHTTPHostForPort(host string, port uint16) bool
 	ResolveHTTPHost(kind string, host string) (string, string, bool)
 	ShouldInterceptHTTP(port uint16) bool
 	HasHTTPS() bool
@@ -67,6 +68,11 @@ func (r *Router) HasHTTP() bool {
 func (r *Router) MatchHTTPHost(host string) bool {
 	resolver, ok := r.hook.(httpsHook)
 	return ok && resolver.MatchHTTPHost(host)
+}
+
+func (r *Router) MatchHTTPHostForPort(host string, port uint16) bool {
+	resolver, ok := r.hook.(httpsHook)
+	return ok && resolver.MatchHTTPHostForPort(host, port)
 }
 
 func (r *Router) ResolveHTTPHost(kind string, host string) (string, string, bool) {

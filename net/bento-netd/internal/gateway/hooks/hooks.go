@@ -35,9 +35,8 @@ type HTTPRequest struct {
 }
 
 type Credential struct {
-	Kind   string
-	Name   string
-	Secret string
+	Kind string
+	Name string
 }
 
 type PortRange struct {

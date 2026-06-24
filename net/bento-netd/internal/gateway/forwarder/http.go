@@ -44,6 +44,10 @@ func (p *HTTPProxy) Handle(ctx context.Context, inbound net.Conn, flow hooks.Flo
 			_ = req.Body.Close()
 			return writeHTTPStatus(inbound, http.StatusBadRequest, "missing_host")
 		}
+		if p.route.MatchHTTPHost(req.Host) && !p.route.MatchHTTPHostForPort(req.Host, flow.DestPort) {
+			_ = req.Body.Close()
+			return writeHTTPStatus(inbound, http.StatusMisdirectedRequest, "host_mismatch")
+		}
 
 		decision, err := p.route.DecideHTTP(ctx, hooks.HTTPRequest{
 			Flow:         flow,
@@ -60,47 +64,20 @@ func (p *HTTPProxy) Handle(ctx context.Context, inbound net.Conn, flow hooks.Flo
 		}
 		if decision.Action == hooks.RouteDeny {
 			_ = req.Body.Close()
-			if decision.Reason == "missing_host" {
-				return writeHTTPStatus(inbound, http.StatusBadRequest, decision.Reason)
-			}
 			return writeDeny(inbound, decision.Reason)
 		}
 
-		if err := proxyPlainHTTPRequest(inbound, target, req); err != nil {
+		upgrade := isWebSocketUpgrade(req)
+		if err := forwardHTTPFamilyRequest(ctx, inbound, reader, req, "http", req.Host, nil, decision.Credential, func() (net.Conn, error) {
+			return net.Dial("tcp", target)
+		}); err != nil {
 			return err
 		}
-		if req.Close {
+		if upgrade || req.Close {
 			return nil
 		}
 	}
 }
-
-func proxyPlainHTTPRequest(client net.Conn, target string, req *http.Request) error {
-	outbound, err := net.Dial("tcp", target)
-	if err != nil {
-		_ = req.Body.Close()
-		return writeHTTPStatus(client, http.StatusBadGateway, "upstream_error")
-	}
-	defer outbound.Close()
-
-	upstreamReader := bufio.NewReader(outbound)
-	prepareForwardRequest(req, "http", req.Host)
-	if err := req.Write(outbound); err != nil {
-		_ = req.Body.Close()
-		return err
-	}
-
-	resp, err := http.ReadResponse(upstreamReader, req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if err := resp.Write(client); err != nil {
-		return err
-	}
-	return nil
-}
-
 func requestPath(req *http.Request) string {
 	path := req.URL.Path
 	if path == "" {
@@ -109,21 +86,11 @@ func requestPath(req *http.Request) string {
 	return path
 }
 
-func prepareForwardRequest(req *http.Request, scheme string, host string) {
-	req.RequestURI = ""
-	if req.URL.Scheme == "" {
-		req.URL.Scheme = scheme
-	}
-	if req.URL.Host == "" {
-		req.URL.Host = host
-	}
-}
-
 func writeDeny(conn net.Conn, reason string) error {
 	if reason == "" {
 		reason = "request denied by network policy"
 	}
-	return writeHTTPStatus(conn, http.StatusForbidden, reason)
+	return writeHTTPStatus(conn, statusForReason(reason), reason)
 }
 
 func writeHTTPStatus(conn net.Conn, status int, body string) error {

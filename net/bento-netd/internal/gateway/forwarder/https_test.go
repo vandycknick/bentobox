@@ -193,6 +193,90 @@ rule "asset-reads" {
 	}
 }
 
+func TestHTTPSProxySelectedCredentialIsNoopAndSanitizesHTTPFamilyHeaders(t *testing.T) {
+	dir := t.TempDir()
+	caCert, caKey, caPool := writeTestCA(t, dir)
+	route := testRoute(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "https" "local" {
+  hosts = ["localhost"]
+}
+
+credential "bearer_token" "local" {
+  endpoint = https.local
+}
+
+rule "allow-local" {
+  endpoint = https.local
+  verdict = "allow"
+}
+`)
+	proxy, err := NewHTTPSProxy(route, caCert, caKey, nil)
+	if err != nil {
+		t.Fatalf("NewHTTPSProxy returned error: %v", err)
+	}
+	proxy.upstreamRootCAs = caPool
+
+	requestCh := make(chan *http.Request, 1)
+	upstreamAddress, stopUpstream, _ := startObservedTLSUpstreamWithResponseForHost(t, caCert, caKey, "localhost", requestCh, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nSet-Cookie: session=secret\r\nWWW-Authenticate: Basic realm=\"git\"\r\nWWW-Authenticate: Bearer realm=\"api\"\r\nAlt-Svc: h3=\":443\"\r\n\r\nok")
+	defer stopUpstream()
+
+	clientConn, proxyConn := net.Pipe()
+	flow := hooks.Flow{Protocol: "tcp", SourceIP: net.ParseIP("192.168.127.2"), SourcePort: 53100, DestIP: net.ParseIP("127.0.0.1"), DestPort: 443}
+	done := make(chan error, 1)
+	go func() {
+		done <- proxy.Handle(context.Background(), proxyConn, flow, upstreamAddress, routeDecision(t, route, flow))
+	}()
+
+	clientTLS := tls.Client(clientConn, &tls.Config{MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}, RootCAs: caPool, ServerName: "localhost"})
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatalf("client handshake failed: %v", err)
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://localhost/private", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Proxy-Authorization", "Basic guest")
+	request.Header.Set("X-Forwarded-For", "192.0.2.10")
+	if err := request.Write(clientTLS); err != nil {
+		t.Fatalf("write client request: %v", err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(clientTLS), request)
+	if err != nil {
+		t.Fatalf("read client response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", response.StatusCode)
+	}
+	if body := readResponseBody(t, response); body != "ok" {
+		t.Fatalf("expected upstream body, got %q", body)
+	}
+	_ = clientTLS.Close()
+	waitForProxy(t, done)
+
+	upstreamRequest := <-requestCh
+	if got := upstreamRequest.Header.Get("Authorization"); got != "" {
+		t.Fatalf("credential runtime should be a no-op before ticket 92, got Authorization %q", got)
+	}
+	if got := upstreamRequest.Header.Get("Proxy-Authorization"); got != "" {
+		t.Fatalf("expected Proxy-Authorization stripped, got %q", got)
+	}
+	if got := upstreamRequest.Header.Get("X-Forwarded-For"); got != "" {
+		t.Fatalf("expected X-Forwarded-For stripped, got %q", got)
+	}
+	if got := response.Header.Values("WWW-Authenticate"); len(got) != 1 || got[0] != `Basic realm="git"` {
+		t.Fatalf("expected only Basic WWW-Authenticate to survive, got %#v", got)
+	}
+	for _, header := range []string{"Set-Cookie", "Alt-Svc"} {
+		if values := response.Header.Values(header); len(values) != 0 {
+			t.Fatalf("expected response header %s to be stripped, got %#v", header, values)
+		}
+	}
+}
+
 func TestHTTPSProxyDefaultDenyDoesNotContactUpstreamBeforeRequestAllow(t *testing.T) {
 	dir := t.TempDir()
 	caCert, caKey, caPool := writeTestCA(t, dir)
@@ -745,6 +829,10 @@ func startObservedTLSUpstream(t *testing.T, caCertPath string, caKeyPath string,
 }
 
 func startObservedTLSUpstreamForHost(t *testing.T, caCertPath string, caKeyPath string, certHost string, requestCh chan<- *http.Request) (string, func(), <-chan struct{}) {
+	return startObservedTLSUpstreamWithResponseForHost(t, caCertPath, caKeyPath, certHost, requestCh, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+}
+
+func startObservedTLSUpstreamWithResponseForHost(t *testing.T, caCertPath string, caKeyPath string, certHost string, requestCh chan<- *http.Request, response string) (string, func(), <-chan struct{}) {
 	t.Helper()
 	ca, err := loadCertificateAuthority(caCertPath, caKeyPath)
 	if err != nil {
@@ -780,7 +868,7 @@ func startObservedTLSUpstreamForHost(t *testing.T, caCertPath string, caKeyPath 
 		requestCh <- request
 		_, _ = io.Copy(io.Discard, request.Body)
 		_ = request.Body.Close()
-		_, _ = fmt.Fprint(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+		_, _ = fmt.Fprint(conn, response)
 	}()
 	return listener.Addr().String(), func() { _ = listener.Close() }, acceptedCh
 }

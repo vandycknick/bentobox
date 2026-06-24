@@ -563,6 +563,13 @@ func (p *Policy) addCredential(raw rawCredential) error {
 		return fmt.Errorf("credential %q.%q references unknown endpoint %q", raw.Kind, raw.Name, raw.Endpoint.String())
 	}
 	credential := &Credential{Kind: raw.Kind, Name: raw.Name, Endpoint: raw.Endpoint, Condition: raw.Condition}
+	if raw.Condition != "" {
+		program, err := compileCondition(raw.Condition)
+		if err != nil {
+			return fmt.Errorf("credential %q.%q condition: %w", raw.Kind, raw.Name, err)
+		}
+		credential.program = program
+	}
 	key := Ref{Kind: raw.Kind, Name: raw.Name}.String()
 	if _, ok := p.credentials[key]; ok {
 		return fmt.Errorf("duplicate credential %q", key)

@@ -37,6 +37,10 @@ func (h *PolicyHook) MatchHTTPHost(host string) bool {
 	return h.policy.MatchHTTPHost(host)
 }
 
+func (h *PolicyHook) MatchHTTPHostForPort(host string, port uint16) bool {
+	return h.policy.MatchHTTPHostForPort(host, port)
+}
+
 func (h *PolicyHook) ResolveHTTPHost(kind string, host string) (string, string, bool) {
 	ref, _, ok := h.policy.MatchHTTPFamilyHost(kind, host)
 	return ref.Kind, ref.Name, ok
@@ -103,7 +107,7 @@ func routeDecisionFromPolicy(decision policy.Decision) RouteDecision {
 		EndpointKind:              decision.EndpointKind,
 		EndpointName:              decision.EndpointName,
 	}
-	if decision.SelectedCredential != nil && !decision.SelectedCredentialUnsupported {
+	if decision.SelectedCredential != nil {
 		converted.Credential = &Credential{
 			Kind: decision.SelectedCredential.Kind,
 			Name: decision.SelectedCredential.Name,

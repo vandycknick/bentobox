@@ -119,6 +119,7 @@ type Credential struct {
 	Name      string
 	Endpoint  Ref
 	Condition string
+	program   cel.Program
 }
 
 type Rule struct {
@@ -154,20 +155,19 @@ type HTTPRequest struct {
 }
 
 type Decision struct {
-	Action                        Action
-	Layer                         DecisionLayer
-	Source                        DecisionSource
-	DefaultAction                 Action
-	ClassificationOpportunity     bool
-	RuleName                      string
-	Reason                        string
-	EndpointKind                  string
-	EndpointName                  string
-	MatchedL4                     *L4Match
-	MatchedFlow                   Flow
-	MatchedRequest                *HTTPRequest
-	SelectedCredential            *Credential
-	SelectedCredentialUnsupported bool
+	Action                    Action
+	Layer                     DecisionLayer
+	Source                    DecisionSource
+	DefaultAction             Action
+	ClassificationOpportunity bool
+	RuleName                  string
+	Reason                    string
+	EndpointKind              string
+	EndpointName              string
+	MatchedL4                 *L4Match
+	MatchedFlow               Flow
+	MatchedRequest            *HTTPRequest
+	SelectedCredential        *Credential
 }
 
 func Default() *Policy {
@@ -245,6 +245,11 @@ func (p *Policy) ShouldInterceptHTTPS(port uint16) bool {
 func (p *Policy) MatchHTTPHost(host string) bool {
 	_, _, ok := p.MatchHTTPFamilyHost("http", host)
 	return ok
+}
+
+func (p *Policy) MatchHTTPHostForPort(host string, port uint16) bool {
+	_, _, authority, ok := p.matchHTTPFamilyHost("http", host, hostmatch.DefaultPort("http"))
+	return ok && authority.Port == port
 }
 
 func (p *Policy) MatchHTTPSHost(host string) bool {

@@ -52,7 +52,7 @@ rule "allow-github" {
 	}
 }
 
-func TestLoadPolicyRequiresSecretStoreForCredentials(t *testing.T) {
+func TestLoadPolicyDoesNotRequireSecretStoreForCredentials(t *testing.T) {
 	dir := t.TempDir()
 	policyPath := filepath.Join(dir, "policy.hcl")
 	writeConfigPolicy(t, policyPath, `
@@ -80,8 +80,8 @@ rule "allow-github" {
 		t.Fatal(err)
 	}
 	err = LoadPolicy(cfg)
-	if err == nil {
-		t.Fatal("expected missing secret store to be rejected")
+	if err != nil {
+		t.Fatalf("LoadPolicy returned error: %v", err)
 	}
 }
 

@@ -381,7 +381,7 @@ endpoint "http" "metadata" {
 }
 `)
 	decision = compiled.EvaluateHTTP(HTTPRequest{EndpointKind: "http", Host: "unknown.internal", Method: http.MethodGet, Path: "/"})
-	if decision.Action != ActionDeny || decision.Source != DecisionSourceDefault || decision.Reason != "unknown_l7_endpoint" {
+	if decision.Action != ActionDeny || decision.Source != DecisionSourceDefault || decision.Reason != "default_deny" {
 		t.Fatalf("expected unknown http host to use default deny, got %#v", decision)
 	}
 }
@@ -991,6 +991,184 @@ rule "lower-allow" {
 	decision := compiled.EvaluateHTTP(HTTPRequest{EndpointKind: "https", Host: "api.example.com", Method: http.MethodGet, Path: "/"})
 	if decision.Action != ActionDeny || decision.Reason != "condition_error" || decision.RuleName != "bad-condition" {
 		t.Fatalf("expected condition error deny, got %#v", decision)
+	}
+}
+
+func TestCredentialConditionsSelectOneCredential(t *testing.T) {
+	compiled := loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "https" "api" {
+  hosts = ["api.example.com"]
+}
+
+credential "bearer_token" "reader" {
+  endpoint = https.api
+  condition = "http.path.startsWith('/read')"
+}
+
+credential "bearer_token" "writer" {
+  endpoint = https.api
+  condition = "http.method == 'POST'"
+}
+
+rule "allow-api" {
+  endpoint = https.api
+  verdict = "allow"
+}
+`)
+
+	readDecision := compiled.EvaluateHTTP(HTTPRequest{EndpointKind: "https", Host: "api.example.com", Method: http.MethodGet, Path: "/read/status"})
+	if readDecision.Action != ActionAllow || readDecision.SelectedCredential == nil || readDecision.SelectedCredential.Name != "reader" {
+		t.Fatalf("expected reader credential selection, got %#v", readDecision)
+	}
+
+	writeDecision := compiled.EvaluateHTTP(HTTPRequest{EndpointKind: "https", Host: "api.example.com", Method: http.MethodPost, Path: "/write"})
+	if writeDecision.Action != ActionAllow || writeDecision.SelectedCredential == nil || writeDecision.SelectedCredential.Name != "writer" {
+		t.Fatalf("expected writer credential selection, got %#v", writeDecision)
+	}
+
+	publicDecision := compiled.EvaluateHTTP(HTTPRequest{EndpointKind: "https", Host: "api.example.com", Method: http.MethodGet, Path: "/public"})
+	if publicDecision.Action != ActionAllow || publicDecision.SelectedCredential != nil {
+		t.Fatalf("expected explicit allow without credential injection, got %#v", publicDecision)
+	}
+}
+
+func TestCredentialConditionRuntimeErrorsFailClosed(t *testing.T) {
+	compiled := loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "https" "api" {
+  hosts = ["api.example.com"]
+}
+
+credential "bearer_token" "api" {
+  endpoint = https.api
+  condition = "http.headers['x-missing'][0] == 'yes'"
+}
+
+rule "allow-api" {
+  endpoint = https.api
+  verdict = "allow"
+}
+`)
+
+	decision := compiled.EvaluateHTTP(HTTPRequest{EndpointKind: "https", Host: "api.example.com", Method: http.MethodGet, Path: "/"})
+	if decision.Action != ActionDeny || decision.Reason != "credential_condition_error" || decision.Source != DecisionSourceDefault {
+		t.Fatalf("expected credential condition error deny, got %#v", decision)
+	}
+}
+
+func TestAmbiguousCredentialsFailClosedBeforeRules(t *testing.T) {
+	compiled := loadPolicy(t, `
+endpoint "https" "api" {
+  hosts = ["api.example.com"]
+}
+
+credential "bearer_token" "one" {
+  endpoint = https.api
+}
+
+credential "bearer_token" "two" {
+  endpoint = https.api
+}
+
+rule "allow-api" {
+  endpoint = https.api
+  verdict = "allow"
+}
+`)
+
+	decision := compiled.EvaluateHTTP(HTTPRequest{EndpointKind: "https", Host: "api.example.com", Method: http.MethodGet, Path: "/"})
+	if decision.Action != ActionDeny || decision.Reason != "ambiguous_credentials" || decision.Source != DecisionSourceDefault {
+		t.Fatalf("expected ambiguous credential deny, got %#v", decision)
+	}
+}
+
+func TestRuleCredentialIsPredicateNotInjectionTrigger(t *testing.T) {
+	compiled := loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "https" "api" {
+  hosts = ["api.example.com"]
+}
+
+credential "bearer_token" "api" {
+  endpoint = https.api
+  condition = "http.path.startsWith('/private')"
+}
+
+rule "credentialed" {
+  endpoint = https.api
+  credential = bearer_token.api
+  verdict = "allow"
+  priority = 20
+}
+
+rule "public" {
+  endpoint = https.api
+  verdict = "allow"
+  priority = 10
+}
+`)
+
+	privateDecision := compiled.EvaluateHTTP(HTTPRequest{EndpointKind: "https", Host: "api.example.com", Method: http.MethodGet, Path: "/private"})
+	if privateDecision.Action != ActionAllow || privateDecision.RuleName != "credentialed" || privateDecision.SelectedCredential == nil || privateDecision.SelectedCredential.Name != "api" {
+		t.Fatalf("expected credential predicate rule to match selected credential, got %#v", privateDecision)
+	}
+
+	publicDecision := compiled.EvaluateHTTP(HTTPRequest{EndpointKind: "https", Host: "api.example.com", Method: http.MethodGet, Path: "/public"})
+	if publicDecision.Action != ActionAllow || publicDecision.RuleName != "public" || publicDecision.SelectedCredential != nil {
+		t.Fatalf("expected credential predicate to skip without selecting credentials, got %#v", publicDecision)
+	}
+}
+
+func TestUDP443IsNotHTTP3Inspected(t *testing.T) {
+	compiled := loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "https" "api" {
+  hosts = ["api.example.com"]
+}
+`)
+
+	decision := compiled.EvaluateFlow(Flow{Protocol: "udp", SourceIP: net.ParseIP("192.168.127.2"), DestIP: net.ParseIP("203.0.113.10"), DestPort: 443})
+	if decision.Action != ActionDeny || decision.ClassificationOpportunity {
+		t.Fatalf("expected UDP/443 to remain non-classified default deny, got %#v", decision)
+	}
+
+	compiled = loadPolicy(t, `
+settings {
+  default_action = "deny"
+}
+
+endpoint "https" "api" {
+  hosts = ["api.example.com"]
+}
+
+endpoint "ip" "quic" {
+  destination = ["203.0.113.0/24"]
+  protocol = "udp"
+  ports = [443]
+}
+
+rule "allow-quic" {
+  endpoint = ip.quic
+  verdict = "allow"
+}
+`)
+
+	decision = compiled.EvaluateFlow(Flow{Protocol: "udp", SourceIP: net.ParseIP("192.168.127.2"), DestIP: net.ParseIP("203.0.113.10"), DestPort: 443})
+	if decision.Action != ActionAllow || decision.RuleName != "allow-quic" || decision.ClassificationOpportunity {
+		t.Fatalf("expected UDP/443 to follow normal ip endpoint handling without classification, got %#v", decision)
 	}
 }
 

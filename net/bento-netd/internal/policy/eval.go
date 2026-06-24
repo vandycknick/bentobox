@@ -67,22 +67,39 @@ func (p *Policy) EvaluateHTTP(request HTTPRequest) Decision {
 	}
 	endpointRef, endpoint, ok := p.MatchHTTPFamilyHost(request.EndpointKind, request.Host)
 	if !ok {
+		reason := "unknown_l7_endpoint"
+		if p.DefaultAction == ActionDeny {
+			reason = defaultReason(p.DefaultAction)
+		}
 		return Decision{
 			Action:         p.DefaultAction,
 			Layer:          DecisionLayerRequest,
 			Source:         DecisionSourceDefault,
 			DefaultAction:  p.DefaultAction,
-			Reason:         "unknown_l7_endpoint",
+			Reason:         reason,
 			MatchedFlow:    request.Flow,
 			MatchedRequest: &request,
 		}
 	}
 	request.EndpointKind = endpoint.Kind
+	credential, credentialReason := p.selectedCredential(endpointRef, request)
+	if credentialReason != "" {
+		return Decision{
+			Action:         ActionDeny,
+			Layer:          DecisionLayerRequest,
+			Source:         DecisionSourceDefault,
+			DefaultAction:  p.DefaultAction,
+			Reason:         credentialReason,
+			EndpointKind:   endpoint.Kind,
+			EndpointName:   endpoint.Name,
+			MatchedFlow:    request.Flow,
+			MatchedRequest: &request,
+		}
+	}
 	for _, rule := range p.httpRules {
 		if !rule.references(endpointRef) {
 			continue
 		}
-		credential := p.selectedCredential(endpointRef)
 		if rule.Credential != nil {
 			if credential == nil || (Ref{Kind: credential.Kind, Name: credential.Name}) != *rule.Credential {
 				continue
@@ -120,7 +137,6 @@ func (p *Policy) EvaluateHTTP(request HTTPRequest) Decision {
 		}
 		if rule.Verdict == ActionAllow {
 			decision.SelectedCredential = credential
-			decision.SelectedCredentialUnsupported = credential != nil
 		}
 		return decision
 	}
@@ -155,12 +171,26 @@ func (p *Policy) matchIPRule(rule *Rule, flow Flow) (*IPEndpoint, *L4Match) {
 	return nil, nil
 }
 
-func (p *Policy) selectedCredential(endpoint Ref) *Credential {
+func (p *Policy) selectedCredential(endpoint Ref, request HTTPRequest) (*Credential, string) {
 	credentials := p.credentialsByEndpoint[endpoint.String()]
-	if len(credentials) == 1 {
-		return credentials[0]
+	if len(credentials) == 0 {
+		return nil, ""
 	}
-	return nil
+	var selected *Credential
+	for _, credential := range credentials {
+		matches, err := credential.matchesHTTP(request)
+		if err != nil {
+			return nil, "credential_condition_error"
+		}
+		if !matches {
+			continue
+		}
+		if selected != nil {
+			return nil, "ambiguous_credentials"
+		}
+		selected = credential
+	}
+	return selected, ""
 }
 
 func (r *Rule) references(endpoint Ref) bool {
@@ -173,14 +203,25 @@ func (r *Rule) references(endpoint Ref) bool {
 }
 
 func (r *Rule) matchesHTTP(request HTTPRequest) (bool, error) {
-	if r.program == nil {
+	return evalHTTPCondition(r.program, request)
+}
+
+func (c *Credential) matchesHTTP(request HTTPRequest) (bool, error) {
+	if c == nil {
+		return false, nil
+	}
+	return evalHTTPCondition(c.program, request)
+}
+
+func evalHTTPCondition(program cel.Program, request HTTPRequest) (bool, error) {
+	if program == nil {
 		return true, nil
 	}
 	query, err := queryForCEL(request.Query)
 	if err != nil {
 		return false, err
 	}
-	value, _, err := r.program.Eval(map[string]any{
+	value, _, err := program.Eval(map[string]any{
 		"http.method":  strings.ToLower(request.Method),
 		"http.host":    normalizedRequestHost(request),
 		"http.path":    request.Path,
