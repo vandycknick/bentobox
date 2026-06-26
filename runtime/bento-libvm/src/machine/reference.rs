@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use crate::store::models::{looks_like_id_prefix, MachineId};
+use crate::utils::{validate_identifier, IdentifierPolicy};
 use crate::LibVmError;
 
 /// Reference used to resolve a machine.
@@ -50,31 +51,12 @@ impl MachineRef {
 }
 
 pub(crate) fn validate_machine_name(name: &str) -> Result<(), LibVmError> {
-    if name.is_empty() {
-        return Err(LibVmError::InvalidMachineName {
+    validate_identifier(name, IdentifierPolicy { reserved: &[] }).map_err(|reason| {
+        LibVmError::InvalidMachineName {
             name: name.to_string(),
-            reason: "name cannot be empty".to_string(),
-        });
-    }
-
-    if name.starts_with('-') {
-        return Err(LibVmError::InvalidMachineName {
-            name: name.to_string(),
-            reason: "name cannot start with '-'".to_string(),
-        });
-    }
-
-    if let Some(ch) = name
-        .chars()
-        .find(|ch| !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.'))
-    {
-        return Err(LibVmError::InvalidMachineName {
-            name: name.to_string(),
-            reason: format!("unsupported character {ch:?}"),
-        });
-    }
-
-    Ok(())
+            reason,
+        }
+    })
 }
 
 #[cfg(test)]

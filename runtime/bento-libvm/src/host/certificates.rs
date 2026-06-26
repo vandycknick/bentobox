@@ -6,11 +6,11 @@ use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
 };
 
+use crate::constants::{
+    CERTIFICATE_AUTHORITY_CERTIFICATE_FILE_NAME, CERTIFICATE_AUTHORITY_COMMON_NAME,
+    CERTIFICATE_AUTHORITY_PRIVATE_KEY_FILE_NAME,
+};
 use crate::paths::LocalPaths;
-
-const CERTIFICATE_FILE_NAME: &str = "ca.pem";
-const PRIVATE_KEY_FILE_NAME: &str = "ca-key.pem";
-const COMMON_NAME: &str = "Bento Local Certificate Authority";
 
 #[derive(Debug, Clone)]
 pub struct CertificateAuthority {
@@ -32,8 +32,8 @@ pub(crate) fn ensure_certificate_authority_in(
         .with_context(|| format!("create bento keys directory {}", keys_dir.display()))?;
     set_keys_dir_permissions(&keys_dir)?;
 
-    let certificate_path = keys_dir.join(CERTIFICATE_FILE_NAME);
-    let private_key_path = keys_dir.join(PRIVATE_KEY_FILE_NAME);
+    let certificate_path = keys_dir.join(CERTIFICATE_AUTHORITY_CERTIFICATE_FILE_NAME);
+    let private_key_path = keys_dir.join(CERTIFICATE_AUTHORITY_PRIVATE_KEY_FILE_NAME);
 
     validate_existing_file_slot(&certificate_path, "certificate authority certificate")?;
     validate_existing_file_slot(&private_key_path, "certificate authority private key")?;
@@ -74,10 +74,10 @@ fn generate_certificate_authority(
     private_key_path: &Path,
 ) -> eyre::Result<CertificateAuthority> {
     let signing_key = KeyPair::generate().context("generate certificate authority private key")?;
-    let mut params = CertificateParams::new(vec![COMMON_NAME.to_string()])
+    let mut params = CertificateParams::new(vec![CERTIFICATE_AUTHORITY_COMMON_NAME.to_string()])
         .context("create certificate authority parameters")?;
     let mut distinguished_name = DistinguishedName::new();
-    distinguished_name.push(DnType::CommonName, COMMON_NAME);
+    distinguished_name.push(DnType::CommonName, CERTIFICATE_AUTHORITY_COMMON_NAME);
     params.distinguished_name = distinguished_name;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![

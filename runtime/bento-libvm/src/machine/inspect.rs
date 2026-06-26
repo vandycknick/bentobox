@@ -26,7 +26,7 @@ pub struct MachineData {
     /// VM specification used to start the machine.
     pub spec: VmSpec,
     /// Directory containing this machine's persistent runtime files.
-    pub instance_dir: PathBuf,
+    pub machine_dir: PathBuf,
     /// Unix timestamp for when the machine was created.
     pub created_at: i64,
     /// Unix timestamp for the last configuration change.
@@ -69,7 +69,7 @@ impl MachineData {
             id: config.id.to_string(),
             name: config.name,
             spec: config.spec,
-            instance_dir: config.instance_dir,
+            machine_dir: config.machine_dir,
             created_at: config.created_at,
             modified_at: config.modified_at,
             image_ref: config.image_ref,
@@ -91,7 +91,7 @@ impl MachineData {
 
     /// Returns the runtime trace log path for this machine.
     pub fn trace_log_path(&self) -> PathBuf {
-        crate::paths::vmmon_trace_log_path_in(&self.instance_dir)
+        crate::paths::vmmon_trace_log_path_in(&self.machine_dir)
     }
 }
 

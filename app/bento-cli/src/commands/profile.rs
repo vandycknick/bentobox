@@ -305,15 +305,7 @@ pub(crate) fn parse_machine_network_config(input: &str) -> Result<MachineNetwork
 }
 
 fn named_machine_network(name: &str) -> Result<MachineNetworkConfig, String> {
-    if name.is_empty() {
-        return Err("invalid network name: cannot be empty".to_string());
-    }
-    if matches!(name, "private" | "none") {
-        return Err(format!("invalid network name: '{name}' is reserved"));
-    }
-    Ok(MachineNetworkConfig::Named {
-        name: name.to_string(),
-    })
+    MachineNetworkConfig::try_named(name)
 }
 
 fn machine_network_to_profile(network: MachineNetworkConfig) -> ProfileNetwork {
@@ -321,6 +313,7 @@ fn machine_network_to_profile(network: MachineNetworkConfig) -> ProfileNetwork {
         MachineNetworkConfig::Private { policy_ref } => ProfileNetwork::Private { policy_ref },
         MachineNetworkConfig::None => ProfileNetwork::None,
         MachineNetworkConfig::Named { name } => ProfileNetwork::Named { name },
+        other => ProfileNetwork::Named { name: other.name() },
     }
 }
 

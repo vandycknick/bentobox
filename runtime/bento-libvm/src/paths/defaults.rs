@@ -21,16 +21,6 @@ pub(crate) fn resolve_default_run_dir(data_root: &Path) -> Result<PathBuf, LibVm
         .map(|runtime_dir| runtime_dir.unwrap_or_else(|| data_root.join("run")))
 }
 
-pub(crate) fn resolve_default_config_dir() -> Result<PathBuf, LibVmError> {
-    let home = env_absolute_path("HOME")?;
-    let config_home = env_absolute_path("XDG_CONFIG_HOME")?
-        .or_else(|| home.as_ref().map(|path| path.join(".config")));
-
-    config_home
-        .map(|path| path.join(APP_DIR_NAME))
-        .ok_or(LibVmError::ConfigDirUnavailable)
-}
-
 fn env_absolute_path(name: &'static str) -> Result<Option<PathBuf>, LibVmError> {
     match std::env::var_os(name) {
         Some(value) => absolute_path(name, value).map(Some),

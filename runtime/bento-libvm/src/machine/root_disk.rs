@@ -144,7 +144,7 @@ fn try_reflink(source: &Path, destination: &Path) -> io::Result<()> {
 mod tests {
     use std::fs;
 
-    use crate::root_disk::{clone_or_copy_root_disk, resize_raw_disk, RootDiskError};
+    use crate::machine::root_disk::{clone_or_copy_root_disk, resize_raw_disk, RootDiskError};
 
     #[test]
     fn clone_or_copy_root_disk_copies_contents() {

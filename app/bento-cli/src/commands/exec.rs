@@ -50,7 +50,12 @@ impl Cmd {
 
         ensure_guest_ready(&inspect_data)?;
 
-        let status = ssh::run_remote_command(&machine_name, self.user.as_deref(), &self.command)?;
+        let status = ssh::run_remote_command(
+            libvm.local_data_dir(),
+            &machine_name,
+            self.user.as_deref(),
+            &self.command,
+        )?;
         std::process::exit(status.code().unwrap_or(1));
     }
 }

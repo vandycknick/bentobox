@@ -9,21 +9,17 @@ use nix::unistd::pipe;
 use crate::machine::MachineExitCommand;
 use crate::network::VmmonNetworkAttachment;
 use crate::store::models::MachineId;
+use crate::vmmon::Vmmon;
 use crate::LibVmError;
 
 const ENV_VM_STARTPIPE: &str = "_VM_STARTPIPE";
 const ENV_VM_SYNCPIPE: &str = "_VM_SYNCPIPE";
 const VMMON_LAUNCHER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) struct VmmonHandshake {
-    pub(crate) start_write: OwnedFd,
-    pub(crate) sync_read: OwnedFd,
-}
-
 pub(crate) struct VmmonLaunch<'a> {
     pub(crate) machine_id: MachineId,
     pub(crate) name: &'a str,
-    pub(crate) instance_dir: &'a Path,
+    pub(crate) machine_dir: &'a Path,
     pub(crate) pidfile: &'a Path,
     pub(crate) exit_status: &'a Path,
     pub(crate) config: &'a Path,
@@ -37,64 +33,64 @@ pub(crate) struct VmmonLaunch<'a> {
     pub(crate) wait_for_registration: Duration,
 }
 
-pub(crate) async fn spawn(launch: &VmmonLaunch<'_>) -> Result<VmmonHandshake, LibVmError> {
-    let (start_read, start_write) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
-    let (sync_read, sync_write) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
+impl Vmmon {
+    pub(crate) async fn spawn(&self, launch: &VmmonLaunch<'_>) -> Result<(), LibVmError> {
+        let (start_read, start_write) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
+        let (sync_read, sync_write) = pipe().map_err(|err| io::Error::other(err.to_string()))?;
 
-    let mut command = Command::new(resolve_vmmon_executable()?);
-    command
-        .arg("--id")
-        .arg(launch.machine_id.to_string())
-        .arg("--name")
-        .arg(launch.name)
-        .arg("--data-dir")
-        .arg(launch.instance_dir)
-        .arg("--pidfile")
-        .arg(launch.pidfile)
-        .arg("--exit-status")
-        .arg(launch.exit_status)
-        .arg("--config")
-        .arg(launch.config)
-        .arg("--socket")
-        .arg(launch.socket)
-        .arg("--serial-log")
-        .arg(launch.serial_log)
-        .arg("--trace-log")
-        .arg(launch.trace_log)
-        .arg("--network")
-        .arg(launch.network.to_vmmon_arg())
-        .arg("--metadata-config")
-        .arg(launch.metadata_config)
-        .arg("--run-id")
-        .arg(launch.run_id)
-        .arg("--wait-for-registration")
-        .arg(launch.wait_for_registration.as_secs().to_string());
-    if let Some(exit_command) = launch.exit_command {
-        append_exit_command_args(&mut command, exit_command);
+        let mut command = Command::new(resolve_vmmon_executable()?);
+        command
+            .arg("--id")
+            .arg(launch.machine_id.to_string())
+            .arg("--name")
+            .arg(launch.name)
+            .arg("--data-dir")
+            .arg(launch.machine_dir)
+            .arg("--pidfile")
+            .arg(launch.pidfile)
+            .arg("--exit-status")
+            .arg(launch.exit_status)
+            .arg("--config")
+            .arg(launch.config)
+            .arg("--socket")
+            .arg(launch.socket)
+            .arg("--serial-log")
+            .arg(launch.serial_log)
+            .arg("--trace-log")
+            .arg(launch.trace_log)
+            .arg("--network")
+            .arg(launch.network.to_vmmon_arg())
+            .arg("--metadata-config")
+            .arg(launch.metadata_config)
+            .arg("--run-id")
+            .arg(launch.run_id)
+            .arg("--wait-for-registration")
+            .arg(launch.wait_for_registration.as_secs().to_string());
+        if let Some(exit_command) = launch.exit_command {
+            append_exit_command_args(&mut command, exit_command);
+        }
+        command
+            .env(ENV_VM_STARTPIPE, start_read.as_raw_fd().to_string())
+            .env(ENV_VM_SYNCPIPE, sync_write.as_raw_fd().to_string());
+
+        // vmmon handles its own daemonization, so only the child-side pipe fds
+        // must survive exec/self-spawn.
+        clear_cloexec(&start_read)?;
+        clear_cloexec(&sync_write)?;
+
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        drop(start_read);
+        drop(sync_write);
+        wait_for_vmmon_launcher(child).await?;
+
+        release_startpipe(start_write)?;
+        wait_for_start(sync_read, launch.trace_log).await
     }
-    command
-        .env(ENV_VM_STARTPIPE, start_read.as_raw_fd().to_string())
-        .env(ENV_VM_SYNCPIPE, sync_write.as_raw_fd().to_string());
-
-    // vmmon handles its own daemonization, so only the child-side pipe fds
-    // must survive exec/self-spawn.
-    clear_cloexec(&start_read)?;
-    clear_cloexec(&sync_write)?;
-
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-
-    drop(start_read);
-    drop(sync_write);
-    wait_for_vmmon_launcher(child).await?;
-
-    Ok(VmmonHandshake {
-        start_write,
-        sync_read,
-    })
 }
 
 fn append_exit_command_args(command: &mut Command, exit_command: &MachineExitCommand) {
@@ -164,7 +160,7 @@ fn resolve_vmmon_executable() -> Result<PathBuf, LibVmError> {
     Err(LibVmError::VmMonExecutableNotFound { expected_path })
 }
 
-pub(crate) async fn wait_for_start(syncpipe: OwnedFd, trace_path: &Path) -> Result<(), LibVmError> {
+async fn wait_for_start(syncpipe: OwnedFd, trace_path: &Path) -> Result<(), LibVmError> {
     let deadline_duration = Duration::from_secs(30);
     let trace_path = trace_path.to_path_buf();
     let result = tokio::time::timeout(
@@ -190,7 +186,7 @@ pub(crate) async fn wait_for_start(syncpipe: OwnedFd, trace_path: &Path) -> Resu
     }
 }
 
-pub(crate) fn release_startpipe(startpipe: OwnedFd) -> io::Result<()> {
+fn release_startpipe(startpipe: OwnedFd) -> io::Result<()> {
     let mut file = std::fs::File::from(startpipe);
     file.write_all(&[1])?;
     file.flush()

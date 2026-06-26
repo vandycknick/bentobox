@@ -1,4 +1,4 @@
-use bento_libvm::{MachineCreate, MachineNetworkConfig, Runtime};
+use bento_libvm::{MachineNetworkConfig, Memory, Runtime};
 use bento_utils::HumanSize;
 use bento_vm_spec::Mount;
 use clap::Args;
@@ -118,27 +118,29 @@ impl Cmd {
             get_base_rootfs_image(libvm, &resolved.image_ref, Some(&image_progress)).await?
         };
         record_base_rootfs_metadata(&mut resolved.metadata, &base_rootfs);
-        let request = MachineCreate {
-            image_ref: resolved.image_ref.clone(),
-            base_rootfs_path: base_rootfs.path,
-            name: Some(self.name.clone()),
-            labels: resolved.labels,
-            metadata: resolved.metadata,
-            cpus: resolved.cpus,
-            memory_mib: resolved.memory_mib,
-            kernel: Some(boot_assets.kernel),
-            initramfs: boot_assets.initramfs,
-            disk_size_bytes: resolved.disk_size_bytes,
-            nested_virtualization: resolved.nested_virtualization,
-            rosetta: resolved.rosetta,
-            userdata: resolved.userdata,
-            disks: resolved.disks,
-            mounts: resolved.mounts,
-            network: Some(resolved.network),
-        };
-
         progress.step(format!("creating VM {}", self.name));
-        let machine = libvm.create_machine(request).await?;
+        let machine = libvm
+            .machine(resolved.image_ref.clone(), base_rootfs.path)
+            .name(self.name.clone())
+            .labels(resolved.labels)
+            .metadata(resolved.metadata)
+            .maybe_cpus(resolved.cpus)
+            .maybe_memory(
+                resolved
+                    .memory_mib
+                    .map(|memory| Memory::mebibytes(u64::from(memory))),
+            )
+            .kernel(boot_assets.kernel)
+            .maybe_initramfs(boot_assets.initramfs)
+            .maybe_root_disk_size(resolved.disk_size_bytes)
+            .nested_virtualization(resolved.nested_virtualization)
+            .rosetta(resolved.rosetta)
+            .maybe_userdata(resolved.userdata)
+            .disks(resolved.disks)
+            .mounts(resolved.mounts)
+            .network(resolved.network)
+            .create()
+            .await?;
         progress.clear();
         println!("created {}", self.name);
 

@@ -9,6 +9,7 @@ use crate::LibVmError;
 
 /// Whether a runtime root came from defaults or a caller override.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PathChoice {
     /// Resolve this root from the process environment and stored root config.
     Default,
@@ -18,6 +19,7 @@ pub enum PathChoice {
 
 /// Local runtime configuration.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RuntimeConfig {
     /// Root containing persistent machine metadata and host-local assets.
     pub data_root: PathChoice,
@@ -251,6 +253,7 @@ impl Default for RuntimeConfig {
 
 /// Networking configuration for the local runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RuntimeNetworkingConfig {
     /// Driver used for private machine networks.
     pub private_driver: NetworkDriverKind,
@@ -270,8 +273,34 @@ impl Default for RuntimeNetworkingConfig {
     }
 }
 
+impl RuntimeNetworkingConfig {
+    /// Creates runtime networking config with defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the driver used for private machine networks.
+    pub fn with_private_driver(mut self, private_driver: NetworkDriverKind) -> Self {
+        self.private_driver = private_driver;
+        self
+    }
+
+    /// Sets the directory containing policy files.
+    pub fn with_policy_config_dir(mut self, policy_config_dir: impl Into<PathBuf>) -> Self {
+        self.policy_config_dir = Some(policy_config_dir.into());
+        self
+    }
+
+    /// Sets netd-specific defaults.
+    pub fn with_netd(mut self, netd: NetdRuntimeConfig) -> Self {
+        self.netd = netd;
+        self
+    }
+}
+
 /// Configuration for the netd network driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NetdRuntimeConfig {
     /// Subnet used for managed private networks.
     pub subnet: String,
@@ -291,6 +320,32 @@ impl Default for NetdRuntimeConfig {
             tls_ca_cert: None,
             tls_ca_key: None,
         }
+    }
+}
+
+impl NetdRuntimeConfig {
+    /// Creates netd config with defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the subnet used for managed private networks.
+    pub fn with_subnet(mut self, subnet: impl Into<String>) -> Self {
+        self.subnet = subnet.into();
+        self
+    }
+
+    /// Enables or disables packet capture.
+    pub fn with_pcap(mut self, pcap: bool) -> Self {
+        self.pcap = pcap;
+        self
+    }
+
+    /// Sets both TLS CA paths.
+    pub fn with_tls_ca(mut self, cert: impl Into<PathBuf>, key: impl Into<PathBuf>) -> Self {
+        self.tls_ca_cert = Some(cert.into());
+        self.tls_ca_key = Some(key.into());
+        self
     }
 }
 

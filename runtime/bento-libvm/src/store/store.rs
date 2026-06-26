@@ -79,13 +79,13 @@ mod tests {
         (dir, paths)
     }
 
-    fn machine_from_path(id: MachineId, name: String, instance_dir: &Path) -> MachineConfig {
+    fn machine_from_path(id: MachineId, name: String, machine_dir: &Path) -> MachineConfig {
         MachineConfig {
             id,
             lock_id: LockId::from(0),
             name,
             spec: sample_vm_spec(),
-            instance_dir: instance_dir.to_path_buf(),
+            machine_dir: machine_dir.to_path_buf(),
             created_at: 1,
             modified_at: 1,
             image_ref: String::new(),
@@ -371,7 +371,7 @@ mod tests {
             lock_id: LockId::from(42),
             name: "jsonb-test".to_string(),
             spec: sample_vm_spec(),
-            instance_dir: paths.machine(id).dir().to_path_buf(),
+            machine_dir: paths.machine(id).dir().to_path_buf(),
             created_at: 1,
             modified_at: 1,
             image_ref: "test-image:latest".to_string(),

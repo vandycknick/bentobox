@@ -2,12 +2,12 @@ use std::fs;
 
 use crate::LibVmError;
 
-use super::core::{NetworkAttachmentRequest, NetworkDriver, NetworkDriverContext};
+use super::core::{NetworkAttachmentRequest, NetworkDriverBackend, NetworkDriverContext};
 use super::{remove_attached_network, VmmonNetworkAttachment, DRIVER_VZNAT};
 
 pub(super) struct VzNatDriver;
 
-impl NetworkDriver for VzNatDriver {
+impl NetworkDriverBackend for VzNatDriver {
     fn id(&self) -> &'static str {
         DRIVER_VZNAT
     }
@@ -45,7 +45,9 @@ mod tests {
 
     use super::VzNatDriver;
     use crate::lock_manager::LockId;
-    use crate::network::core::{NetworkAttachmentRequest, NetworkDriver, NetworkDriverContext};
+    use crate::network::core::{
+        NetworkAttachmentRequest, NetworkDriverBackend, NetworkDriverContext,
+    };
     use crate::network::NetworkDriverKind;
     use crate::network::VmmonNetworkAttachment;
     use crate::paths::LocalPaths;
@@ -57,14 +59,14 @@ mod tests {
 
     use crate::NetworkPolicyRef;
 
-    fn machine_from_path(id: MachineId, name: String, instance_dir: &Path) -> MachineConfig {
+    fn machine_from_path(id: MachineId, name: String, machine_dir: &Path) -> MachineConfig {
         let spec = sample_vm_spec();
         MachineConfig {
             id,
             lock_id: LockId::from(0),
             name,
             spec,
-            instance_dir: instance_dir.to_path_buf(),
+            machine_dir: machine_dir.to_path_buf(),
             created_at: 1,
             modified_at: 1,
             image_ref: String::new(),

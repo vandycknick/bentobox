@@ -1,17 +1,18 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use crate::instance::prepare_instance_runtime;
+use eyre::Context;
+
+use crate::guest_agent::{self, GuestAgentConfigInput};
 use crate::lock_manager::{LockGuard, LockId, LockManager, ManagedLock};
-use crate::paths::{root_disk_relative_path, vm_spec_path_in, LocalPaths, MachinePaths};
-use crate::root_disk::{clone_or_copy_root_disk, resize_raw_disk};
+use crate::machine::root_disk::resize_raw_disk;
+use crate::paths::{vm_spec_path_in, LocalPaths, MachinePaths};
 use crate::runtime::{RuntimeConfig, RuntimeNetworkingConfig};
 use bento_utils::format_storage_size;
-use bento_vm_spec::{Boot, Disk, Guest, GuestOs, Hardware, Kernel, Mount, Storage, VmSpec};
+use bento_vm_spec::{Hardware, VmSpec};
 use nix::{
     errno::Errno,
     sys::signal::{kill, Signal},
@@ -19,13 +20,14 @@ use nix::{
 };
 
 use crate::machine::{
-    generate_machine_name, validate_machine_name, Machine, MachineCreate, MachineData, MachineRef,
-    MachineRefKind, MachineStatus,
+    Machine, MachineBuilder, MachineData, MachineRef, MachineRefKind, MachineStatus,
 };
 use crate::network::{
-    prepare_network_runtime, reconcile_network_runtime, NetworkDefinition, VmmonNetworkAttachment,
+    prepare_network_runtime, reconcile_network_runtime, validate_network_name, NetworkBuilder,
+    NetworkDefinition, VmmonNetworkAttachment,
 };
 use crate::runtime::transitions::{self, StartFailure, TransitionError};
+use crate::runtime::RuntimeBuilder;
 use crate::store::models::MachineId;
 use crate::store::models::{
     MachineConfig, MachineNetworkConfig as ModelMachineNetworkConfig, MachineRuntimeState,
@@ -35,14 +37,10 @@ use crate::store::{ConfigStore, DataStore, Store};
 use crate::utils::now_unix;
 use crate::vmmon::exit_status::{self, VmmonExitOutcome, VmmonExitStatus};
 use crate::vmmon::process::{self, ProcessIdentity};
-use crate::vmmon::Vmmon;
+use crate::vmmon::{self, LaunchSpecInput, Vmmon};
 use crate::LibVmError;
 
-const DEFAULT_IMAGE_CPUS: u8 = 1;
-const DEFAULT_IMAGE_MEMORY_MIB: u32 = 512;
-const ROOT_DISK_KERNEL_ARG: &str = "root=/dev/vda";
 const STALE_STARTING_TIMEOUT: Duration = Duration::from_secs(60);
-const GENERATED_NAME_ATTEMPTS: u32 = 3;
 
 /// Live runtime observation for a machine: its reconciled state plus the
 /// start timestamp when running.
@@ -89,30 +87,6 @@ pub struct Runtime {
     vmmon: Vmmon,
 }
 
-struct PendingMachine {
-    id: MachineId,
-    name: String,
-    spec: VmSpec,
-    staged_dir: PathBuf,
-    final_dir: PathBuf,
-    image_ref: String,
-    root_disk_size: Option<u64>,
-    labels: BTreeMap<String, String>,
-    metadata: BTreeMap<String, String>,
-    network: ModelMachineNetworkConfig,
-    committed: bool,
-}
-
-struct PendingMachineRequest {
-    name: String,
-    spec: VmSpec,
-    image_ref: String,
-    root_disk_size: Option<u64>,
-    labels: BTreeMap<String, String>,
-    metadata: BTreeMap<String, String>,
-    network: ModelMachineNetworkConfig,
-}
-
 /// Identity for one concrete vmmon run.
 ///
 /// PID alone is not enough because host PIDs can be reused. When the platform
@@ -127,6 +101,11 @@ pub(crate) struct VmmonRunIdentity {
 }
 
 impl Runtime {
+    /// Creates a builder for opening a runtime.
+    pub fn builder() -> RuntimeBuilder {
+        RuntimeBuilder::new()
+    }
+
     /// Opens a local runtime from explicit configuration.
     pub async fn new(config: RuntimeConfig) -> Result<Self, LibVmError> {
         let bootstrap_paths = config.bootstrap_paths()?;
@@ -157,18 +136,19 @@ impl Runtime {
         Self::from_store(paths, Arc::new(store), networking).await
     }
 
-    async fn from_store(
+    pub(crate) async fn from_store(
         paths: LocalPaths,
         store: Arc<dyn DataStore>,
         networking: RuntimeNetworkingConfig,
     ) -> Result<Self, LibVmError> {
         let lock_manager = LockManager::open(paths.locks_dir().to_path_buf())?;
+        let vmmon = Vmmon::new(paths.clone());
         let runtime = Self {
             paths,
             store,
             lock_manager,
             networking,
-            vmmon: Vmmon::new(),
+            vmmon,
         };
         runtime.refresh_active_machine_states().await?;
         Ok(runtime)
@@ -184,202 +164,31 @@ impl Runtime {
         self.paths.images_dir()
     }
 
+    #[cfg(test)]
+    pub(crate) fn local_paths(&self) -> &LocalPaths {
+        &self.paths
+    }
+
     pub(crate) fn machine_paths(&self, machine_id: MachineId) -> MachinePaths {
         self.paths.machine(machine_id)
     }
 
-    pub(crate) fn vmmon(&self) -> Vmmon {
-        self.vmmon
+    pub(crate) fn vmmon(&self) -> &Vmmon {
+        &self.vmmon
     }
 
-    /// Creates a machine and returns an operable handle for it.
-    ///
-    /// When `request.name` is `None`, the runtime generates a valid random name
-    /// and retries name-reservation conflicts up to three times. Explicit names
-    /// are attempted once and preserve normal duplicate-name errors.
-    pub async fn create_machine(&self, request: MachineCreate) -> Result<Machine, LibVmError> {
-        let config = self.create_machine_config(request).await?;
-        Ok(Machine::new(self.clone(), config.id))
-    }
-
-    pub(crate) async fn create_machine_config(
+    /// Creates a builder for a new machine.
+    pub fn machine(
         &self,
-        request: MachineCreate,
-    ) -> Result<MachineConfig, LibVmError> {
-        let Some(name) = request.name.clone() else {
-            return self
-                .create_machine_config_with_generated_name(request)
-                .await;
-        };
-
-        self.create_machine_config_with_name(request, name).await
+        image_ref: impl Into<String>,
+        base_rootfs_path: impl Into<PathBuf>,
+    ) -> MachineBuilder {
+        MachineBuilder::new(self.clone(), image_ref, base_rootfs_path)
     }
 
-    async fn create_machine_config_with_generated_name(
-        &self,
-        request: MachineCreate,
-    ) -> Result<MachineConfig, LibVmError> {
-        for _ in 0..GENERATED_NAME_ATTEMPTS {
-            let name = generate_machine_name()?;
-            match self
-                .create_machine_config_with_name(request.clone(), name)
-                .await
-            {
-                Err(LibVmError::MachineAlreadyExists { .. }) => {}
-                result => return result,
-            }
-        }
-
-        Err(LibVmError::MachineNameGenerationFailed {
-            attempts: GENERATED_NAME_ATTEMPTS,
-        })
-    }
-
-    async fn create_machine_config_with_name(
-        &self,
-        request: MachineCreate,
-        name: String,
-    ) -> Result<MachineConfig, LibVmError> {
-        if matches!(request.disk_size_bytes, Some(0)) {
-            return Err(LibVmError::InvalidCreateRequest {
-                name,
-                reason: "root disk size must be greater than 0".to_string(),
-            });
-        }
-
-        let base_rootfs_path =
-            canonicalize_existing_path(&request.base_rootfs_path, "base rootfs")?;
-        let root_disk_size = request.disk_size_bytes.or_else(|| {
-            fs::metadata(&base_rootfs_path)
-                .ok()
-                .map(|metadata| metadata.len())
-        });
-        if matches!(root_disk_size, Some(0)) {
-            return Err(LibVmError::InvalidCreateRequest {
-                name,
-                reason: "root disk size must be greater than 0".to_string(),
-            });
-        }
-        let kernel_path = canonicalize_optional_existing_path(request.kernel.as_deref(), "kernel")?;
-        let initramfs_path =
-            canonicalize_optional_existing_path(request.initramfs.as_deref(), "initramfs")?;
-        if let Some(userdata) = request.userdata.as_deref() {
-            if userdata.trim().is_empty() {
-                return Err(LibVmError::InvalidCreateRequest {
-                    name,
-                    reason: "userdata cannot be empty".to_string(),
-                });
-            }
-        }
-        let userdata = request.userdata;
-        let disk_paths = canonicalize_existing_paths(&request.disks, "disk")?;
-
-        let resolved_cpus = request.cpus.unwrap_or(DEFAULT_IMAGE_CPUS);
-        let resolved_memory = request.memory_mib.unwrap_or(DEFAULT_IMAGE_MEMORY_MIB);
-
-        let mounts = assign_mount_tags(request.mounts);
-        let disks = std::iter::once(Disk {
-            path: root_disk_relative_path(),
-            read_only: false,
-        })
-        .chain(disk_paths.into_iter().map(|path| Disk {
-            path,
-            read_only: false,
-        }))
-        .collect();
-
-        let spec = VmSpec {
-            guest: Some(Guest {
-                os: Some(GuestOs::Linux),
-            }),
-            boot: Some(Boot {
-                kernel: Some(Kernel {
-                    path: kernel_path,
-                    cmdline: vec![ROOT_DISK_KERNEL_ARG.to_string()],
-                    initramfs: initramfs_path,
-                }),
-                userdata,
-            }),
-            hardware: Some(Hardware {
-                cpus: Some(resolved_cpus),
-                memory: Some(resolved_memory),
-                nested_virtualization: Some(request.nested_virtualization),
-                rosetta: Some(request.rosetta),
-            }),
-            storage: Some(Storage { disks }),
-            mounts,
-            ..VmSpec::current()
-        };
-
-        let network = request.network.unwrap_or_default().into();
-        self.validate_machine_network_config(&network).await?;
-        let pending = self
-            .create_pending(PendingMachineRequest {
-                name,
-                spec,
-                image_ref: request.image_ref.clone(),
-                root_disk_size,
-                labels: request.labels,
-                metadata: request.metadata,
-                network,
-            })
-            .await?;
-        let rootfs_path = MachinePaths::new(pending.dir()).root_disk_path();
-        clone_or_copy_root_disk(&base_rootfs_path, &rootfs_path)?;
-
-        if let Some(size_bytes) = request.disk_size_bytes {
-            resize_raw_disk(&rootfs_path, size_bytes)?;
-        }
-
-        pending.commit(self).await
-    }
-
-    async fn create_pending(
-        &self,
-        request: PendingMachineRequest,
-    ) -> Result<PendingMachine, LibVmError> {
-        let PendingMachineRequest {
-            name,
-            spec,
-            image_ref,
-            root_disk_size,
-            labels,
-            metadata,
-            network,
-        } = request;
-        validate_machine_name(&name)?;
-
-        if self
-            .store
-            .machine_config_by_name(name.as_str())
-            .await?
-            .is_some()
-        {
-            return Err(LibVmError::MachineAlreadyExists { name });
-        }
-
-        let id = MachineId::new();
-        let final_dir = self.paths.machine(id).dir().to_path_buf();
-        if final_dir.exists() {
-            return Err(LibVmError::MachineIdAlreadyExists { id: id.to_string() });
-        }
-
-        let staged_dir = create_staging_dir(&self.paths)?;
-        write_machine_config(&staged_dir, &name, &spec)?;
-
-        Ok(PendingMachine {
-            id,
-            name,
-            spec,
-            staged_dir,
-            final_dir,
-            image_ref,
-            root_disk_size,
-            labels,
-            metadata,
-            network,
-            committed: false,
-        })
+    /// Creates a builder for a named network definition.
+    pub fn network(&self, name: impl Into<String>) -> NetworkBuilder {
+        NetworkBuilder::new(self.clone(), name)
     }
 
     /// Resolves a machine by name, full ID, or ID prefix.
@@ -406,7 +215,7 @@ impl Runtime {
     }
 
     /// Creates a named network definition.
-    pub async fn create_network_definition(
+    pub(crate) async fn create_network_definition(
         &self,
         definition: NetworkDefinition,
     ) -> Result<(), LibVmError> {
@@ -502,6 +311,10 @@ impl Runtime {
 
     async fn acquire_machine_lock(&self, lock_id: LockId) -> Result<LockGuard, LibVmError> {
         self.acquire_lock(self.lock_manager.retrieve(lock_id)).await
+    }
+
+    pub(crate) fn allocate_machine_lock(&self) -> io::Result<ManagedLock> {
+        self.lock_manager.allocate()
     }
 
     async fn acquire_lock(&self, lock: ManagedLock) -> Result<LockGuard, LibVmError> {
@@ -846,6 +659,10 @@ impl Runtime {
         network: &ModelMachineNetworkConfig,
     ) -> Result<(), LibVmError> {
         if let ModelMachineNetworkConfig::Named { name } = network {
+            validate_network_name(name).map_err(|message| LibVmError::NetworkRuntime {
+                reference: name.clone(),
+                message,
+            })?;
             self.store.network_definition(name).await?.ok_or_else(|| {
                 LibVmError::NetworkRuntime {
                     reference: name.clone(),
@@ -871,21 +688,34 @@ impl Runtime {
         reconcile_network_runtime(&self.paths, self.store.as_ref(), config, monitor_running).await
     }
 
-    pub(crate) fn prepare_machine_instance_runtime(
+    pub(crate) fn prepare_vmmon_launch_inputs(
         &self,
         config: &MachineConfig,
-        spec: &mut VmSpec,
         network: &VmmonNetworkAttachment,
     ) -> Result<(), LibVmError> {
-        prepare_instance_runtime(
-            &self.paths,
-            &config.instance_dir,
-            &config.name,
-            spec,
-            network,
-            &self.networking,
-        )
-        .map_err(|err| LibVmError::InstancePreparationFailed {
+        let prepare = || -> eyre::Result<()> {
+            let relative_mount_base = std::env::current_dir()
+                .context("resolve current directory for relative mount sources")?;
+            let machine_paths = self.machine_paths(config.id);
+            let launch_spec = vmmon::prepare_launch_spec(LaunchSpecInput {
+                paths: &self.paths,
+                relative_mount_base: &relative_mount_base,
+                spec: config.spec.clone(),
+            })?;
+            let agent_config = guest_agent::build_config(GuestAgentConfigInput {
+                paths: &self.paths,
+                machine_name: &config.name,
+                spec: &launch_spec,
+                network,
+                networking: &self.networking,
+            })?;
+
+            vmmon::write_launch_spec(&machine_paths.vm_spec_path(), &launch_spec)?;
+            guest_agent::write_config(&machine_paths.metadata_config_path(), &agent_config)?;
+            Ok(())
+        };
+
+        prepare().map_err(|err| LibVmError::MachinePreparationFailed {
             reference: config.name.clone(),
             message: err.to_string(),
         })
@@ -905,6 +735,14 @@ impl Runtime {
         config: &MachineConfig,
     ) -> Result<(), LibVmError> {
         self.store.save_machine_config(config).await
+    }
+
+    pub(crate) async fn add_machine_record(
+        &self,
+        config: &MachineConfig,
+        initial_state: &MachineState,
+    ) -> Result<(), LibVmError> {
+        self.store.add_machine(config, initial_state).await
     }
 
     pub(crate) async fn machine_config_by_name(
@@ -941,8 +779,7 @@ impl Runtime {
         let runtime_status = self.reconcile_machine_runtime_best_effort(&config).await?;
         let state = self.machine_state(config.id).await?;
         let status = if runtime_status.is_running() {
-            let socket_path = self.machine_paths(config.id).vmmon_socket_path();
-            match self.vmmon.inspect(&socket_path).await {
+            match self.vmmon.client(config.id).inspect().await {
                 Ok(response) => MachineStatus::from_protocol(response),
                 Err(message) => {
                     MachineStatus::running_with_message(format!("vmmon inspect failed: {message}"))
@@ -963,7 +800,7 @@ impl Runtime {
 }
 
 pub(crate) fn write_machine_config(
-    instance_dir: &Path,
+    machine_dir: &Path,
     name: &str,
     spec: &VmSpec,
 ) -> Result<(), LibVmError> {
@@ -972,7 +809,7 @@ pub(crate) fn write_machine_config(
             name: name.to_string(),
             source,
         })?;
-    fs::write(vm_spec_path_in(instance_dir), config)?;
+    fs::write(vm_spec_path_in(machine_dir), config)?;
     Ok(())
 }
 
@@ -989,7 +826,7 @@ pub(crate) fn validate_root_disk_growth(
     config: &MachineConfig,
     desired_size: u64,
 ) -> Result<(), LibVmError> {
-    let root_disk_path = MachinePaths::new(&config.instance_dir).root_disk_path();
+    let root_disk_path = MachinePaths::new(&config.machine_dir).root_disk_path();
     let current_size = fs::metadata(&root_disk_path)?.len();
     if desired_size < current_size {
         return Err(LibVmError::InvalidMachineUpdate {
@@ -1009,60 +846,16 @@ pub(crate) fn reconcile_root_disk_size(config: &MachineConfig) -> Result<(), Lib
         return Ok(());
     };
 
-    let root_disk_path = MachinePaths::new(&config.instance_dir).root_disk_path();
+    let root_disk_path = MachinePaths::new(&config.machine_dir).root_disk_path();
     resize_raw_disk(&root_disk_path, desired_size)?;
     Ok(())
-}
-
-fn assign_mount_tags(mounts: Vec<Mount>) -> Vec<Mount> {
-    mounts
-        .into_iter()
-        .enumerate()
-        .map(|(index, mut mount)| {
-            if mount.tag.trim().is_empty() {
-                mount.tag = format!("mount{index}");
-            }
-            mount
-        })
-        .collect()
-}
-
-fn canonicalize_optional_existing_path(
-    path: Option<&Path>,
-    kind: &str,
-) -> Result<Option<PathBuf>, LibVmError> {
-    let Some(path) = path else {
-        return Ok(None);
-    };
-
-    Ok(Some(canonicalize_existing_path(path, kind)?))
-}
-
-fn canonicalize_existing_paths(paths: &[PathBuf], kind: &str) -> Result<Vec<PathBuf>, LibVmError> {
-    paths
-        .iter()
-        .map(|path| canonicalize_existing_path(path, kind))
-        .collect()
-}
-
-fn canonicalize_existing_path(path: &Path, kind: &str) -> Result<PathBuf, LibVmError> {
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-
-    std::fs::canonicalize(&abs).map_err(|err| LibVmError::InvalidCreateRequest {
-        name: kind.to_string(),
-        reason: format!("{kind} path does not exist: {} ({err})", abs.display()),
-    })
 }
 
 pub(crate) async fn wait_for_monitor_stop(
     generation: &VmmonRunIdentity,
     machine_name: &str,
+    timeout: std::time::Duration,
 ) -> Result<(), LibVmError> {
-    let timeout = std::time::Duration::from_secs(45);
     let poll_interval = std::time::Duration::from_millis(200);
     let Some(identity) = ProcessIdentity::for_pid(generation.pid)? else {
         return Ok(());
@@ -1213,6 +1006,18 @@ pub(crate) fn interrupt_monitor(pid: i32) -> io::Result<bool> {
     }
 }
 
+pub(crate) fn kill_monitor_process_group(pid: i32) -> io::Result<bool> {
+    if pid <= 0 {
+        return Ok(false);
+    }
+
+    match kill(Pid::from_raw(-pid), Some(Signal::SIGKILL)) {
+        Ok(()) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(err) => Err(io::Error::other(err.to_string())),
+    }
+}
+
 pub(crate) fn pid_file_mtime(pid_path: &Path) -> i64 {
     std::fs::metadata(pid_path)
         .and_then(|m| m.modified())
@@ -1222,7 +1027,10 @@ pub(crate) fn pid_file_mtime(pid_path: &Path) -> i64 {
         .unwrap_or(0)
 }
 
-fn stopped_machine_state(machine_id: MachineId, last_error: Option<String>) -> MachineState {
+pub(crate) fn stopped_machine_state(
+    machine_id: MachineId,
+    last_error: Option<String>,
+) -> MachineState {
     MachineState {
         machine_id,
         status: MachineRuntimeState::Stopped,
@@ -1234,106 +1042,13 @@ fn stopped_machine_state(machine_id: MachineId, last_error: Option<String>) -> M
     }
 }
 
-impl PendingMachine {
-    fn dir(&self) -> &Path {
-        &self.staged_dir
-    }
-
-    async fn commit(mut self, runtime: &Runtime) -> Result<MachineConfig, LibVmError> {
-        if self.final_dir.exists() {
-            return Err(LibVmError::MachineIdAlreadyExists {
-                id: self.id.to_string(),
-            });
-        }
-
-        if let Some(parent) = self.final_dir.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::rename(&self.staged_dir, &self.final_dir)?;
-
-        let lock = match runtime.lock_manager.allocate() {
-            Ok(lock) => lock,
-            Err(err) => {
-                let _ = fs::remove_dir_all(&self.final_dir);
-                return Err(err.into());
-            }
-        };
-
-        let now = now_unix();
-        let config = MachineConfig {
-            id: self.id,
-            lock_id: lock.id(),
-            name: self.name.clone(),
-            spec: self.spec.clone(),
-            instance_dir: self.final_dir.clone(),
-            created_at: now,
-            modified_at: now,
-            image_ref: self.image_ref.clone(),
-            root_disk_size: self.root_disk_size,
-            labels: self.labels.clone(),
-            metadata: self.metadata.clone(),
-            network: self.network.clone(),
-        };
-        let initial_state = stopped_machine_state(self.id, None);
-        if let Err(err) = runtime.store.add_machine(&config, &initial_state).await {
-            let _ = lock.free();
-            let _ = fs::remove_dir_all(&self.final_dir);
-            return Err(err);
-        }
-
-        self.committed = true;
-        Ok(config)
-    }
-}
-
-impl Drop for PendingMachine {
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-
-        match fs::remove_dir_all(&self.staged_dir) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => {}
-        }
-    }
-}
-
-fn create_staging_dir(paths: &LocalPaths) -> Result<PathBuf, LibVmError> {
-    let staging_root = paths.staging_dir();
-    fs::create_dir_all(&staging_root)?;
-
-    for attempt in 0..256u32 {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|err| LibVmError::InvalidMachineName {
-                name: "staging".to_string(),
-                reason: format!("system clock error while creating staging dir: {err}"),
-            })?
-            .as_nanos();
-        let candidate = staging_root.join(format!("{}-{timestamp}-{attempt}", std::process::id()));
-        match fs::create_dir(&candidate) {
-            Ok(()) => return Ok(candidate),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(err.into()),
-        }
-    }
-
-    Err(LibVmError::InvalidMachineName {
-        name: "staging".to_string(),
-        reason: "failed to allocate unique staging directory".to_string(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use crate::lock_manager::LockId;
-    use crate::machine::{validate_machine_name, MachineRefKind};
-    use crate::paths::{root_disk_relative_path, LocalPaths};
+    use crate::paths::{LocalPaths, MachinePaths};
     use crate::runtime::core::{
-        assign_mount_tags, read_monitor_pid, write_machine_config, PendingMachine,
-        PendingMachineRequest, Runtime, ROOT_DISK_KERNEL_ARG, STALE_STARTING_TIMEOUT,
+        read_monitor_pid, stopped_machine_state, write_machine_config, Runtime,
+        STALE_STARTING_TIMEOUT,
     };
     use crate::store::models::{
         MachineConfig, MachineId, MachineNetworkConfig, MachineRuntimeState, MachineState,
@@ -1342,13 +1057,12 @@ mod tests {
     use crate::utils::now_unix;
     use crate::vmmon::process::ProcessIdentity;
     use crate::{
-        LibVmError, MachineCreate, MachineRef, MachineStatus, MachineUpdate,
-        RuntimeNetworkingConfig,
+        LibVmError, MachineExitOutcome, MachineKillOptions, MachineRef, MachineStatus,
+        MachineUpdate, Memory, RuntimeNetworkingConfig,
     };
-    use bento_vm_spec::{Boot, Guest, GuestOs, Hardware, Kernel, Mount, Storage, VmSpec};
-    use std::io::Read;
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use bento_vm_spec::{Boot, Guest, GuestOs, Hardware, Kernel, VmSpec};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::process::CommandExt;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1375,13 +1089,6 @@ mod tests {
         }
     }
 
-    fn spec_kernel(spec: &VmSpec) -> &Kernel {
-        spec.boot
-            .as_ref()
-            .and_then(|boot| boot.kernel.as_ref())
-            .expect("spec should have kernel section")
-    }
-
     fn spec_hardware(spec: &VmSpec) -> &Hardware {
         spec.hardware
             .as_ref()
@@ -1394,23 +1101,13 @@ mod tests {
             .expect("spec should have hardware section")
     }
 
-    fn spec_storage(spec: &VmSpec) -> &Storage {
-        spec.storage
-            .as_ref()
-            .expect("spec should have storage section")
-    }
-
-    fn spec_userdata(spec: &VmSpec) -> Option<&str> {
-        spec.boot.as_ref().and_then(|boot| boot.userdata.as_deref())
-    }
-
     fn sample_machine_config(paths: &LocalPaths, id: MachineId, name: &str) -> MachineConfig {
         MachineConfig {
             id,
             lock_id: LockId::from(0),
             name: name.to_string(),
             spec: sample_vm_spec(),
-            instance_dir: paths.machine(id).dir().to_path_buf(),
+            machine_dir: paths.machine(id).dir().to_path_buf(),
             created_at: 1,
             modified_at: 1,
             image_ref: "test-image:latest".to_string(),
@@ -1446,59 +1143,71 @@ mod tests {
             .expect("create runtime with mock store")
     }
 
-    async fn create_pending_sample(
-        runtime: &Runtime,
-        name: &str,
-    ) -> Result<PendingMachine, LibVmError> {
-        runtime
-            .create_pending(PendingMachineRequest {
-                name: name.to_string(),
-                spec: sample_vm_spec(),
-                image_ref: "test-image:latest".to_string(),
-                root_disk_size: None,
-                labels: std::collections::BTreeMap::new(),
-                metadata: std::collections::BTreeMap::new(),
-                network: crate::store::models::MachineNetworkConfig::default(),
-            })
-            .await
+    struct TestMachineCreate {
+        name: String,
+        root_disk_size: Option<u64>,
     }
 
-    fn create_request(base_rootfs_path: PathBuf, name: &str) -> MachineCreate {
-        MachineCreate {
-            image_ref: "ghcr.io/vandycknick/archlinuxarm:latest".to_string(),
-            base_rootfs_path,
-            name: Some(name.to_string()),
-            labels: std::collections::BTreeMap::new(),
-            metadata: std::collections::BTreeMap::new(),
-            cpus: None,
-            memory_mib: None,
-            kernel: None,
-            initramfs: None,
-            disk_size_bytes: None,
-            nested_virtualization: false,
-            rosetta: false,
-            userdata: None,
-            disks: Vec::new(),
-            mounts: Vec::new(),
-            network: None,
+    impl TestMachineCreate {
+        async fn commit(self, runtime: &Runtime) -> Result<MachineConfig, LibVmError> {
+            crate::machine::validate_machine_name(&self.name)?;
+            if runtime.machine_config_by_name(&self.name).await?.is_some() {
+                return Err(LibVmError::MachineAlreadyExists { name: self.name });
+            }
+
+            let id = MachineId::new();
+            let machine_dir = runtime.paths.machine(id).dir().to_path_buf();
+            if machine_dir.exists() {
+                return Err(LibVmError::MachineIdAlreadyExists { id: id.to_string() });
+            }
+            std::fs::create_dir_all(&machine_dir)?;
+
+            let spec = sample_vm_spec();
+            write_machine_config(&machine_dir, &self.name, &spec)?;
+            std::fs::write(MachinePaths::new(&machine_dir).root_disk_path(), b"disk")?;
+
+            let lock = match runtime.allocate_machine_lock() {
+                Ok(lock) => lock,
+                Err(err) => {
+                    let _ = std::fs::remove_dir_all(&machine_dir);
+                    return Err(err.into());
+                }
+            };
+
+            let now = now_unix();
+            let config = MachineConfig {
+                id,
+                lock_id: lock.id(),
+                name: self.name,
+                spec,
+                machine_dir: machine_dir.clone(),
+                created_at: now,
+                modified_at: now,
+                image_ref: "test-image:latest".to_string(),
+                root_disk_size: self.root_disk_size,
+                labels: std::collections::BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
+                network: MachineNetworkConfig::default(),
+            };
+            let initial_state = stopped_machine_state(id, None);
+            if let Err(err) = runtime.add_machine_record(&config, &initial_state).await {
+                let _ = lock.free();
+                let _ = std::fs::remove_dir_all(&machine_dir);
+                return Err(err);
+            }
+
+            Ok(config)
         }
     }
 
-    fn write_base_rootfs(data_dir: &std::path::Path) -> PathBuf {
-        let image_dir = data_dir.join("images/sha256-test/linux-arm64");
-        std::fs::create_dir_all(&image_dir).expect("image dir should be created");
-        let base_rootfs_path = image_dir.join("rootfs.img");
-        std::fs::write(&base_rootfs_path, b"disk").expect("rootfs should be written");
-        base_rootfs_path
-    }
-
-    fn write_base_rootfs_with_size(data_dir: &Path, size: u64) -> PathBuf {
-        let image_dir = data_dir.join("images/sha256-test/linux-arm64");
-        std::fs::create_dir_all(&image_dir).expect("image dir should be created");
-        let base_rootfs_path = image_dir.join("rootfs.img");
-        let file = std::fs::File::create(&base_rootfs_path).expect("rootfs should be created");
-        file.set_len(size).expect("rootfs size should be set");
-        base_rootfs_path
+    async fn create_pending_sample(
+        _runtime: &Runtime,
+        name: &str,
+    ) -> Result<TestMachineCreate, LibVmError> {
+        Ok(TestMachineCreate {
+            name: name.to_string(),
+            root_disk_size: None,
+        })
     }
 
     struct ChildGuard {
@@ -1515,22 +1224,17 @@ mod tests {
         }
 
         fn sleep_ignoring_sigint() -> Self {
-            let mut child = std::process::Command::new("python3")
-                .arg("-c")
-                .arg(
-                    "import signal, sys, time; \
-                     signal.signal(signal.SIGINT, signal.SIG_IGN); \
-                     sys.stdout.write('r'); sys.stdout.flush(); \
-                     time.sleep(30)",
-                )
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .expect("spawn signal-resistant sleep process");
-            let mut stdout = child.stdout.take().expect("child stdout should be piped");
-            let mut ready = [0_u8; 1];
-            stdout
-                .read_exact(&mut ready)
-                .expect("child should report readiness");
+            let mut child = std::process::Command::new(
+                std::env::current_exe().expect("current test binary path"),
+            )
+            .env("BENTO_LIBVM_SIGINT_IGNORING_CHILD", "1")
+            .arg("sigint_ignoring_child_process")
+            .arg("--nocapture")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn signal-resistant sleep process");
+            let stdout = child.stdout.take().expect("child stdout should be piped");
+            wait_for_child_ready(stdout);
             Self { child }
         }
 
@@ -1555,6 +1259,39 @@ mod tests {
         fn drop(&mut self) {
             self.kill();
         }
+    }
+
+    fn wait_for_child_ready(stdout: std::process::ChildStdout) {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes = reader.read_line(&mut line).expect("read child stdout");
+            assert!(bytes > 0, "child exited before reporting readiness");
+            if line.trim() == "BENTO_READY" {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn sigint_ignoring_child_process() {
+        if std::env::var_os("BENTO_LIBVM_SIGINT_IGNORING_CHILD").is_none() {
+            return;
+        }
+
+        let action = nix::sys::signal::SigAction::new(
+            nix::sys::signal::SigHandler::SigIgn,
+            nix::sys::signal::SaFlags::empty(),
+            nix::sys::signal::SigSet::empty(),
+        );
+        unsafe {
+            nix::sys::signal::sigaction(nix::sys::signal::Signal::SIGINT, &action)
+                .expect("ignore SIGINT");
+        }
+        println!("BENTO_READY");
+        std::io::stdout().flush().expect("flush readiness");
+        std::thread::sleep(Duration::from_secs(30));
     }
 
     async fn wait_for_machine_state(
@@ -1694,51 +1431,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_commit_cleans_files_and_lock_when_store_add_fails() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let paths = LocalPaths::new(temp.path().join("bento"));
-        let mut store = MockDataStore::new();
-        expect_empty_refresh(&mut store);
-        store
-            .expect_machine_config_by_name()
-            .withf(|name| name == "devbox")
-            .once()
-            .returning(|_| Ok(None));
-        store.expect_add_machine().once().returning(|_, _| {
-            Err(LibVmError::InvalidCreateRequest {
-                name: "store".to_string(),
-                reason: "forced add failure".to_string(),
-            })
-        });
-        let runtime = runtime_with_mock_store(paths, store).await;
-        let pending = create_pending_sample(&runtime, "devbox")
-            .await
-            .expect("create pending machine");
-        let final_dir = pending.final_dir.clone();
-
-        let result = pending.commit(&runtime).await;
-
-        assert!(matches!(
-            result,
-            Err(LibVmError::InvalidCreateRequest { ref reason, .. })
-                if reason == "forced add failure"
-        ));
-        assert!(!final_dir.exists(), "failed commit should remove final dir");
-        let lock = runtime
-            .lock_manager
-            .allocate()
-            .expect("failed commit should free allocated lock");
-        assert_eq!(lock.id(), LockId::from(0));
-    }
-
-    #[tokio::test]
     async fn replace_config_rolls_back_vm_spec_when_store_save_fails() {
         let temp = tempfile::tempdir().expect("create temp dir");
         let paths = LocalPaths::new(temp.path().join("bento"));
         let id = MachineId::new();
         let config = sample_machine_config(&paths, id, "devbox");
-        std::fs::create_dir_all(&config.instance_dir).expect("create instance dir");
-        write_machine_config(&config.instance_dir, &config.name, &config.spec)
+        std::fs::create_dir_all(&config.machine_dir).expect("create machine dir");
+        write_machine_config(&config.machine_dir, &config.name, &config.spec)
             .expect("write original spec");
         let state = stopped_state(id);
         let mut store = MockDataStore::new();
@@ -1775,208 +1474,27 @@ mod tests {
                 if reason == "forced save failure"
         ));
         let restored: VmSpec = serde_json::from_slice(
-            &std::fs::read(config.instance_dir.join("config.json")).expect("read rolled back spec"),
+            &std::fs::read(config.machine_dir.join("config.json")).expect("read rolled back spec"),
         )
         .expect("parse rolled back spec");
         assert_eq!(spec_hardware(&restored).cpus, Some(4));
     }
 
     #[tokio::test]
-    async fn create_machine_clones_rootfs() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let base_rootfs_path = write_base_rootfs(&data_dir);
-
-        let runtime = Runtime::open(
-            LocalPaths::new(data_dir),
-            RuntimeNetworkingConfig::default(),
-        )
-        .await
-        .expect("create runtime");
-        let mut request = create_request(base_rootfs_path, "devbox");
-        request.userdata = Some("#!/bin/sh\necho profile\n".to_string());
-        let machine = runtime
-            .create_machine_config(request)
-            .await
-            .expect("create from image");
-
-        let root_disk = machine.instance_dir.join(root_disk_relative_path());
-        assert_eq!(
-            std::fs::read(root_disk).expect("root disk should exist"),
-            b"disk"
-        );
-        assert_eq!(spec_hardware(&machine.spec).cpus, Some(1));
-        assert_eq!(spec_hardware(&machine.spec).memory, Some(512));
-        assert_eq!(
-            spec_kernel(&machine.spec).cmdline,
-            vec![ROOT_DISK_KERNEL_ARG.to_string()]
-        );
-        assert_eq!(spec_storage(&machine.spec).disks.len(), 1);
-        assert_eq!(
-            spec_storage(&machine.spec).disks[0].path,
-            root_disk_relative_path()
-        );
-        assert!(!spec_storage(&machine.spec).disks[0].read_only);
-        assert_eq!(
-            spec_userdata(&machine.spec),
-            Some("#!/bin/sh\necho profile\n")
-        );
-        assert_eq!(machine.root_disk_size, Some(4));
-    }
-
-    #[tokio::test]
-    async fn create_machine_generates_valid_name_when_missing() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let base_rootfs_path = write_base_rootfs(&data_dir);
-
-        let runtime = Runtime::open(
-            LocalPaths::new(data_dir),
-            RuntimeNetworkingConfig::default(),
-        )
-        .await
-        .expect("create runtime");
-        let mut request = create_request(base_rootfs_path, "ignored");
-        request.name = None;
-
-        let machine = runtime
-            .create_machine_config(request)
-            .await
-            .expect("create with generated name");
-
-        validate_machine_name(&machine.name).expect("generated name is valid");
-        assert_eq!(machine.name, machine.name.to_ascii_lowercase());
-        assert_eq!(machine.name.split('-').count(), 3);
-        let machine_ref = MachineRef::parse(machine.name.clone()).expect("parse generated name");
-        assert_eq!(machine_ref.kind(), &MachineRefKind::Name(machine.name));
-    }
-
-    #[tokio::test]
-    async fn create_machine_retries_generated_name_conflicts() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let base_rootfs_path = write_base_rootfs(&data_dir);
-        let paths = LocalPaths::new(data_dir);
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let observed_attempts = attempts.clone();
-        let mut store = MockDataStore::new();
-        expect_empty_refresh(&mut store);
-        store
-            .expect_machine_config_by_name()
-            .times(2)
-            .returning(|_| Ok(None));
-        store
-            .expect_add_machine()
-            .times(2)
-            .returning(move |config, state| {
-                assert_eq!(state.machine_id, config.id);
-                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-                if attempt == 0 {
-                    Err(LibVmError::MachineAlreadyExists {
-                        name: config.name.clone(),
-                    })
-                } else {
-                    Ok(())
-                }
-            });
-        let runtime = runtime_with_mock_store(paths, store).await;
-        let mut request = create_request(base_rootfs_path, "ignored");
-        request.name = None;
-
-        let config = runtime
-            .create_machine_config(request)
-            .await
-            .expect("generated-name conflict should retry");
-
-        assert_eq!(observed_attempts.load(Ordering::SeqCst), 2);
-        validate_machine_name(&config.name).expect("generated name is valid");
-    }
-
-    #[tokio::test]
-    async fn create_machine_generated_name_conflicts_stop_after_three_attempts() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let base_rootfs_path = write_base_rootfs(&data_dir);
-        let paths = LocalPaths::new(data_dir);
-        let mut store = MockDataStore::new();
-        expect_empty_refresh(&mut store);
-        store
-            .expect_machine_config_by_name()
-            .times(3)
-            .returning(|_| Ok(None));
-        store.expect_add_machine().times(3).returning(|config, _| {
-            Err(LibVmError::MachineAlreadyExists {
-                name: config.name.clone(),
-            })
-        });
-        let runtime = runtime_with_mock_store(paths, store).await;
-        let mut request = create_request(base_rootfs_path, "ignored");
-        request.name = None;
-
-        let err = runtime
-            .create_machine_config(request)
-            .await
-            .expect_err("generated-name conflicts should eventually fail");
-
-        assert!(matches!(
-            err,
-            LibVmError::MachineNameGenerationFailed { attempts: 3 }
-        ));
-    }
-
-    #[tokio::test]
-    async fn create_machine_generated_name_does_not_retry_other_errors() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let base_rootfs_path = write_base_rootfs(&data_dir);
-        let paths = LocalPaths::new(data_dir);
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let observed_attempts = attempts.clone();
-        let mut store = MockDataStore::new();
-        expect_empty_refresh(&mut store);
-        store
-            .expect_machine_config_by_name()
-            .once()
-            .returning(|_| Ok(None));
-        store.expect_add_machine().once().returning(move |_, _| {
-            attempts.fetch_add(1, Ordering::SeqCst);
-            Err(LibVmError::InvalidCreateRequest {
-                name: "store".to_string(),
-                reason: "forced add failure".to_string(),
-            })
-        });
-        let runtime = runtime_with_mock_store(paths, store).await;
-        let mut request = create_request(base_rootfs_path, "ignored");
-        request.name = None;
-
-        let err = runtime
-            .create_machine_config(request)
-            .await
-            .expect_err("non-conflict errors should not retry");
-
-        assert_eq!(observed_attempts.load(Ordering::SeqCst), 1);
-        assert!(matches!(
-            err,
-            LibVmError::InvalidCreateRequest { ref reason, .. } if reason == "forced add failure"
-        ));
-    }
-
-    #[tokio::test]
     async fn inspect_returns_local_status_for_stopped_machine() {
         let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let base_rootfs_path = write_base_rootfs(&data_dir);
-
         let runtime = Runtime::open(
-            LocalPaths::new(data_dir),
+            LocalPaths::new(temp.path().join("bento")),
             RuntimeNetworkingConfig::default(),
         )
         .await
         .expect("create runtime");
-        let machine = runtime
-            .create_machine_config(create_request(base_rootfs_path, "devbox"))
+        let machine = create_pending_sample(&runtime, "devbox")
             .await
-            .expect("create from image");
+            .expect("create pending machine")
+            .commit(&runtime)
+            .await
+            .expect("commit machine");
 
         let data = machine_handle(&runtime, machine.id)
             .inspect()
@@ -1987,120 +1505,6 @@ mod tests {
         assert!(!data.status.ready());
         assert_eq!(data.status.label(), "stopped");
         assert_eq!(data.status.message(), None);
-    }
-
-    #[tokio::test]
-    async fn create_machine_defers_initramfs_generation_until_start() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let base_rootfs_path = write_base_rootfs(&data_dir);
-
-        let runtime = Runtime::open(
-            LocalPaths::new(data_dir),
-            RuntimeNetworkingConfig::default(),
-        )
-        .await
-        .expect("create runtime");
-        let machine = runtime
-            .create_machine_config(create_request(base_rootfs_path, "devbox"))
-            .await
-            .expect("create from image");
-
-        assert_eq!(spec_kernel(&machine.spec).initramfs, None);
-        assert!(!machine.instance_dir.join("initramfs").exists());
-    }
-
-    #[tokio::test]
-    async fn create_machine_respects_explicit_initramfs() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let base_rootfs_path = write_base_rootfs(&data_dir);
-        let explicit = temp.path().join("custom-initramfs");
-        std::fs::write(&explicit, b"custom initramfs").expect("write explicit initramfs");
-
-        let runtime = Runtime::open(
-            LocalPaths::new(data_dir),
-            RuntimeNetworkingConfig::default(),
-        )
-        .await
-        .expect("create runtime");
-        let mut request = create_request(base_rootfs_path, "devbox");
-        request.initramfs = Some(explicit.clone());
-        let machine = runtime
-            .create_machine_config(request)
-            .await
-            .expect("create from image");
-
-        assert_eq!(
-            spec_kernel(&machine.spec).initramfs,
-            Some(std::fs::canonicalize(explicit).expect("canonicalize explicit"))
-        );
-        assert!(!machine.instance_dir.join("initramfs").exists());
-    }
-
-    #[tokio::test]
-    async fn create_machine_does_not_require_initramfs_assets() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let base_rootfs_path = write_base_rootfs(&data_dir);
-
-        let runtime = Runtime::open(
-            LocalPaths::new(data_dir),
-            RuntimeNetworkingConfig::default(),
-        )
-        .await
-        .expect("create runtime");
-        let machine = runtime
-            .create_machine_config(create_request(base_rootfs_path, "devbox"))
-            .await
-            .expect("create without boot assets");
-
-        assert_eq!(spec_kernel(&machine.spec).initramfs, None);
-        assert!(!machine.instance_dir.join("initramfs").exists());
-    }
-
-    #[test]
-    fn assign_mount_tags_fills_missing_tags_without_rewriting_sources() {
-        let mounts = assign_mount_tags(vec![Mount {
-            source: PathBuf::from("~"),
-            tag: String::new(),
-            read_only: false,
-        }]);
-
-        assert_eq!(mounts[0].tag, "mount0");
-        assert_eq!(mounts[0].source, PathBuf::from("~"));
-    }
-
-    #[tokio::test]
-    async fn create_pending_and_commit_write_vm_spec_and_state() {
-        let temp = tempfile::tempdir().expect("create temp dir");
-        let runtime = Runtime::open(
-            LocalPaths::new(temp.path().join("bento")),
-            RuntimeNetworkingConfig::default(),
-        )
-        .await
-        .expect("create runtime");
-
-        let pending = create_pending_sample(&runtime, "devbox")
-            .await
-            .expect("create pending machine");
-
-        assert!(pending.dir().starts_with(runtime.paths.staging_dir()));
-
-        let machine = pending.commit(&runtime).await.expect("commit machine");
-        let state = runtime
-            .machine_state(machine.id)
-            .await
-            .expect("read machine state");
-
-        assert_eq!(machine.name, "devbox");
-        assert_eq!(state.status, MachineRuntimeState::Stopped);
-        assert_eq!(
-            machine.instance_dir,
-            runtime.paths.machine(machine.id).dir()
-        );
-        assert!(runtime.paths.machine(machine.id).vm_spec_path().exists());
-        assert!(runtime.lock_manager.lock_path(machine.lock_id).exists());
     }
 
     #[tokio::test]
@@ -2256,6 +1660,120 @@ mod tests {
             .expect("read machine state");
 
         assert_eq!(inspect_data.status, MachineStatus::Stopped);
+        assert_eq!(state.status, MachineRuntimeState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn wait_reports_matching_exit_status_when_monitor_already_exited() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let runtime = Runtime::open(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
+
+        let machine = create_pending_sample(&runtime, "devbox")
+            .await
+            .expect("create pending machine")
+            .commit(&runtime)
+            .await
+            .expect("commit machine");
+        runtime
+            .set_machine_state(
+                machine.id,
+                MachineRuntimeState::Running,
+                Some(12_345),
+                Some(42),
+                Some("run-1".to_string()),
+                None,
+            )
+            .await
+            .expect("set running state");
+        std::fs::write(
+            runtime.paths.machine(machine.id).vmmon_exit_status_path(),
+            r#"{"runId":"run-1","pid":12345,"exitedAt":99,"outcome":"error","error":"runtime exploded"}"#,
+        )
+        .expect("write exit status");
+
+        let exit = machine_handle(&runtime, machine.id)
+            .wait()
+            .await
+            .expect("wait should report vmmon exit status");
+        let state = runtime
+            .machine_state(machine.id)
+            .await
+            .expect("read machine state");
+
+        assert_eq!(exit.run_id.as_deref(), Some("run-1"));
+        assert!(exit.exited_at.is_some());
+        assert_eq!(
+            exit.outcome,
+            MachineExitOutcome::Error {
+                message: Some("runtime exploded".to_string())
+            }
+        );
+        assert_eq!(exit.machine.status.label(), "error");
+        assert_eq!(state.status, MachineRuntimeState::Error);
+        assert_eq!(state.last_error.as_deref(), Some("runtime exploded"));
+    }
+
+    #[tokio::test]
+    async fn kill_with_returns_forced_machine_exit() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let runtime = Runtime::open(
+            LocalPaths::new(temp.path().join("bento")),
+            RuntimeNetworkingConfig::default(),
+        )
+        .await
+        .expect("create runtime");
+
+        let machine = create_pending_sample(&runtime, "devbox")
+            .await
+            .expect("create pending machine")
+            .commit(&runtime)
+            .await
+            .expect("commit machine");
+        let mut command = std::process::Command::new("sleep");
+        command.arg("5").process_group(0);
+        let mut child = command.spawn().expect("spawn sleep process group");
+        let pid = child.id() as i32;
+        let started_at = ProcessIdentity::for_pid(pid)
+            .expect("read child process identity")
+            .expect("child process should exist")
+            .started_at();
+        let reaper = std::thread::spawn(move || child.wait());
+        let pid_path = runtime.paths.machine(machine.id).vmmon_pid_path();
+        std::fs::write(&pid_path, format!("{pid}\n")).expect("write pid file");
+        runtime
+            .set_machine_state(
+                machine.id,
+                MachineRuntimeState::Running,
+                Some(pid),
+                started_at,
+                Some("run-1".to_string()),
+                None,
+            )
+            .await
+            .expect("set running state");
+
+        let exit = machine_handle(&runtime, machine.id)
+            .kill_with(MachineKillOptions::new().timeout(Duration::from_secs(2)))
+            .await
+            .expect("kill should return machine exit");
+        let wait_status = reaper
+            .join()
+            .expect("join child reaper")
+            .expect("wait for child");
+        let state = runtime
+            .machine_state(machine.id)
+            .await
+            .expect("read machine state");
+
+        assert!(!wait_status.success());
+        assert_eq!(exit.run_id.as_deref(), Some("run-1"));
+        assert_eq!(exit.outcome, MachineExitOutcome::Forced);
+        assert_eq!(exit.machine.status, MachineStatus::Stopped);
         assert_eq!(state.status, MachineRuntimeState::Stopped);
     }
 
@@ -2954,23 +2472,23 @@ mod tests {
     #[tokio::test]
     async fn update_changes_hardware_and_desired_root_disk_size() {
         let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let base_rootfs_path = write_base_rootfs(&data_dir);
         let runtime = Runtime::open(
-            LocalPaths::new(data_dir),
+            LocalPaths::new(temp.path().join("bento")),
             RuntimeNetworkingConfig::default(),
         )
         .await
         .expect("create runtime");
-        let machine = runtime
-            .create_machine_config(create_request(base_rootfs_path, "devbox"))
+        let machine = create_pending_sample(&runtime, "devbox")
             .await
-            .expect("create machine");
+            .expect("create pending machine")
+            .commit(&runtime)
+            .await
+            .expect("commit machine");
 
         let updated = machine_handle(&runtime, machine.id)
             .update(MachineUpdate {
                 cpus: Some(6),
-                memory_mib: Some(2048),
+                memory: Some(Memory::mebibytes(2048)),
                 root_disk_size: Some(8),
                 ..MachineUpdate::default()
             })
@@ -2993,18 +2511,26 @@ mod tests {
     #[tokio::test]
     async fn update_root_disk_shrink_error_uses_human_sizes() {
         let temp = tempfile::tempdir().expect("create temp dir");
-        let data_dir = temp.path().join("bento");
-        let base_rootfs_path = write_base_rootfs_with_size(&data_dir, 2 * 1024 * 1024);
         let runtime = Runtime::open(
-            LocalPaths::new(data_dir),
+            LocalPaths::new(temp.path().join("bento")),
             RuntimeNetworkingConfig::default(),
         )
         .await
         .expect("create runtime");
-        let machine = runtime
-            .create_machine_config(create_request(base_rootfs_path, "devbox"))
+        let machine = create_pending_sample(&runtime, "devbox")
             .await
-            .expect("create machine");
+            .expect("create pending machine")
+            .commit(&runtime)
+            .await
+            .expect("commit machine");
+        let root_disk = MachinePaths::new(&machine.machine_dir).root_disk_path();
+        let root_disk_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(root_disk)
+            .expect("open root disk");
+        root_disk_file
+            .set_len(2 * 1024 * 1024)
+            .expect("set root disk size");
 
         let err = machine_handle(&runtime, machine.id)
             .update(MachineUpdate {
@@ -3044,7 +2570,7 @@ mod tests {
             .await
             .expect("remove machine");
 
-        assert!(!machine.instance_dir.exists());
+        assert!(!machine.machine_dir.exists());
         assert!(!lock_path.exists());
         assert!(runtime
             .list_machine_configs()
@@ -3082,7 +2608,7 @@ mod tests {
             err,
             LibVmError::MachineAlreadyRunning { ref reference } if reference == "devbox"
         ));
-        assert!(machine.instance_dir.exists());
+        assert!(machine.machine_dir.exists());
         assert_eq!(
             runtime
                 .list_machine_configs()

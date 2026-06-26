@@ -24,3 +24,9 @@ pub(crate) const DEFAULT_PROFILE_IMAGE: &str = "ghcr.io/vandycknick/archlinux:la
 /// know what a profile is. It is not a user-facing label and should not be set
 /// through `--label`.
 pub(crate) const PROFILE_METADATA_KEY: &str = "bento.profile";
+
+/// Private SSH key filename used for Bento guest login credentials.
+pub(crate) const GUEST_SSH_PRIVATE_KEY_FILE_NAME: &str = "id_ed25519";
+
+/// Public SSH key filename used for Bento guest login credentials.
+pub(crate) const GUEST_SSH_PUBLIC_KEY_FILE_NAME: &str = "id_ed25519.pub";

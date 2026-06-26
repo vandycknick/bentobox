@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-use bento_libvm::{MachineUpdate, Runtime};
+use bento_libvm::{MachineUpdate, Memory, Runtime};
 use bento_utils::HumanSize;
 use clap::Args;
 
@@ -68,7 +68,7 @@ impl ParsedSet {
             eyre::bail!("at least one KEY=VALUE setting is required");
         }
 
-        let mut update = MachineUpdate::default();
+        let mut update = MachineUpdate::new();
         let mut seen = Vec::new();
         for setting in settings {
             let (key, value) = setting
@@ -87,16 +87,28 @@ impl ParsedSet {
             seen.push(key);
 
             match key {
-                "name" => update.name = Some(value.to_string()),
-                "cpus" => update.cpus = Some(parse_cpus(value)?),
-                "memory" => update.memory_mib = Some(parse_memory(value)?),
-                "disk" => update.root_disk_size = Some(parse_disk(value)?),
-                "network" => {
-                    update.network =
-                        Some(parse_machine_network_config(value).map_err(eyre::Report::msg)?)
+                "name" => {
+                    update = update.name(value);
                 }
-                "nested-virtualization" => update.nested_virtualization = Some(parse_bool(value)?),
-                "rosetta" => update.rosetta = Some(parse_bool(value)?),
+                "cpus" => {
+                    update = update.cpus(parse_cpus(value)?);
+                }
+                "memory" => {
+                    update = update.memory(parse_memory(value)?);
+                }
+                "disk" => {
+                    update = update.root_disk_size(parse_disk(value)?);
+                }
+                "network" => {
+                    update = update
+                        .network(parse_machine_network_config(value).map_err(eyre::Report::msg)?);
+                }
+                "nested-virtualization" => {
+                    update = update.nested_virtualization(parse_bool(value)?);
+                }
+                "rosetta" => {
+                    update = update.rosetta(parse_bool(value)?);
+                }
                 _ => unreachable!("normalize_key rejects unknown keys"),
             }
         }
@@ -130,12 +142,13 @@ fn parse_cpus(value: &str) -> eyre::Result<u8> {
     Ok(cpus)
 }
 
-fn parse_memory(value: &str) -> eyre::Result<u32> {
-    value
+fn parse_memory(value: &str) -> eyre::Result<Memory> {
+    let mebibytes = value
         .parse::<HumanSize>()
         .map_err(eyre::Report::msg)?
         .memory_mib()
-        .map_err(eyre::Report::msg)
+        .map_err(eyre::Report::msg)?;
+    Ok(Memory::mebibytes(u64::from(mebibytes)))
 }
 
 fn parse_disk(value: &str) -> eyre::Result<u64> {
@@ -160,6 +173,8 @@ fn parse_bool(value: &str) -> eyre::Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use bento_libvm::Memory;
+
     use super::ParsedSet;
 
     #[test]
@@ -169,7 +184,7 @@ mod tests {
 
         assert_eq!(parsed.machine, None);
         assert_eq!(parsed.update.cpus, Some(4));
-        assert_eq!(parsed.update.memory_mib, Some(8192));
+        assert_eq!(parsed.update.memory, Some(Memory::mebibytes(8192)));
     }
 
     #[test]

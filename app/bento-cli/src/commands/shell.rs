@@ -72,7 +72,7 @@ impl Cmd {
         }
 
         ensure_guest_ready(&inspect_data)?;
-        ssh::exec_remote_shell(&machine_name, self.user.as_deref())
+        ssh::exec_remote_shell(libvm.local_data_dir(), &machine_name, self.user.as_deref())
     }
 }
 

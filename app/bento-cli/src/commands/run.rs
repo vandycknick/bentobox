@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
 use bento_libvm::{
-    MachineCreate, MachineNetworkConfig, MachineRef, Runtime, DEFAULT_GUEST_READINESS_TIMEOUT,
+    MachineNetworkConfig, MachineRef, Memory, Runtime, DEFAULT_GUEST_READINESS_TIMEOUT,
 };
 use bento_vm_spec::Mount;
 use clap::Args;
@@ -68,27 +68,28 @@ impl Cmd {
             get_base_rootfs_image(libvm, &resolved.image_ref, Some(&image_progress)).await?
         };
         record_base_rootfs_metadata(&mut resolved.metadata, &base_rootfs);
-        let request = MachineCreate {
-            image_ref: resolved.image_ref.clone(),
-            base_rootfs_path: base_rootfs.path,
-            name: None,
-            labels: resolved.labels,
-            metadata: resolved.metadata,
-            cpus: resolved.cpus,
-            memory_mib: resolved.memory_mib,
-            kernel: Some(boot_assets.kernel),
-            initramfs: boot_assets.initramfs,
-            disk_size_bytes: resolved.disk_size_bytes,
-            nested_virtualization: resolved.nested_virtualization,
-            rosetta: resolved.rosetta,
-            userdata: resolved.userdata,
-            disks: resolved.disks,
-            mounts: resolved.mounts,
-            network: Some(resolved.network),
-        };
-
         progress.step("creating ephemeral VM");
-        let machine = libvm.create_machine(request).await?;
+        let machine = libvm
+            .machine(resolved.image_ref.clone(), base_rootfs.path)
+            .labels(resolved.labels)
+            .metadata(resolved.metadata)
+            .maybe_cpus(resolved.cpus)
+            .maybe_memory(
+                resolved
+                    .memory_mib
+                    .map(|memory| Memory::mebibytes(u64::from(memory))),
+            )
+            .kernel(boot_assets.kernel)
+            .maybe_initramfs(boot_assets.initramfs)
+            .maybe_root_disk_size(resolved.disk_size_bytes)
+            .nested_virtualization(resolved.nested_virtualization)
+            .rosetta(resolved.rosetta)
+            .maybe_userdata(resolved.userdata)
+            .disks(resolved.disks)
+            .mounts(resolved.mounts)
+            .network(resolved.network)
+            .create()
+            .await?;
         let machine_name = machine.inspect().await?.name;
         progress.step(format!("starting {machine_name}"));
         machine
@@ -107,9 +108,9 @@ impl Cmd {
         }
 
         let status = if self.command.is_empty() {
-            ssh::run_remote_shell_status(&machine_name, None)?
+            ssh::run_remote_shell_status(data_dir, &machine_name, None)?
         } else {
-            ssh::run_remote_command(&machine_name, None, &self.command)?
+            ssh::run_remote_command(data_dir, &machine_name, None, &self.command)?
         };
         let code = status.code().unwrap_or(1);
         let should_keep = self.keep || (self.keep_on_failure && code != 0);

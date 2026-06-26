@@ -75,13 +75,13 @@ impl MachineView {
             guest: MachineGuestView {
                 status: data.status.label().to_string(),
                 ready: data.status.guest_ready(),
-                settings: guest_settings(&data.spec, &data.instance_dir),
+                settings: guest_settings(&data.spec, &data.machine_dir),
             },
             ready: data.status.ready(),
             summary,
             labels: data.labels.clone(),
             metadata: data.metadata.clone(),
-            dir: data.instance_dir.clone(),
+            dir: data.machine_dir.clone(),
             spec: data.spec.clone(),
         }
     }

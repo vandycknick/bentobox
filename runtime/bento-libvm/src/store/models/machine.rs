@@ -20,7 +20,8 @@ pub(crate) struct MachineConfig {
     pub lock_id: LockId,
     pub name: String,
     pub spec: VmSpec,
-    pub instance_dir: PathBuf,
+    #[serde(alias = "instanceDir")]
+    pub machine_dir: PathBuf,
     pub created_at: i64,
     pub modified_at: i64,
     pub image_ref: String,

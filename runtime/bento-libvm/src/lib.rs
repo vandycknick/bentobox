@@ -19,16 +19,14 @@
 //! }
 //! ```
 
+mod constants;
 mod error;
+mod guest_agent;
 pub mod host;
-mod instance;
 mod lock_manager;
 mod machine;
-mod mount_path;
 mod network;
-mod network_policy;
 mod paths;
-mod root_disk;
 mod runtime;
 mod store;
 mod utils;
@@ -37,16 +35,15 @@ mod vmmon;
 pub use crate::error::LibVmError;
 pub use crate::host::{ensure_certificate_authority, CertificateAuthority};
 pub use crate::machine::{
-    Machine, MachineCreate, MachineData, MachineExitCommand, MachineRef, MachineStartOptions,
-    MachineStatus, MachineUpdate,
+    resolve_mount_location, Machine, MachineBuilder, MachineData, MachineExit, MachineExitCommand,
+    MachineExitOutcome, MachineKillOptions, MachineRef, MachineStartOptions, MachineStatus,
+    MachineStopOptions, MachineUpdate, MachineWaitOptions, Memory, DEFAULT_MACHINE_WAIT_TIMEOUT,
 };
-pub use crate::mount_path::resolve_mount_location;
 pub use crate::network::{
-    MachineNetworkConfig, NetworkDefinition, NetworkDriverKind, NetworkDriverPreference,
-    NetworkTopology,
+    MachineNetworkConfig, NetworkBuilder, NetworkDefinition, NetworkDriver, NetworkDriverKind,
+    NetworkPolicyRef, NetworkTopology,
 };
-pub use crate::network_policy::NetworkPolicyRef;
 pub use crate::runtime::{
-    NetdRuntimeConfig, PathChoice, Runtime, RuntimeConfig, RuntimeNetworkingConfig,
+    NetdRuntimeConfig, PathChoice, Runtime, RuntimeBuilder, RuntimeConfig, RuntimeNetworkingConfig,
 };
 pub use crate::vmmon::DEFAULT_GUEST_READINESS_TIMEOUT;

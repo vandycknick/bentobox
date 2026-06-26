@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::machine::{Machine, MachineData, MachineRef};
@@ -24,10 +23,11 @@ impl Machine {
 
     /// Waits until the guest agent reports the machine as running.
     pub async fn wait_for_guest_running(&self, timeout: Duration) -> Result<(), LibVmError> {
-        let (config, socket_path) = self.running_socket().await?;
+        let config = self.running_config().await?;
         self.runtime()
             .vmmon()
-            .wait_for_guest_running(&socket_path, timeout)
+            .client(self.machine_id())
+            .wait_for_guest_running(timeout)
             .await
             .map_err(|message| LibVmError::MonitorProtocol {
                 reference: config.name,
@@ -37,10 +37,11 @@ impl Machine {
 
     /// Opens the machine serial stream.
     pub async fn open_serial_stream(&self) -> Result<tokio::net::UnixStream, LibVmError> {
-        let (config, socket_path) = self.running_socket().await?;
+        let config = self.running_config().await?;
         self.runtime()
             .vmmon()
-            .open_serial_stream(&socket_path)
+            .client(self.machine_id())
+            .open_serial_stream()
             .await
             .map_err(|message| LibVmError::MonitorProtocol {
                 reference: config.name,
@@ -56,13 +57,12 @@ impl Machine {
         &self,
         wait_for_guest_readiness: bool,
     ) -> Result<tokio::net::UnixStream, LibVmError> {
-        let (config, socket_path) = self.running_socket().await?;
+        let config = self.running_config().await?;
+        let client = self.runtime().vmmon().client(self.machine_id());
 
         if wait_for_guest_readiness {
-            self.runtime()
-                .vmmon()
+            client
                 .wait_for_shell_with_timeout(
-                    &socket_path,
                     crate::vmmon::DEFAULT_GUEST_READINESS_TIMEOUT,
                     Duration::from_secs(1),
                 )
@@ -73,9 +73,8 @@ impl Machine {
                 })?;
         }
 
-        self.runtime()
-            .vmmon()
-            .open_shell_stream(&socket_path)
+        client
+            .open_shell_stream()
             .await
             .map_err(|message| LibVmError::MonitorProtocol {
                 reference: config.name,
@@ -83,7 +82,7 @@ impl Machine {
             })
     }
 
-    async fn running_socket(&self) -> Result<(MachineConfig, PathBuf), LibVmError> {
+    async fn running_config(&self) -> Result<MachineConfig, LibVmError> {
         let runtime = self.runtime();
         let machine_id = self.machine_id();
         let config = runtime
@@ -99,7 +98,6 @@ impl Machine {
             });
         }
 
-        let socket_path = runtime.machine_paths(machine_id).vmmon_socket_path();
-        Ok((config, socket_path))
+        Ok(config)
     }
 }

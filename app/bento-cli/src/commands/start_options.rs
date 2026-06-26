@@ -22,18 +22,16 @@ fn cleanup_exit_command_options(
     data_dir: &Path,
     machine_id: &str,
 ) -> MachineStartOptions {
-    MachineStartOptions {
-        exit_command: Some(MachineExitCommand::new(
-            executable,
-            [
-                OsString::from("cleanup"),
-                OsString::from("--data-dir"),
-                data_dir.as_os_str().to_owned(),
-                OsString::from("--machine-id"),
-                OsString::from(machine_id),
-            ],
-        )),
-    }
+    MachineStartOptions::new().exit_command(MachineExitCommand::new(
+        executable,
+        [
+            OsString::from("cleanup"),
+            OsString::from("--data-dir"),
+            data_dir.as_os_str().to_owned(),
+            OsString::from("--machine-id"),
+            OsString::from(machine_id),
+        ],
+    ))
 }
 
 #[cfg(test)]

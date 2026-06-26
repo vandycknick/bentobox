@@ -25,7 +25,7 @@ use crate::store::DataStore;
 use crate::utils::now_unix;
 use crate::{LibVmError, NetdRuntimeConfig, NetworkPolicyRef};
 
-use super::core::{NetworkAttachmentRequest, NetworkDriver, NetworkDriverContext};
+use super::core::{NetworkAttachmentRequest, NetworkDriverBackend, NetworkDriverContext};
 use super::{
     ensure_instance_network_link, mac_from_machine_id, network_attachment_from_instance,
     remove_file_if_exists, remove_runtime_dir, serialize_json, DRIVER_NETD,
@@ -50,7 +50,7 @@ struct NetdDriverState {
     pcap_path: Option<PathBuf>,
 }
 
-impl NetworkDriver for NetdDriver {
+impl NetworkDriverBackend for NetdDriver {
     fn id(&self) -> &'static str {
         DRIVER_NETD
     }
@@ -106,6 +106,7 @@ async fn prepare_netd_runtime(
     let runtime_dir = network_paths.dir().to_path_buf();
     fs::create_dir_all(&runtime_dir)?;
     ensure_instance_network_link(paths, metadata.id, &runtime_dir)?;
+    let mut startup = NetdStartupGuard::new(paths, metadata.id, runtime_dir.clone());
 
     let socket_path = network_paths.socket_path();
     let log_path = network_paths.log_path();
@@ -157,18 +158,29 @@ async fn prepare_netd_runtime(
         message: format!("spawn userspace network helper: {err}"),
     })?;
     let stderr_capture = child.stderr.take().map(CapturedStderr::spawn);
-    let pid = i32::try_from(child.id()).map_err(|_| LibVmError::NetworkRuntime {
-        reference: metadata.name.clone(),
-        message: "userspace network helper pid does not fit in i32".to_string(),
-    })?;
+    startup.set_child(child, stderr_capture);
+    let pid = startup
+        .helper_pid()
+        .ok_or_else(|| LibVmError::NetworkRuntime {
+            reference: metadata.name.clone(),
+            message: "userspace network helper was not started".to_string(),
+        })?
+        .map_err(|_| LibVmError::NetworkRuntime {
+            reference: metadata.name.clone(),
+            message: "userspace network helper pid does not fit in i32".to_string(),
+        })?;
 
-    if let Err(err) = wait_for_netd_startup(&socket_path, &mut child).await {
-        let _ = child.kill();
-        let _ = child.wait();
-        let stderr_lines = stderr_capture
-            .map(CapturedStderr::finish)
-            .unwrap_or_default();
-        let _ = super::remove_instance_network_link(paths, metadata.id);
+    let startup_result = {
+        let child = startup
+            .child_mut()
+            .ok_or_else(|| LibVmError::NetworkRuntime {
+                reference: metadata.name.clone(),
+                message: "userspace network helper was not started".to_string(),
+            })?;
+        wait_for_netd_startup(&socket_path, child).await
+    };
+    if let Err(err) = startup_result {
+        let stderr_lines = startup.rollback_after_startup_failure();
         return Err(LibVmError::NetworkRuntime {
             reference: metadata.name.clone(),
             message: format_netd_startup_failure(&err, &stderr_lines, &log_path),
@@ -202,15 +214,27 @@ async fn prepare_netd_runtime(
             modified_at: now,
         })
         .await?;
-    store
+    if let Err(err) = store
         .attach_network(&NetworkAttachment {
             machine_id: metadata.id,
-            network_instance_id: network_id,
+            network_instance_id: network_id.clone(),
             guest_mac: format_mac(mac),
             created_at: now,
             modified_at: now,
         })
-        .await?;
+        .await
+    {
+        if let Err(rollback_err) = store.remove_network_instance(&network_id).await {
+            return Err(LibVmError::NetworkRuntime {
+                reference: metadata.name.clone(),
+                message: format!(
+                    "attach userspace network runtime failed: {err}; rollback of runtime record {network_id} also failed: {rollback_err}"
+                ),
+            });
+        }
+        return Err(err);
+    }
+    startup.commit();
     Ok(network)
 }
 
@@ -521,6 +545,86 @@ impl CapturedStderr {
             return Vec::new();
         };
         captured.lines.iter().cloned().collect()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct NetdStartupGuard<'a> {
+    paths: &'a LocalPaths,
+    machine_id: MachineId,
+    runtime_dir: PathBuf,
+    child: Option<Child>,
+    stderr_capture: Option<CapturedStderr>,
+    armed: bool,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl<'a> NetdStartupGuard<'a> {
+    fn new(paths: &'a LocalPaths, machine_id: MachineId, runtime_dir: PathBuf) -> Self {
+        Self {
+            paths,
+            machine_id,
+            runtime_dir,
+            child: None,
+            stderr_capture: None,
+            armed: true,
+        }
+    }
+
+    fn set_child(&mut self, child: Child, stderr_capture: Option<CapturedStderr>) {
+        self.child = Some(child);
+        self.stderr_capture = stderr_capture;
+    }
+
+    fn helper_pid(&self) -> Option<Result<i32, std::num::TryFromIntError>> {
+        self.child.as_ref().map(|child| i32::try_from(child.id()))
+    }
+
+    fn child_mut(&mut self) -> Option<&mut Child> {
+        self.child.as_mut()
+    }
+
+    fn rollback_after_startup_failure(&mut self) -> Vec<String> {
+        self.stop_helper();
+        let stderr_lines = self
+            .stderr_capture
+            .take()
+            .map(CapturedStderr::finish)
+            .unwrap_or_default();
+        self.rollback_files();
+        self.armed = false;
+        stderr_lines
+    }
+
+    fn commit(mut self) {
+        self.armed = false;
+    }
+
+    fn stop_helper(&mut self) {
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if let Ok(pid) = i32::try_from(child.id()) {
+            let _ = terminate_helper(pid);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    fn rollback_files(&mut self) {
+        let _ = super::remove_instance_network_link(self.paths, self.machine_id);
+        let _ = remove_runtime_dir(&self.runtime_dir);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for NetdStartupGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.stop_helper();
+        self.rollback_files();
     }
 }
 

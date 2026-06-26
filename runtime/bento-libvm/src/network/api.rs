@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::store::models;
+use crate::utils::{validate_identifier, IdentifierPolicy};
 use crate::NetworkPolicyRef;
+
+const RESERVED_NETWORK_NAMES: &[&str] = &["private", "none"];
 
 /// Durable network configuration for a machine.
 ///
@@ -9,8 +12,19 @@ use crate::NetworkPolicyRef;
 /// machine should connect to when it starts. It is not a running attachment and
 /// it is not the vmmon launch argument. libvm maps this value to private
 /// `store::models::MachineNetworkConfig` before writing the machine store.
+///
+/// ```rust
+/// use bento_libvm::MachineNetworkConfig;
+///
+/// let private = MachineNetworkConfig::private();
+/// let named = MachineNetworkConfig::named("devnet");
+///
+/// assert_eq!(private.name(), "private");
+/// assert_eq!(named.name(), "devnet");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[non_exhaustive]
 pub enum MachineNetworkConfig {
     /// Attach the machine to its private network.
     Private {
@@ -34,6 +48,35 @@ impl Default for MachineNetworkConfig {
 }
 
 impl MachineNetworkConfig {
+    /// Creates the default private network config.
+    pub fn private() -> Self {
+        Self::Private { policy_ref: None }
+    }
+
+    /// Creates a private network config with a policy reference.
+    pub fn private_with_policy(policy_ref: NetworkPolicyRef) -> Self {
+        Self::Private {
+            policy_ref: Some(policy_ref),
+        }
+    }
+
+    /// Creates a no-network config.
+    pub fn none() -> Self {
+        Self::None
+    }
+
+    /// Creates a named-network config.
+    pub fn named(name: impl Into<String>) -> Self {
+        Self::Named { name: name.into() }
+    }
+
+    /// Creates a named-network config after validating the network name.
+    pub fn try_named(name: impl Into<String>) -> Result<Self, String> {
+        let name = name.into();
+        validate_network_name(&name)?;
+        Ok(Self::Named { name })
+    }
+
     /// Returns the display name for the machine network config.
     pub fn name(&self) -> String {
         match self {
@@ -75,6 +118,7 @@ impl From<models::MachineNetworkConfig> for MachineNetworkConfig {
 /// Network driver implementation kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum NetworkDriverKind {
     /// netd-based networking.
     Netd,
@@ -85,6 +129,7 @@ pub enum NetworkDriverKind {
 /// Connectivity topology for a named network definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum NetworkTopology {
     /// NAT-backed network.
     Nat,
@@ -94,10 +139,11 @@ pub enum NetworkTopology {
     Isolated,
 }
 
-/// Preferred driver for a named network definition.
+/// Driver selector for a named network definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum NetworkDriverPreference {
+#[non_exhaustive]
+pub enum NetworkDriver {
     /// Let the runtime choose the best supported driver.
     #[default]
     Auto,
@@ -114,25 +160,51 @@ pub enum NetworkDriverPreference {
 /// `store::models::NetworkDefinition` rows so external callers never depend on
 /// libvm's database model module.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct NetworkDefinition {
     /// Unique network name.
     pub name: String,
     /// Network topology.
     pub topology: NetworkTopology,
     /// Preferred network driver.
-    pub driver_preference: NetworkDriverPreference,
+    pub driver: NetworkDriver,
 }
 
 impl NetworkDefinition {
+    /// Creates a named network definition with the given topology.
+    pub fn new(name: impl Into<String>, topology: NetworkTopology) -> Self {
+        Self {
+            name: name.into(),
+            topology,
+            driver: NetworkDriver::Auto,
+        }
+    }
+
+    /// Creates a NAT named network definition.
+    pub fn nat(name: impl Into<String>) -> Self {
+        Self::new(name, NetworkTopology::Nat)
+    }
+
+    /// Creates a bridge named network definition.
+    pub fn bridge(name: impl Into<String>) -> Self {
+        Self::new(name, NetworkTopology::Bridge)
+    }
+
+    /// Creates an isolated named network definition.
+    pub fn isolated(name: impl Into<String>) -> Self {
+        Self::new(name, NetworkTopology::Isolated)
+    }
+
+    /// Sets the preferred driver for this definition.
+    pub fn driver(mut self, driver: NetworkDriver) -> Self {
+        self.driver = driver;
+        self
+    }
+
     /// Validates this definition before storing it.
     pub fn validate(&self) -> Result<(), String> {
-        if self.name.trim().is_empty() {
-            return Err("invalid network name: cannot be empty".to_string());
-        }
-        if matches!(self.name.as_str(), "private" | "none") {
-            return Err(format!("invalid network name: {:?} is reserved", self.name));
-        }
-        if matches!(self.driver_preference, NetworkDriverPreference::VzNat)
+        validate_network_name(&self.name)?;
+        if matches!(self.driver, NetworkDriver::VzNat)
             && !matches!(self.topology, NetworkTopology::Nat)
         {
             return Err("vznat only supports nat networks".to_string());
@@ -141,12 +213,22 @@ impl NetworkDefinition {
     }
 }
 
+pub(crate) fn validate_network_name(name: &str) -> Result<(), String> {
+    validate_identifier(
+        name,
+        IdentifierPolicy {
+            reserved: RESERVED_NETWORK_NAMES,
+        },
+    )
+    .map_err(|reason| format!("invalid network name: {reason}"))
+}
+
 impl Default for NetworkDefinition {
     fn default() -> Self {
         Self {
             name: String::new(),
             topology: NetworkTopology::Nat,
-            driver_preference: NetworkDriverPreference::default(),
+            driver: NetworkDriver::default(),
         }
     }
 }
@@ -156,7 +238,7 @@ impl From<NetworkDefinition> for models::NetworkDefinition {
         Self {
             name: value.name,
             topology: value.topology.into(),
-            driver_preference: value.driver_preference.into(),
+            driver_preference: value.driver.into(),
             created_at: 0,
             modified_at: 0,
         }
@@ -168,7 +250,7 @@ impl From<models::NetworkDefinition> for NetworkDefinition {
         Self {
             name: value.name,
             topology: value.topology.into(),
-            driver_preference: value.driver_preference.into(),
+            driver: value.driver_preference.into(),
         }
     }
 }
@@ -193,17 +275,17 @@ impl From<models::NetworkTopology> for NetworkTopology {
     }
 }
 
-impl From<NetworkDriverPreference> for models::NetworkDriverPreference {
-    fn from(value: NetworkDriverPreference) -> Self {
+impl From<NetworkDriver> for models::NetworkDriverPreference {
+    fn from(value: NetworkDriver) -> Self {
         match value {
-            NetworkDriverPreference::Auto => Self::Auto,
-            NetworkDriverPreference::Netd => Self::Netd,
-            NetworkDriverPreference::VzNat => Self::VzNat,
+            NetworkDriver::Auto => Self::Auto,
+            NetworkDriver::Netd => Self::Netd,
+            NetworkDriver::VzNat => Self::VzNat,
         }
     }
 }
 
-impl From<models::NetworkDriverPreference> for NetworkDriverPreference {
+impl From<models::NetworkDriverPreference> for NetworkDriver {
     fn from(value: models::NetworkDriverPreference) -> Self {
         match value {
             models::NetworkDriverPreference::Auto => Self::Auto,
@@ -215,14 +297,14 @@ impl From<models::NetworkDriverPreference> for NetworkDriverPreference {
 
 #[cfg(test)]
 mod tests {
-    use super::{NetworkDefinition, NetworkDriverPreference, NetworkTopology};
+    use super::{NetworkDefinition, NetworkDriver, NetworkTopology};
 
     #[test]
-    fn vznat_driver_preference_allows_nat_named_networks() {
+    fn vznat_driver_allows_nat_named_networks() {
         let definition = NetworkDefinition {
             name: "devnet".to_string(),
             topology: NetworkTopology::Nat,
-            driver_preference: NetworkDriverPreference::VzNat,
+            driver: NetworkDriver::VzNat,
         };
 
         definition
@@ -231,13 +313,22 @@ mod tests {
     }
 
     #[test]
-    fn vznat_driver_preference_rejects_non_nat_named_networks() {
+    fn vznat_driver_rejects_non_nat_named_networks() {
         let definition = NetworkDefinition {
             name: "devnet".to_string(),
             topology: NetworkTopology::Bridge,
-            driver_preference: NetworkDriverPreference::VzNat,
+            driver: NetworkDriver::VzNat,
         };
 
         assert!(definition.validate().is_err());
+    }
+
+    #[test]
+    fn network_definition_rejects_invalid_names() {
+        for name in ["", "-devnet", "private", "none", "dev/net"] {
+            let definition = NetworkDefinition::nat(name);
+
+            assert!(definition.validate().is_err(), "{name:?} should fail");
+        }
     }
 }

@@ -2,8 +2,7 @@ use std::fmt::{Display, Formatter};
 use std::io::Write;
 
 use bento_libvm::{
-    MachineNetworkConfig, MachineRef, NetworkDefinition, NetworkDriverPreference, NetworkPolicyRef,
-    NetworkTopology, Runtime,
+    MachineNetworkConfig, MachineRef, NetworkDriver, NetworkPolicyRef, NetworkTopology, Runtime,
 };
 use clap::{Args, Subcommand};
 use tabwriter::TabWriter;
@@ -65,9 +64,9 @@ pub struct CreateCmd {
     /// Network topology. Allowed: nat, bridge, isolated.
     #[arg(long, value_parser = parse_network_topology, default_value = "nat")]
     pub topology: NetworkTopology,
-    /// Driver preference. Allowed: auto, netd, vznat.
-    #[arg(long, value_parser = parse_driver_preference, default_value = "auto")]
-    pub driver: NetworkDriverPreference,
+    /// Network driver. Allowed: auto, netd, vznat.
+    #[arg(long, value_parser = parse_driver, default_value = "auto")]
+    pub driver: NetworkDriver,
 }
 
 #[derive(Args, Debug)]
@@ -120,7 +119,7 @@ async fn list_networks(libvm: &Runtime, cmd: &ListCmd) -> eyre::Result<()> {
             "{}\t{}\t{}",
             definition.name,
             format_network_topology(definition.topology),
-            format_driver_preference(definition.driver_preference),
+            format_driver(definition.driver),
         )?;
     }
     out.flush()?;
@@ -141,12 +140,12 @@ async fn show_network(libvm: &Runtime, cmd: &ShowCmd) -> eyre::Result<()> {
 }
 
 async fn create_network(libvm: &Runtime, cmd: &CreateCmd) -> eyre::Result<()> {
-    let definition = NetworkDefinition {
-        name: cmd.name.clone(),
-        topology: cmd.topology,
-        driver_preference: cmd.driver,
-    };
-    libvm.create_network_definition(definition).await?;
+    libvm
+        .network(cmd.name.clone())
+        .topology(cmd.topology)
+        .driver(cmd.driver)
+        .create()
+        .await?;
     println!("created {}", cmd.name);
     Ok(())
 }
@@ -188,12 +187,8 @@ fn machine_network_with_policy(
         (MachineNetworkConfig::Private { .. }, policy_ref) => {
             Ok(MachineNetworkConfig::Private { policy_ref })
         }
-        (network @ (MachineNetworkConfig::None | MachineNetworkConfig::Named { .. }), None) => {
-            Ok(network)
-        }
-        (MachineNetworkConfig::None | MachineNetworkConfig::Named { .. }, Some(_)) => {
-            eyre::bail!("--policy is only supported with private networks")
-        }
+        (network, None) => Ok(network),
+        (_, Some(_)) => eyre::bail!("--policy is only supported with private networks"),
     }
 }
 
@@ -208,13 +203,13 @@ fn parse_network_topology(input: &str) -> Result<NetworkTopology, String> {
     }
 }
 
-fn parse_driver_preference(input: &str) -> Result<NetworkDriverPreference, String> {
+fn parse_driver(input: &str) -> Result<NetworkDriver, String> {
     match input {
-        "auto" => Ok(NetworkDriverPreference::Auto),
-        "netd" => Ok(NetworkDriverPreference::Netd),
-        "vznat" => Ok(NetworkDriverPreference::VzNat),
+        "auto" => Ok(NetworkDriver::Auto),
+        "netd" => Ok(NetworkDriver::Netd),
+        "vznat" => Ok(NetworkDriver::VzNat),
         other => Err(format!(
-            "invalid driver preference '{other}', expected auto, netd, or vznat"
+            "invalid network driver '{other}', expected auto, netd, or vznat"
         )),
     }
 }
@@ -228,14 +223,16 @@ fn format_network_topology(topology: NetworkTopology) -> &'static str {
         NetworkTopology::Nat => "nat",
         NetworkTopology::Bridge => "bridge",
         NetworkTopology::Isolated => "isolated",
+        _ => "unknown",
     }
 }
 
-fn format_driver_preference(preference: NetworkDriverPreference) -> &'static str {
-    match preference {
-        NetworkDriverPreference::Auto => "auto",
-        NetworkDriverPreference::Netd => "netd",
-        NetworkDriverPreference::VzNat => "vznat",
+fn format_driver(driver: NetworkDriver) -> &'static str {
+    match driver {
+        NetworkDriver::Auto => "auto",
+        NetworkDriver::Netd => "netd",
+        NetworkDriver::VzNat => "vznat",
+        _ => "unknown",
     }
 }
 

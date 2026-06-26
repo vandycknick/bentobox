@@ -22,9 +22,9 @@ impl Machine {
         let previous_spec = config.spec.clone();
         config.spec = spec;
         config.modified_at = now_unix();
-        write_machine_config(&config.instance_dir, &config.name, &config.spec)?;
+        write_machine_config(&config.machine_dir, &config.name, &config.spec)?;
         if let Err(err) = runtime.save_machine_config(&config).await {
-            let _ = write_machine_config(&config.instance_dir, &config.name, &previous_spec);
+            let _ = write_machine_config(&config.machine_dir, &config.name, &previous_spec);
             return Err(err);
         }
         runtime.machine_inspect_data(config).await
@@ -74,12 +74,10 @@ impl Machine {
                 reason: "cpus must be greater than 0".to_string(),
             });
         }
-        if matches!(update.memory_mib, Some(0)) {
-            return Err(LibVmError::InvalidMachineUpdate {
-                reference: self.id(),
-                reason: "memory must be greater than 0".to_string(),
-            });
-        }
+        let update_memory = update
+            .memory
+            .map(|memory| memory.to_update_mebibytes(&self.id()))
+            .transpose()?;
         if matches!(update.root_disk_size, Some(0)) {
             return Err(LibVmError::InvalidMachineUpdate {
                 reference: self.id(),
@@ -118,7 +116,7 @@ impl Machine {
         let previous_spec = config.spec.clone();
         let mut spec_changed = false;
         if update.cpus.is_some()
-            || update.memory_mib.is_some()
+            || update_memory.is_some()
             || update.nested_virtualization.is_some()
             || update.rosetta.is_some()
         {
@@ -126,8 +124,8 @@ impl Machine {
             if let Some(cpus) = update.cpus {
                 hardware.cpus = Some(cpus);
             }
-            if let Some(memory_mib) = update.memory_mib {
-                hardware.memory = Some(memory_mib);
+            if let Some(memory) = update_memory {
+                hardware.memory = Some(memory);
             }
             if let Some(nested_virtualization) = update.nested_virtualization {
                 hardware.nested_virtualization = Some(nested_virtualization);
@@ -143,11 +141,11 @@ impl Machine {
 
         config.modified_at = now_unix();
         if spec_changed {
-            write_machine_config(&config.instance_dir, &config.name, &config.spec)?;
+            write_machine_config(&config.machine_dir, &config.name, &config.spec)?;
         }
         if let Err(err) = runtime.save_machine_config(&config).await {
             if spec_changed {
-                let _ = write_machine_config(&config.instance_dir, &config.name, &previous_spec);
+                let _ = write_machine_config(&config.machine_dir, &config.name, &previous_spec);
             }
             return Err(err);
         }

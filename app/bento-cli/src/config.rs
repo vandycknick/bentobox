@@ -37,10 +37,7 @@ impl GlobalConfig {
     }
 
     fn default_for_config_dir(config_dir: PathBuf) -> Self {
-        let networking = RuntimeNetworkingConfig {
-            policy_config_dir: Some(config_dir),
-            ..RuntimeNetworkingConfig::default()
-        };
+        let networking = RuntimeNetworkingConfig::default().with_policy_config_dir(config_dir);
         Self {
             default_machine: None,
             networking,
@@ -115,11 +112,9 @@ fn parse_global_config(input: &str) -> eyre::Result<GlobalConfig> {
 
     Ok(GlobalConfig {
         default_machine,
-        networking: RuntimeNetworkingConfig {
-            private_driver,
-            netd,
-            ..RuntimeNetworkingConfig::default()
-        },
+        networking: RuntimeNetworkingConfig::default()
+            .with_private_driver(private_driver)
+            .with_netd(netd),
     })
 }
 
@@ -216,13 +211,16 @@ impl RawNetworkingConfig {
 
 impl From<RawNetdConfig> for NetdRuntimeConfig {
     fn from(raw: RawNetdConfig) -> Self {
-        let default = Self::default();
-        Self {
-            subnet: raw.subnet.unwrap_or(default.subnet),
-            pcap: raw.pcap.unwrap_or(default.pcap),
-            tls_ca_cert: raw.tls_ca_cert,
-            tls_ca_key: raw.tls_ca_key,
+        let mut config = Self::default();
+        if let Some(subnet) = raw.subnet {
+            config.subnet = subnet;
         }
+        if let Some(pcap) = raw.pcap {
+            config.pcap = pcap;
+        }
+        config.tls_ca_cert = raw.tls_ca_cert;
+        config.tls_ca_key = raw.tls_ca_key;
+        config
     }
 }
 
@@ -314,15 +312,10 @@ networking:
         .expect("parse config");
 
         assert_eq!(cfg.networking.private_driver, NetworkDriverKind::Netd);
-        assert_eq!(
-            cfg.networking.netd,
-            NetdRuntimeConfig {
-                subnet: "192.168.105.0/24".to_string(),
-                pcap: true,
-                tls_ca_cert: None,
-                tls_ca_key: None,
-            }
-        );
+        assert_eq!(cfg.networking.netd.subnet, "192.168.105.0/24");
+        assert!(cfg.networking.netd.pcap);
+        assert_eq!(cfg.networking.netd.tls_ca_cert, None);
+        assert_eq!(cfg.networking.netd.tls_ca_key, None);
     }
 
     #[test]

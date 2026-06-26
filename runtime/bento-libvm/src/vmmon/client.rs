@@ -1,5 +1,5 @@
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,118 +16,130 @@ use tower::service_fn;
 
 pub const DEFAULT_GUEST_READINESS_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 
-pub(crate) async fn wait_for_shell_with_timeout(
-    socket_path: &Path,
-    timeout: Duration,
-    poll_interval: Duration,
-) -> Result<(), String> {
-    let deadline = Instant::now() + timeout;
-
-    loop {
-        match probe_shell_once(socket_path).await {
-            Ok(()) => return Ok(()),
-            Err(ProbeError::Retryable(message)) => {
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "timed out waiting {:?} for guest shell readiness via vm monitor (last error: {})",
-                        timeout, message
-                    ));
-                }
-
-                tokio::time::sleep(poll_interval).await;
-            }
-            Err(ProbeError::Fatal(message)) => return Err(message),
-        }
-    }
+#[derive(Debug, Clone)]
+pub(crate) struct VmmonClient {
+    socket_path: PathBuf,
 }
 
-pub(crate) async fn wait_for_guest_running(
-    socket_path: &Path,
-    timeout: Duration,
-) -> Result<(), String> {
-    let stream = connect_vm_monitor_stream(socket_path).await?;
-    let mut client = vm_monitor_client(stream)
-        .await
-        .map_err(|err| format!("connect vm monitor rpc client: {err}"))?;
-
-    let mut updates = client
-        .watch_status(WatchStatusRequest {})
-        .await
-        .map_err(|err| format!("vm monitor watch_status rpc failed: {err}"))?
-        .into_inner();
-
-    let deadline = Instant::now() + timeout;
-    let mut vm_running_seen = false;
-
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(format!(
-                "timed out after {:?} waiting for guest running event",
-                timeout
-            ));
+impl VmmonClient {
+    pub(crate) fn new(socket_path: impl Into<PathBuf>) -> Self {
+        Self {
+            socket_path: socket_path.into(),
         }
+    }
 
-        let update = tokio::time::timeout(remaining, updates.message())
+    pub(crate) async fn wait_for_shell_with_timeout(
+        &self,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            match probe_shell_once(&self.socket_path).await {
+                Ok(()) => return Ok(()),
+                Err(ProbeError::Retryable(message)) => {
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "timed out waiting {:?} for guest shell readiness via vm monitor (last error: {})",
+                            timeout, message
+                        ));
+                    }
+
+                    tokio::time::sleep(poll_interval).await;
+                }
+                Err(ProbeError::Fatal(message)) => return Err(message),
+            }
+        }
+    }
+
+    pub(crate) async fn wait_for_guest_running(&self, timeout: Duration) -> Result<(), String> {
+        let stream = connect_vm_monitor_stream(&self.socket_path).await?;
+        let mut client = vm_monitor_client(stream)
             .await
-            .map_err(|_| "timed out waiting for status updates".to_string())?
-            .map_err(|err| format!("watch_status stream failed: {err}"))?;
+            .map_err(|err| format!("connect vm monitor rpc client: {err}"))?;
 
-        let Some(update) = update else {
-            return Err("watch_status stream closed before guest became ready".to_string());
-        };
+        let mut updates = client
+            .watch_status(WatchStatusRequest {})
+            .await
+            .map_err(|err| format!("vm monitor watch_status rpc failed: {err}"))?
+            .into_inner();
 
-        let source = bento_protocol::v1::StatusSource::try_from(update.source)
-            .unwrap_or(bento_protocol::v1::StatusSource::Unspecified);
-        let state = bento_protocol::v1::LifecycleState::try_from(update.state)
-            .unwrap_or(bento_protocol::v1::LifecycleState::Unspecified);
+        let deadline = Instant::now() + timeout;
+        let mut vm_running_seen = false;
 
-        if source == bento_protocol::v1::StatusSource::Vm {
-            match state {
-                bento_protocol::v1::LifecycleState::Running => vm_running_seen = true,
-                bento_protocol::v1::LifecycleState::Stopped
-                | bento_protocol::v1::LifecycleState::Error => {
-                    return Err(format!("vm entered {:?} before guest running event", state));
-                }
-                _ => {}
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "timed out after {:?} waiting for guest running event",
+                    timeout
+                ));
             }
-        }
 
-        if source == bento_protocol::v1::StatusSource::Guest {
-            match state {
-                bento_protocol::v1::LifecycleState::Running if vm_running_seen => return Ok(()),
-                bento_protocol::v1::LifecycleState::Running => {
-                    return Err("received guest running event before vm running event".to_string())
+            let update = tokio::time::timeout(remaining, updates.message())
+                .await
+                .map_err(|_| "timed out waiting for status updates".to_string())?
+                .map_err(|err| format!("watch_status stream failed: {err}"))?;
+
+            let Some(update) = update else {
+                return Err("watch_status stream closed before guest became ready".to_string());
+            };
+
+            let source = bento_protocol::v1::StatusSource::try_from(update.source)
+                .unwrap_or(bento_protocol::v1::StatusSource::Unspecified);
+            let state = bento_protocol::v1::LifecycleState::try_from(update.state)
+                .unwrap_or(bento_protocol::v1::LifecycleState::Unspecified);
+
+            if source == bento_protocol::v1::StatusSource::Vm {
+                match state {
+                    bento_protocol::v1::LifecycleState::Running => vm_running_seen = true,
+                    bento_protocol::v1::LifecycleState::Stopped
+                    | bento_protocol::v1::LifecycleState::Error => {
+                        return Err(format!("vm entered {:?} before guest running event", state));
+                    }
+                    _ => {}
                 }
-                bento_protocol::v1::LifecycleState::Error => {
-                    return Err(format!("guest readiness failed: {}", update.message));
+            }
+
+            if source == bento_protocol::v1::StatusSource::Guest {
+                match state {
+                    bento_protocol::v1::LifecycleState::Running if vm_running_seen => return Ok(()),
+                    bento_protocol::v1::LifecycleState::Running => {
+                        return Err(
+                            "received guest running event before vm running event".to_string()
+                        )
+                    }
+                    bento_protocol::v1::LifecycleState::Error => {
+                        return Err(format!("guest readiness failed: {}", update.message));
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
-}
 
-pub(crate) async fn inspect(socket_path: &Path) -> Result<InspectResponse, String> {
-    let stream = connect_vm_monitor_stream(socket_path).await?;
-    let mut client = vm_monitor_client(stream)
-        .await
-        .map_err(|err| format!("connect vm monitor rpc client: {err}"))?;
+    pub(crate) async fn inspect(&self) -> Result<InspectResponse, String> {
+        let stream = connect_vm_monitor_stream(&self.socket_path).await?;
+        let mut client = vm_monitor_client(stream)
+            .await
+            .map_err(|err| format!("connect vm monitor rpc client: {err}"))?;
 
-    let response = client
-        .inspect(InspectRequest {})
-        .await
-        .map_err(|err| format!("vm monitor inspect rpc failed: {err}"))?;
+        let response = client
+            .inspect(InspectRequest {})
+            .await
+            .map_err(|err| format!("vm monitor inspect rpc failed: {err}"))?;
 
-    Ok(response.into_inner())
-}
+        Ok(response.into_inner())
+    }
 
-pub(crate) async fn open_serial_stream(socket_path: &Path) -> Result<UnixStream, String> {
-    connect_upgrade_stream(socket_path, Upgrade::Serial, "serial").await
-}
+    pub(crate) async fn open_serial_stream(&self) -> Result<UnixStream, String> {
+        connect_upgrade_stream(&self.socket_path, Upgrade::Serial, "serial").await
+    }
 
-pub(crate) async fn open_shell_stream(socket_path: &Path) -> Result<UnixStream, String> {
-    connect_upgrade_stream(socket_path, Upgrade::Shell, "shell").await
+    pub(crate) async fn open_shell_stream(&self) -> Result<UnixStream, String> {
+        connect_upgrade_stream(&self.socket_path, Upgrade::Shell, "shell").await
+    }
 }
 
 async fn connect_upgrade_stream(

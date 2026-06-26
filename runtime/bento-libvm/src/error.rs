@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum LibVmError {
     #[error("could not resolve Bento data directory from XDG_DATA_HOME or HOME")]
     DataDirUnavailable,
@@ -43,8 +44,8 @@ pub enum LibVmError {
     #[error("monitor protocol for {reference} failed: {message}")]
     MonitorProtocol { reference: String, message: String },
 
-    #[error("instance preparation for {reference} failed: {message}")]
-    InstancePreparationFailed { reference: String, message: String },
+    #[error("machine preparation for {reference} failed: {message}")]
+    MachinePreparationFailed { reference: String, message: String },
 
     #[error("network runtime for {reference} failed: {message}")]
     NetworkRuntime { reference: String, message: String },
@@ -110,8 +111,8 @@ pub enum LibVmError {
     RootDisk { message: String },
 }
 
-impl From<crate::root_disk::RootDiskError> for LibVmError {
-    fn from(source: crate::root_disk::RootDiskError) -> Self {
+impl From<crate::machine::root_disk::RootDiskError> for LibVmError {
+    fn from(source: crate::machine::root_disk::RootDiskError) -> Self {
         Self::RootDisk {
             message: source.to_string(),
         }

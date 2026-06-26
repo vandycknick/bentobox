@@ -34,11 +34,36 @@ impl From<LockId> for u32 {
     }
 }
 
+/// Allocates and retrieves advisory machine locks.
+///
+/// Lock files serve two related but separate purposes:
+///
+/// - File existence reserves a numeric lock ID for one machine.
+/// - `flock` on that file serializes operations on that machine.
+///
+/// A reserved lock file is not proof that a machine exists. SQLite remains the
+/// source of truth for persisted machines. If the process dies after allocation
+/// but before the machine record is committed, a tombstone lock can remain:
+///
+/// - create allocates `locks/0`
+/// - the process is killed before SQLite commit
+/// - `locks/0` remains, but no machine row points at it
+/// - the next create skips `0` and allocates `1`
+///
+/// That wastes a lock ID until external cleanup, but it is not corrupting.
+/// Allocation uses atomic create-new semantics, so two live creates do not
+/// receive the same lock ID, and runtime machine discovery is driven by SQLite.
 #[derive(Debug, Clone)]
 pub(crate) struct LockManager {
     dir: PathBuf,
 }
 
+/// A reserved numeric lock ID.
+///
+/// Holding a `ManagedLock` does not mean the advisory lock is currently held;
+/// call `lock` or `try_lock` to acquire the `flock` guard. Dropping a
+/// `ManagedLock` also does not free the allocation. The owner must call `free`
+/// when the machine create fails or when the persisted machine is removed.
 #[derive(Debug, Clone)]
 pub(crate) struct ManagedLock {
     id: LockId,
@@ -56,6 +81,11 @@ impl LockManager {
         Ok(Self { dir })
     }
 
+    /// Reserves the lowest available numeric lock ID.
+    ///
+    /// `create_lock_allocation` uses `create_new(true)`, so concurrent callers
+    /// racing for the same ID get exactly one winner. Losers see
+    /// `AlreadyExists` and continue scanning.
     pub(crate) fn allocate(&self) -> io::Result<ManagedLock> {
         std::fs::create_dir_all(&self.dir)?;
         for raw_id in 0..=u32::MAX {
@@ -162,6 +192,9 @@ fn lock_error(err: Errno) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Barrier};
+
     use crate::lock_manager::{LockId, LockManager};
 
     #[test]
@@ -196,6 +229,36 @@ mod tests {
 
         assert_eq!(lock.id(), LockId::from(1));
         assert!(manager.lock_path(lock.id()).exists());
+    }
+
+    #[test]
+    fn allocate_returns_unique_ids_under_concurrency() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let manager =
+            Arc::new(LockManager::open(temp.path().join("locks")).expect("open lock manager"));
+        let thread_count = 16usize;
+        let start = Arc::new(Barrier::new(thread_count));
+
+        let handles: Vec<_> = (0..thread_count)
+            .map(|_| {
+                let manager = Arc::clone(&manager);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    manager.allocate().expect("allocate lock").id()
+                })
+            })
+            .collect();
+
+        let ids: BTreeSet<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("allocation thread should not panic"))
+            .collect();
+
+        assert_eq!(ids.len(), thread_count);
+        for id in ids {
+            assert!(manager.lock_path(id).exists());
+        }
     }
 
     #[test]

@@ -3,14 +3,19 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 
 mod api;
+mod builder;
 mod core;
 mod netd_driver;
+mod policy;
 mod vznat_driver;
 
 pub use api::{
-    MachineNetworkConfig, NetworkDefinition, NetworkDriverKind, NetworkDriverPreference,
-    NetworkTopology,
+    MachineNetworkConfig, NetworkDefinition, NetworkDriver, NetworkDriverKind, NetworkTopology,
 };
+pub use builder::NetworkBuilder;
+pub use policy::NetworkPolicyRef;
+
+pub(crate) use api::validate_network_name;
 
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +30,7 @@ use crate::store::models::{
 use crate::store::DataStore;
 use crate::{LibVmError, RuntimeNetworkingConfig};
 
-use self::core::{NetworkAttachmentRequest, NetworkDriver, NetworkDriverContext};
+use self::core::{NetworkAttachmentRequest, NetworkDriverBackend, NetworkDriverContext};
 use self::netd_driver::NetdDriver;
 use self::vznat_driver::VzNatDriver;
 
@@ -179,7 +184,7 @@ async fn resolve_named_network(
     }
 }
 
-fn selected_private_driver(kind: NetworkDriverKind) -> impl NetworkDriver {
+fn selected_private_driver(kind: NetworkDriverKind) -> impl NetworkDriverBackend {
     match kind {
         NetworkDriverKind::Netd => SelectedNetworkDriver::Netd(NetdDriver),
         NetworkDriverKind::VzNat => SelectedNetworkDriver::VzNat(VzNatDriver),
@@ -191,7 +196,7 @@ enum SelectedNetworkDriver {
     VzNat(VzNatDriver),
 }
 
-impl NetworkDriver for SelectedNetworkDriver {
+impl NetworkDriverBackend for SelectedNetworkDriver {
     fn id(&self) -> &'static str {
         match self {
             Self::Netd(driver) => driver.id(),
@@ -223,7 +228,7 @@ impl NetworkDriver for SelectedNetworkDriver {
 }
 
 async fn prepare_with_driver(
-    driver: impl NetworkDriver,
+    driver: impl NetworkDriverBackend,
     ctx: &NetworkDriverContext<'_>,
     request: &NetworkAttachmentRequest<'_>,
 ) -> Result<VmmonNetworkAttachment, LibVmError> {
@@ -397,7 +402,7 @@ mod tests {
             lock_id: LockId::from(0),
             name: name.to_string(),
             spec: VmSpec::current(),
-            instance_dir: paths.machine(id).dir().to_path_buf(),
+            machine_dir: paths.machine(id).dir().to_path_buf(),
             created_at: 1,
             modified_at: 1,
             image_ref: String::new(),

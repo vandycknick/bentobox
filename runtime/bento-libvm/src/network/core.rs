@@ -54,7 +54,7 @@ pub(super) struct NetworkDriverContext<'a> {
     pub(super) config: &'a RuntimeNetworkingConfig,
 }
 
-pub(super) trait NetworkDriver {
+pub(super) trait NetworkDriverBackend {
     fn id(&self) -> &'static str;
     fn supports(
         &self,
