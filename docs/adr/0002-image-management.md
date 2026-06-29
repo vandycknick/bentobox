@@ -98,9 +98,8 @@ Bundled boot assets are inferred from the presence of the optional kernel and in
 from metadata fields.
 
 Bootstrap media for guest initialization is a separate concern from OCI image transport. Bentobox
-uses a local NoCloud seed disk with volume label `CIDATA`, formatted as VFAT, so the same
-bootstrap artifact can be attached on both VZ and Firecracker backends without host-specific ISO
-tooling.
+uses a local NoCloud seed disk with volume label `CIDATA`, formatted as VFAT, so bootstrap stays
+backend-neutral instead of depending on host-specific ISO tooling.
 
 ### Instance creation from images
 
@@ -162,15 +161,8 @@ Current policy:
 - the policy is private to the VZ backend
 - when VZ macOS guests are added, the backend should choose the best guest-specific default there
 
-Comparison of the backend features that matter here:
-
-| Concern | VZ | Firecracker |
-| --- | --- | --- |
-| Host disk cache knob | Yes, `Automatic/Cached/Uncached` | No direct equivalent |
-| Disk sync durability knob | Yes, `Full/Fsync/None` | No direct equivalent in the same API shape |
-| Guest flush behavior control | Indirect via VZ sync mode | Yes, `cache_type = Unsafe/Writeback` |
-| Good persistent default today | Linux: `Cached + Full` | Later: likely `Writeback` for persistent disks |
-| Should this leak into shared machine types | No | No |
+The shared VM types should not expose these host-specific disk policy knobs unless multiple
+supported backends need a common abstraction.
 
 ## Consequences
 

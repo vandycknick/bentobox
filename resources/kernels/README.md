@@ -348,35 +348,7 @@ This file tracks kernel-side config changes identified while debugging package u
 - If Docker reports `TABLE_ADD failed (Operation not supported): table nat`, the guest kernel is usually missing nft NAT support even if the older `IP_NF_*` options are enabled.
 - `CONFIG_NETFILTER_XTABLES_LEGACY` depends on `!PREEMPT_RT` on newer kernels, so a PREEMPT_RT kernel and the current Docker `iptables-legacy` path are not friends.
 
-## 14) Firecracker arm64 serial console support
-
-### Required config changes
-
-- `CONFIG_PRINTK=y`
-- `CONFIG_SERIAL_8250=y`
-- `CONFIG_SERIAL_8250_CONSOLE=y`
-- `CONFIG_SERIAL_CORE=y`
-- `CONFIG_SERIAL_CORE_CONSOLE=y`
-- `CONFIG_SERIAL_OF_PLATFORM=y`
-- `CONFIG_DEVTMPFS=y`
-- `CONFIG_DEVTMPFS_MOUNT=y`
-
-### What this enables
-
-- Kernel log output on the Firecracker serial console.
-- Proper registration of the guest serial device on arm64 when it is described via Device Tree.
-- Userspace access to the same serial-backed console used during early boot.
-- Automatic population of `/dev`, including console device nodes needed by minimal initramfs environments.
-
-### Why this is needed
-
-- On arm64 Firecracker guests, the serial device is discovered through the Device Tree path rather than legacy PC-style probing.
-- `CONFIG_SERIAL_OF_PLATFORM=y` is required so the kernel can bind the 8250-compatible UART exposed by Firecracker and make `ttyS0` behave correctly beyond the earliest boot messages.
-- Without this option, the kernel may still emit some early console output, but `/init`, shell fallback paths, and other userspace console interaction can fail or behave inconsistently.
-- `CONFIG_SERIAL_8250_CONSOLE` and `CONFIG_SERIAL_CORE_CONSOLE` provide the actual serial console plumbing, while `CONFIG_PRINTK` keeps kernel logs visible during bring-up.
-- `CONFIG_DEVTMPFS` and `CONFIG_DEVTMPFS_MOUNT` ensure `/dev/console` and related device nodes exist in minimal initramfs boots without requiring a full userspace device manager.
-
-## 15) VZ requestSTop
+## 14) VZ requestSTop
 
 ### Required config changes
 
@@ -398,13 +370,7 @@ Kernel support only gets you the event. You still need userspace to react to the
   chmod +x /etc/acpi/PWRF/00000080
   acpid
 
-### Notes
-
-- For Bento's current Firecracker arm64 flow, `CONFIG_SERIAL_OF_PLATFORM=y` was the key missing option that made the initramfs shell and userspace console behavior start working correctly.
-- The matching kernel boot args should still include `console=ttyS0`, and on arm64 Firecracker it is worth considering `keep_bootcon` during early bring-up.
-- These options are not Firecracker-exclusive in a strict kernel sense, but they are part of the practical minimum for reliable Firecracker serial-console behavior on arm64.
-
-## 16) Idle guest CPU behavior and host CPU usage
+## 15) Idle guest CPU behavior and host CPU usage
 
 ### Required config changes
 
@@ -458,7 +424,7 @@ nohz_full=1-N rcu_nocbs=1-N
 - That example means "leave CPU 0 for housekeeping, try to keep the rest quieter".
 - This is useful for dedicated low-jitter or pinned workloads. It is not a great default for ordinary devbox-style guests.
 
-## 17) k3s, kube-proxy, and Istio guest networking support
+## 16) k3s, kube-proxy, and Istio guest networking support
 
 ### Required config changes
 

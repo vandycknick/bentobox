@@ -31,8 +31,6 @@ Current scope focuses on the VM execution path used by BentoBox today:
 
 The public VM spec does not include a backend field. Callers describe the VM they want; `bento-virt` compiles the appropriate host path.
 
-Firecracker is intentionally not a supported `bento-virt` runtime backend. The `bento-fc` crate remains in the workspace as a standalone Firecracker integration crate for future work.
-
 ## Boundary
 
 `bento-vmmon` owns supervision, monitor APIs, guest readiness, and process lifecycle around one running VM.

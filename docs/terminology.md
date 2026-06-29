@@ -2,7 +2,7 @@
 
 Virtualization terms are overloaded across projects. KVM, hypervisor, VMM, VM, microVM, backend, and driver are often used loosely, especially in the cloud-native and microVM ecosystem. BentoBox uses the definitions below so code, docs, and architecture discussions stay pointed at the same layers.
 
-The terms intentionally line up with the KVM, Firecracker, crosvm, Cloud Hypervisor, Virtualization.framework, and libvirt ecosystems where that makes the code easier to reason about.
+The terms intentionally line up with the KVM, crosvm, Cloud Hypervisor, Virtualization.framework, and libvirt ecosystems where that makes the code easier to reason about.
 
 ## Stack From Bottom To Top
 
@@ -109,7 +109,7 @@ Type 2 hypervisors run on top of a host OS:
 - VMware Fusion
 - Parallels
 
-In modern Linux/KVM systems, the line gets blurry. People may call KVM itself, QEMU, Firecracker, Cloud Hypervisor, or the combined stack "the hypervisor". Technically, KVM provides kernel virtualization support and userspace provides the actual machine model. Together they form the practical hypervisor stack.
+In modern Linux/KVM systems, the line gets blurry. People may call KVM itself, QEMU, Cloud Hypervisor, or the combined stack "the hypervisor". Technically, KVM provides kernel virtualization support and userspace provides the actual machine model. Together they form the practical hypervisor stack.
 
 BentoBox itself is not a hypervisor. It orchestrates and adapts host virtualization implementations.
 
@@ -131,7 +131,6 @@ A VMM commonly owns:
 Examples of VMMs include:
 
 - QEMU
-- Firecracker
 - Cloud Hypervisor
 - crosvm
 - bhyve userspace components
@@ -144,7 +143,7 @@ VMM = userspace VM controller/runtime
 VM = guest machine
 ```
 
-Firecracker calls itself a VMM. Cloud Hypervisor calls itself a VMM. crosvm uses the term heavily. BentoBox follows that ecosystem language when describing the lower-level userspace virtualization runtime layer.
+Cloud Hypervisor calls itself a VMM. crosvm uses the term heavily. BentoBox follows that ecosystem language when describing the lower-level userspace virtualization runtime layer.
 
 ## microVM
 
@@ -163,7 +162,6 @@ MicroVMs usually:
 
 Examples and adjacent projects include:
 
-- Firecracker
 - Cloud Hypervisor
 - crosvm
 - Kata Containers
@@ -187,17 +185,17 @@ flowchart TD
     Hardware --> Kernel --> Kvm --> Qemu --> Guest
 ```
 
-Firecracker-style microVM stack:
+KVM-backed microVM-style stack:
 
 ```mermaid
 flowchart TD
     Guest[Guest microVM]
-    Firecracker[Firecracker: microVM VMM]
+    MicroVmm[MicroVM-oriented VMM]
     Kvm[KVM]
     Kernel[Linux kernel]
     Hardware[Hardware virtualization extensions]
 
-    Hardware --> Kernel --> Kvm --> Firecracker --> Guest
+    Hardware --> Kernel --> Kvm --> MicroVmm --> Guest
 ```
 
 macOS Virtualization.framework stack:

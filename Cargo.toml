@@ -11,7 +11,6 @@ members = [
     "runtime/bento-libvm",
     "runtime/bento-plugins",
     "runtime/bento-vmmon",
-    "virt/bento-fc",
     "virt/bento-krun",
     "virt/bento-krun-sys",
     "virt/bento-virt",
