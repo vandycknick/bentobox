@@ -1,4 +1,4 @@
-FROM ghcr.io/vandycknick/archlinuxarm:latest
+FROM ghcr.io/vandycknick/archlinux:latest
 
 RUN pacman -Syu --disable-sandbox --noconfirm --needed \
       base-devel \
