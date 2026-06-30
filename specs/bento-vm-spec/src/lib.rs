@@ -5,11 +5,6 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Current Bento VM specification version.
-pub fn current_spec_version() -> Version {
-    Version::new(0, 1, 0)
-}
-
 /// Top-level Bento virtual machine specification.
 ///
 /// This type is intentionally permissive for persistence: sections may be
@@ -46,7 +41,7 @@ impl VmSpec {
     /// Create a minimal spec at the current schema version.
     pub fn current() -> Self {
         Self {
-            spec_version: current_spec_version(),
+            spec_version: Version::new(0, 1, 0),
             guest: None,
             boot: None,
             hardware: None,
@@ -214,10 +209,8 @@ pub struct Plugin {
 #[serde(rename_all = "camelCase")]
 pub struct Lifecycle {
     /// Start the plugin automatically with the VM.
-    #[serde(default = "default_true")]
     pub autostart: bool,
     /// Startup timeout in milliseconds.
-    #[serde(default = "default_startup_timeout_ms")]
     pub startup_timeout_ms: u64,
     /// Restart behavior when the process exits.
     #[serde(default)]
@@ -230,8 +223,8 @@ pub struct Lifecycle {
 impl Default for Lifecycle {
     fn default() -> Self {
         Self {
-            autostart: default_true(),
-            startup_timeout_ms: default_startup_timeout_ms(),
+            autostart: true,
+            startup_timeout_ms: 5_000,
             restart: RestartPolicy::default(),
             backoff_ms: Backoff::default(),
         }
@@ -256,36 +249,18 @@ pub enum RestartPolicy {
 #[serde(rename_all = "camelCase")]
 pub struct Backoff {
     /// Initial restart delay in milliseconds.
-    #[serde(default = "default_backoff_initial")]
     pub initial: u64,
     /// Maximum restart delay in milliseconds.
-    #[serde(default = "default_backoff_max")]
     pub max: u64,
 }
 
 impl Default for Backoff {
     fn default() -> Self {
         Self {
-            initial: default_backoff_initial(),
-            max: default_backoff_max(),
+            initial: 200,
+            max: 5_000,
         }
     }
-}
-
-const fn default_true() -> bool {
-    true
-}
-
-const fn default_startup_timeout_ms() -> u64 {
-    5_000
-}
-
-const fn default_backoff_initial() -> u64 {
-    200
-}
-
-const fn default_backoff_max() -> u64 {
-    5_000
 }
 
 #[cfg(test)]
