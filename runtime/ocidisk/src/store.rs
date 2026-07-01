@@ -1,31 +1,41 @@
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{BufReader, Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use containerregistry_image::MediaType;
 use flate2::read::GzDecoder;
+use futures_util::{stream, StreamExt, TryStreamExt};
+use oci_client::client::{BlobResponse, SizedStream};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 
 use crate::ext4_writer::Ext4Writer;
 use crate::layer::apply_layer;
+use crate::lock::FileLock;
 use crate::oci_archive::read_oci_archive;
 use crate::platform::sanitize_component;
-use crate::registry::{RegistryClient, ResolvedManifest};
+use crate::progress::{ImageProgress, ImageProgressSender};
+use crate::registry::{RegistryClient, ResolvedLayer, ResolvedManifest};
 use crate::source::ImageSource;
 use crate::{OciDiskError, OciDiskResult, Platform};
 
+const BLOBS_DIR_NAME: &str = "blobs";
 const METADATA_VERSION: u32 = 1;
 const DEFAULT_ROOTFS_SIZE_BYTES: u64 = 512 * 1024 * 1024;
 const INDEX_FILE_NAME: &str = "index.json";
 const INDEX_VERSION: u32 = 1;
+const MANIFESTS_DIR_NAME: &str = "manifests";
 const METADATA_FILE_NAME: &str = "metadata.json";
+const PROGRESS_STEP_BYTES: u64 = 256 * 1024;
 const ROOTFS_FILE_NAME: &str = "rootfs.img";
 const ROOTFS_FILESYSTEM: &str = "ext4";
 const STAGING_DIR_NAME: &str = ".staging";
+const TMP_DIR_NAME: &str = "tmp";
 
 #[derive(Debug, Clone)]
 pub struct RootfsOptions {
@@ -80,23 +90,6 @@ impl Display for RootfsImageSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ImageProgress {
-    ResolvingManifest { image_ref: String },
-    HashingSource { image_ref: String },
-    ReadingArchive { image_ref: String },
-    CheckingCache { image_ref: String },
-    CacheHit { image_ref: String },
-    CacheMiss { image_ref: String },
-    UsingLocalDisk { image_ref: String },
-    PullingLayer { index: usize, total: usize },
-    ApplyingLayer { index: usize, total: usize },
-    WritingExt4,
-    SavingBaseImage,
-}
-
-pub type ImageProgressCallback<'a> = &'a (dyn Fn(ImageProgress) + Send + Sync + 'a);
-
 #[derive(Debug, Clone)]
 pub struct ImageStore {
     root: PathBuf,
@@ -133,11 +126,83 @@ struct ImageMetadata {
     image_id: String,
     source: RootfsImageSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     config_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    layers: Vec<ImageLayerMetadata>,
     platform: Platform,
     filesystem: String,
     rootfs_file: String,
     created_at_unix: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ImageLayerMetadata {
+    digest: String,
+    media_type: String,
+    size_bytes: u64,
+    diff_id: String,
+}
+
+impl From<&ResolvedLayer> for ImageLayerMetadata {
+    fn from(layer: &ResolvedLayer) -> Self {
+        Self {
+            digest: layer.digest.clone(),
+            media_type: layer.media_type.clone(),
+            size_bytes: layer.size_bytes,
+            diff_id: layer.diff_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ManifestMetadata {
+    version: u32,
+    image_ref: String,
+    resolved_reference: String,
+    manifest_digest: String,
+    config_digest: String,
+    platform: Platform,
+    layers: Vec<ImageLayerMetadata>,
+    resolved_at_unix: i64,
+}
+
+struct LayerBlob {
+    index: usize,
+    layer: ResolvedLayer,
+    path: PathBuf,
+}
+
+struct LayerDownloadRequest<'a> {
+    registry: &'a RegistryClient,
+    reference: &'a oci_client::Reference,
+    image_ref: &'a str,
+    layer: &'a ResolvedLayer,
+    index: usize,
+    total: usize,
+    progress: Option<&'a ImageProgressSender>,
+}
+
+struct ImageMetadataInput<'a> {
+    image_ref: &'a str,
+    image_id: &'a str,
+    source: RootfsImageSource,
+    manifest_digest: Option<&'a str>,
+    config_digest: Option<&'a str>,
+    layers: &'a [ImageLayerMetadata],
+    platform: &'a Platform,
+}
+
+struct LayerStreamWrite<'a> {
+    path: &'a Path,
+    stream: SizedStream,
+    append: bool,
+    start_offset: u64,
+    layer: &'a ResolvedLayer,
+    index: usize,
+    total: usize,
+    progress: Option<&'a ImageProgressSender>,
 }
 
 impl ImageStore {
@@ -151,19 +216,21 @@ impl ImageStore {
         &self,
         image_ref: &str,
         options: RootfsOptions,
-        progress: Option<ImageProgressCallback<'_>>,
+        progress: Option<ImageProgressSender>,
     ) -> OciDiskResult<RootfsImage> {
         match ImageSource::parse(image_ref)? {
             ImageSource::RemoteOci(image_ref) => {
-                self.get_or_create_remote_oci(&image_ref, options, progress)
+                self.get_or_create_remote_oci(&image_ref, options, progress.as_ref())
                     .await
             }
-            ImageSource::LocalDisk(path) => self.local_disk(image_ref, path, options, progress),
+            ImageSource::LocalDisk(path) => {
+                self.local_disk(image_ref, path, options, progress.as_ref())
+            }
             ImageSource::RootfsTar(path) => {
-                self.get_or_create_rootfs_tar(image_ref, path, options, progress)
+                self.get_or_create_rootfs_tar(image_ref, path, options, progress.as_ref())
             }
             ImageSource::OciArchive(path) => {
-                self.get_or_create_oci_archive(image_ref, path, options, progress)
+                self.get_or_create_oci_archive(image_ref, path, options, progress.as_ref())
             }
         }
     }
@@ -172,12 +239,13 @@ impl ImageStore {
         &self,
         image_ref: &str,
         options: RootfsOptions,
-        progress: Option<ImageProgressCallback<'_>>,
+        progress: Option<&ImageProgressSender>,
     ) -> OciDiskResult<RootfsImage> {
         fs::create_dir_all(&self.root)?;
 
         let reference = RegistryClient::parse_reference(image_ref)?;
         let canonical_ref = reference.to_string();
+        let maps_to_tag = reference.digest().is_none();
         let registry = RegistryClient::new()?;
         emit_progress(
             progress,
@@ -188,6 +256,20 @@ impl ImageStore {
         let resolved = registry
             .resolve_manifest(&reference, &options.platform)
             .await?;
+        emit_progress(
+            progress,
+            ImageProgress::ResolvedManifest {
+                image_ref: canonical_ref.clone(),
+                manifest_digest: resolved.manifest_digest.clone(),
+                layer_count: resolved.layers.len(),
+                total_download_bytes: total_download_bytes(&resolved.layers),
+            },
+        );
+
+        let _image_lock = FileLock::exclusive(
+            &self.image_lock_path(&resolved.manifest_digest, &options.platform)?,
+        )?;
+        self.write_manifest_metadata(&canonical_ref, &resolved, &options.platform)?;
 
         emit_progress(
             progress,
@@ -207,7 +289,7 @@ impl ImageStore {
                     image_ref: canonical_ref.clone(),
                 },
             );
-            if reference.is_tag() {
+            if maps_to_tag {
                 self.update_tag_mapping(
                     &canonical_ref,
                     &options.platform,
@@ -226,7 +308,7 @@ impl ImageStore {
         let image = self
             .create_rootfs(&registry, &canonical_ref, &resolved, &options, progress)
             .await?;
-        if reference.is_tag() {
+        if maps_to_tag {
             self.update_tag_mapping(&canonical_ref, &options.platform, &resolved.manifest_digest)?;
         }
         Ok(image)
@@ -238,7 +320,7 @@ impl ImageStore {
         image_ref: &str,
         resolved: &ResolvedManifest,
         options: &RootfsOptions,
-        progress: Option<ImageProgressCallback<'_>>,
+        progress: Option<&ImageProgressSender>,
     ) -> OciDiskResult<RootfsImage> {
         let image_id = &resolved.manifest_digest;
         let final_dir = self.image_dir(image_id, &options.platform)?;
@@ -259,45 +341,46 @@ impl ImageStore {
             }
         }
 
+        let blobs = self
+            .ensure_layer_blobs(registry, image_ref, resolved, progress)
+            .await?;
         let staging = StagingDir::create(&self.root)?;
         let stage_rootfs = staging.path().join(ROOTFS_FILE_NAME);
         let mut writer = Ext4Writer::create(&stage_rootfs, options.disk_size_bytes)?;
 
-        let layers = resolved.manifest.layers();
-        let total = layers.len();
-        for (index, layer) in layers.iter().enumerate() {
-            let layer_index = index + 1;
-            emit_progress(
-                progress,
-                ImageProgress::PullingLayer {
-                    index: layer_index,
-                    total,
-                },
-            );
-            let bytes = registry
-                .pull_blob(&resolved.reference, layer, image_ref)
-                .await?;
+        let total = blobs.len();
+        for blob in &blobs {
             emit_progress(
                 progress,
                 ImageProgress::ApplyingLayer {
-                    index: layer_index,
+                    index: blob.index,
                     total,
+                    digest: Some(blob.layer.digest.clone()),
                 },
             );
-            let reader = layer_reader(&layer.media_type, bytes)?;
+            let reader = layer_reader_from_path(&blob.layer.media_type, &blob.path)?;
             apply_layer(reader, &mut writer)?;
         }
 
         emit_progress(progress, ImageProgress::WritingExt4);
         writer.finish()?;
         emit_progress(progress, ImageProgress::SavingBaseImage);
+        let layers = resolved
+            .layers
+            .iter()
+            .map(ImageLayerMetadata::from)
+            .collect::<Vec<_>>();
         self.write_metadata(
             staging.path(),
-            image_ref,
-            image_id,
-            RootfsImageSource::OciRegistry,
-            Some(&resolved.config_digest),
-            &options.platform,
+            ImageMetadataInput {
+                image_ref,
+                image_id,
+                source: RootfsImageSource::OciRegistry,
+                manifest_digest: Some(&resolved.manifest_digest),
+                config_digest: Some(&resolved.config_digest),
+                layers: &layers,
+                platform: &options.platform,
+            },
         )?;
 
         if let Some(parent) = final_dir.parent() {
@@ -336,7 +419,7 @@ impl ImageStore {
         image_ref: &str,
         path: PathBuf,
         options: RootfsOptions,
-        progress: Option<ImageProgressCallback<'_>>,
+        progress: Option<&ImageProgressSender>,
     ) -> OciDiskResult<RootfsImage> {
         emit_progress(
             progress,
@@ -363,7 +446,7 @@ impl ImageStore {
         image_ref: &str,
         path: PathBuf,
         options: RootfsOptions,
-        progress: Option<ImageProgressCallback<'_>>,
+        progress: Option<&ImageProgressSender>,
     ) -> OciDiskResult<RootfsImage> {
         fs::create_dir_all(&self.root)?;
         let path = canonical_local_file(image_ref, &path)?;
@@ -410,7 +493,11 @@ impl ImageStore {
         let file = fs::File::open(&path)?;
         emit_progress(
             progress,
-            ImageProgress::ApplyingLayer { index: 1, total: 1 },
+            ImageProgress::ApplyingLayer {
+                index: 1,
+                total: 1,
+                digest: None,
+            },
         );
         apply_layer(file, &mut writer)?;
         emit_progress(progress, ImageProgress::WritingExt4);
@@ -418,11 +505,15 @@ impl ImageStore {
         emit_progress(progress, ImageProgress::SavingBaseImage);
         self.write_metadata(
             staging.path(),
-            image_ref,
-            &image_id,
-            RootfsImageSource::Tar,
-            None,
-            &options.platform,
+            ImageMetadataInput {
+                image_ref,
+                image_id: &image_id,
+                source: RootfsImageSource::Tar,
+                manifest_digest: None,
+                config_digest: None,
+                layers: &[],
+                platform: &options.platform,
+            },
         )?;
 
         if let Some(parent) = final_dir.parent() {
@@ -461,7 +552,7 @@ impl ImageStore {
         image_ref: &str,
         path: PathBuf,
         options: RootfsOptions,
-        progress: Option<ImageProgressCallback<'_>>,
+        progress: Option<&ImageProgressSender>,
     ) -> OciDiskResult<RootfsImage> {
         fs::create_dir_all(&self.root)?;
         let path = canonical_local_file(image_ref, &path)?;
@@ -512,6 +603,7 @@ impl ImageStore {
                 ImageProgress::ApplyingLayer {
                     index: index + 1,
                     total,
+                    digest: None,
                 },
             );
             let reader = layer_reader(&layer.media_type, layer.bytes)?;
@@ -522,11 +614,15 @@ impl ImageStore {
         emit_progress(progress, ImageProgress::SavingBaseImage);
         self.write_metadata(
             staging.path(),
-            image_ref,
-            &image_id,
-            RootfsImageSource::OciArchive,
-            Some(&archive.config_digest),
-            &options.platform,
+            ImageMetadataInput {
+                image_ref,
+                image_id: &image_id,
+                source: RootfsImageSource::OciArchive,
+                manifest_digest: Some(&archive.manifest_digest),
+                config_digest: Some(&archive.config_digest),
+                layers: &[],
+                platform: &options.platform,
+            },
         )?;
 
         if let Some(parent) = final_dir.parent() {
@@ -558,6 +654,195 @@ impl ImageStore {
             platform: options.platform,
             source: RootfsImageSource::OciArchive,
         })
+    }
+
+    async fn ensure_layer_blobs(
+        &self,
+        registry: &RegistryClient,
+        image_ref: &str,
+        resolved: &ResolvedManifest,
+        progress: Option<&ImageProgressSender>,
+    ) -> OciDiskResult<Vec<LayerBlob>> {
+        let total = resolved.layers.len();
+        let concurrency = layer_download_concurrency(total);
+        let progress = progress.cloned();
+        let reference = &resolved.reference;
+
+        let mut downloads = stream::iter(resolved.layers.iter().cloned().enumerate())
+            .map(|(index, layer)| {
+                let progress = progress.clone();
+                async move {
+                    let layer_index = index + 1;
+                    let path = self
+                        .get_or_download_layer(LayerDownloadRequest {
+                            registry,
+                            reference,
+                            image_ref,
+                            layer: &layer,
+                            index: layer_index,
+                            total,
+                            progress: progress.as_ref(),
+                        })
+                        .await?;
+                    Ok::<_, OciDiskError>(LayerBlob {
+                        index: layer_index,
+                        layer,
+                        path,
+                    })
+                }
+            })
+            .buffer_unordered(concurrency);
+
+        let mut blobs = Vec::with_capacity(total);
+        while let Some(blob) = downloads.next().await {
+            blobs.push(blob?);
+        }
+        blobs.sort_by_key(|blob| blob.index);
+        Ok(blobs)
+    }
+
+    async fn get_or_download_layer(
+        &self,
+        request: LayerDownloadRequest<'_>,
+    ) -> OciDiskResult<PathBuf> {
+        let LayerDownloadRequest {
+            registry,
+            reference,
+            image_ref,
+            layer,
+            index,
+            total,
+            progress,
+        } = request;
+        let blob_path = self.blob_path(&layer.digest)?;
+        let part_path = self.blob_part_path(&layer.digest)?;
+        let _lock = FileLock::exclusive(&self.blob_lock_path(&layer.digest)?)?;
+
+        if verified_blob_exists(&blob_path, &layer.digest)? {
+            emit_progress(
+                progress,
+                ImageProgress::LayerDownloadSkipped {
+                    index,
+                    total,
+                    digest: layer.digest.clone(),
+                },
+            );
+            return Ok(blob_path);
+        }
+        remove_file_if_exists(&blob_path)?;
+
+        if let Some(parent) = blob_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if let Some(parent) = part_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut offset = partial_download_offset(&part_path, layer)?;
+        if offset == layer.size_bytes && layer_digest_matches(&part_path, &layer.digest)? {
+            emit_progress(
+                progress,
+                ImageProgress::LayerDownloadVerifying {
+                    index,
+                    total,
+                    digest: layer.digest.clone(),
+                },
+            );
+            promote_layer_part(&part_path, &blob_path)?;
+            emit_progress(
+                progress,
+                ImageProgress::LayerDownloadFinished {
+                    index,
+                    total,
+                    digest: layer.digest.clone(),
+                },
+            );
+            return Ok(blob_path);
+        }
+        if offset == layer.size_bytes {
+            remove_file_if_exists(&part_path)?;
+            offset = 0;
+        }
+
+        emit_progress(
+            progress,
+            ImageProgress::LayerDownloadStarted {
+                index,
+                total,
+                digest: layer.digest.clone(),
+                size_bytes: Some(layer.size_bytes),
+            },
+        );
+        if offset > 0 {
+            emit_progress(
+                progress,
+                ImageProgress::LayerDownloadProgress {
+                    index,
+                    total,
+                    digest: layer.digest.clone(),
+                    downloaded_bytes: offset,
+                    size_bytes: Some(layer.size_bytes),
+                },
+            );
+        }
+
+        let (stream, append, start_offset) = if offset > 0 {
+            match registry
+                .pull_layer_stream_partial(
+                    reference,
+                    layer,
+                    image_ref,
+                    offset,
+                    Some(layer.size_bytes.saturating_sub(offset)),
+                )
+                .await?
+            {
+                BlobResponse::Partial(stream) => (stream, true, offset),
+                BlobResponse::Full(stream) => {
+                    remove_file_if_exists(&part_path)?;
+                    (stream, false, 0)
+                }
+            }
+        } else {
+            (
+                registry
+                    .pull_layer_stream(reference, layer, image_ref)
+                    .await?,
+                false,
+                0,
+            )
+        };
+
+        write_layer_stream(LayerStreamWrite {
+            path: &part_path,
+            stream,
+            append,
+            start_offset,
+            layer,
+            index,
+            total,
+            progress,
+        })
+        .await?;
+        emit_progress(
+            progress,
+            ImageProgress::LayerDownloadVerifying {
+                index,
+                total,
+                digest: layer.digest.clone(),
+            },
+        );
+        verify_layer_file(&part_path, layer)?;
+        promote_layer_part(&part_path, &blob_path)?;
+        emit_progress(
+            progress,
+            ImageProgress::LayerDownloadFinished {
+                index,
+                total,
+                digest: layer.digest.clone(),
+            },
+        );
+        Ok(blob_path)
     }
 
     fn cached_image(
@@ -649,28 +934,87 @@ impl ImageStore {
             .join(platform.cache_key()))
     }
 
-    fn write_metadata(
-        &self,
-        dir: &Path,
-        image_ref: &str,
-        image_id: &str,
-        source: RootfsImageSource,
-        config_digest: Option<&str>,
-        platform: &Platform,
-    ) -> OciDiskResult<()> {
+    fn image_lock_path(&self, image_id: &str, platform: &Platform) -> OciDiskResult<PathBuf> {
+        Ok(self.root.join(TMP_DIR_NAME).join(format!(
+            "image-{}-{}.lock",
+            image_id_path_component(image_id)?,
+            platform.cache_key()
+        )))
+    }
+
+    fn blob_path(&self, digest: &str) -> OciDiskResult<PathBuf> {
+        let (algorithm, encoded) = digest_path_components(digest)?;
+        Ok(self.root.join(BLOBS_DIR_NAME).join(algorithm).join(encoded))
+    }
+
+    fn blob_part_path(&self, digest: &str) -> OciDiskResult<PathBuf> {
+        let (algorithm, encoded) = digest_path_components(digest)?;
+        Ok(self
+            .root
+            .join(TMP_DIR_NAME)
+            .join(format!("{}-{}.part", algorithm, encoded)))
+    }
+
+    fn blob_lock_path(&self, digest: &str) -> OciDiskResult<PathBuf> {
+        let (algorithm, encoded) = digest_path_components(digest)?;
+        Ok(self
+            .root
+            .join(TMP_DIR_NAME)
+            .join(format!("{}-{}.download.lock", algorithm, encoded)))
+    }
+
+    fn manifest_dir(&self, manifest_digest: &str) -> OciDiskResult<PathBuf> {
+        Ok(self
+            .root
+            .join(MANIFESTS_DIR_NAME)
+            .join(image_id_path_component(manifest_digest)?))
+    }
+
+    fn write_metadata(&self, dir: &Path, input: ImageMetadataInput<'_>) -> OciDiskResult<()> {
         let metadata = ImageMetadata {
             version: METADATA_VERSION,
-            image_ref: image_ref.to_string(),
-            image_id: image_id.to_string(),
-            source,
-            config_digest: config_digest.map(str::to_string),
-            platform: platform.clone(),
+            image_ref: input.image_ref.to_string(),
+            image_id: input.image_id.to_string(),
+            source: input.source,
+            manifest_digest: input.manifest_digest.map(str::to_string),
+            config_digest: input.config_digest.map(str::to_string),
+            layers: input.layers.to_vec(),
+            platform: input.platform.clone(),
             filesystem: ROOTFS_FILESYSTEM.to_string(),
             rootfs_file: ROOTFS_FILE_NAME.to_string(),
             created_at_unix: now_unix(),
         };
         let data = serde_json::to_vec_pretty(&metadata)?;
         fs::write(dir.join(METADATA_FILE_NAME), data)?;
+        Ok(())
+    }
+
+    fn write_manifest_metadata(
+        &self,
+        image_ref: &str,
+        resolved: &ResolvedManifest,
+        platform: &Platform,
+    ) -> OciDiskResult<()> {
+        let dir = self.manifest_dir(&resolved.manifest_digest)?;
+        fs::create_dir_all(&dir)?;
+        let metadata = ManifestMetadata {
+            version: METADATA_VERSION,
+            image_ref: image_ref.to_string(),
+            resolved_reference: resolved.reference.to_string(),
+            manifest_digest: resolved.manifest_digest.clone(),
+            config_digest: resolved.config_digest.clone(),
+            platform: platform.clone(),
+            layers: resolved
+                .layers
+                .iter()
+                .map(ImageLayerMetadata::from)
+                .collect(),
+            resolved_at_unix: now_unix(),
+        };
+        let path = dir.join(METADATA_FILE_NAME);
+        let temp_path = dir.join(format!("{METADATA_FILE_NAME}.tmp"));
+        fs::write(&temp_path, serde_json::to_vec_pretty(&metadata)?)?;
+        fs::rename(temp_path, path)?;
         Ok(())
     }
 
@@ -729,9 +1073,163 @@ impl ImageStore {
     }
 }
 
-fn emit_progress(progress: Option<ImageProgressCallback<'_>>, event: ImageProgress) {
+fn emit_progress(progress: Option<&ImageProgressSender>, event: ImageProgress) {
     if let Some(progress) = progress {
-        progress(event);
+        progress.send(event);
+    }
+}
+
+fn total_download_bytes(layers: &[ResolvedLayer]) -> Option<u64> {
+    layers
+        .iter()
+        .try_fold(0_u64, |total, layer| total.checked_add(layer.size_bytes))
+}
+
+fn layer_download_concurrency(layer_count: usize) -> usize {
+    if layer_count == 0 {
+        return 1;
+    }
+    let host_limit = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .saturating_mul(2)
+        .clamp(4, 16);
+    layer_count.min(host_limit)
+}
+
+async fn write_layer_stream(request: LayerStreamWrite<'_>) -> OciDiskResult<()> {
+    let LayerStreamWrite {
+        path,
+        mut stream,
+        append,
+        start_offset,
+        layer,
+        index,
+        total,
+        progress,
+    } = request;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(path)
+        .await?;
+    let mut downloaded = start_offset;
+    let mut last_progress = start_offset;
+
+    while let Some(chunk) = stream.try_next().await? {
+        file.write_all(&chunk).await?;
+        downloaded = downloaded.saturating_add(chunk.len() as u64);
+        if downloaded.saturating_sub(last_progress) >= PROGRESS_STEP_BYTES
+            || downloaded >= layer.size_bytes
+        {
+            emit_progress(
+                progress,
+                ImageProgress::LayerDownloadProgress {
+                    index,
+                    total,
+                    digest: layer.digest.clone(),
+                    downloaded_bytes: downloaded,
+                    size_bytes: Some(layer.size_bytes),
+                },
+            );
+            last_progress = downloaded;
+        }
+    }
+    file.flush().await?;
+    drop(file);
+
+    let actual = fs::metadata(path)?.len();
+    if actual != layer.size_bytes {
+        remove_file_if_exists(path)?;
+        return Err(OciDiskError::LayerSizeMismatch {
+            digest: layer.digest.clone(),
+            path: path.to_path_buf(),
+            expected: layer.size_bytes,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+fn partial_download_offset(path: &Path, layer: &ResolvedLayer) -> OciDiskResult<u64> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => return Err(err.into()),
+    };
+
+    let size = metadata.len();
+    if size > layer.size_bytes {
+        remove_file_if_exists(path)?;
+        return Ok(0);
+    }
+    Ok(size)
+}
+
+fn verified_blob_exists(path: &Path, digest: &str) -> OciDiskResult<bool> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    if !metadata.is_file() {
+        remove_file_if_exists(path)?;
+        return Ok(false);
+    }
+    if layer_digest_matches(path, digest)? {
+        return Ok(true);
+    }
+    remove_file_if_exists(path)?;
+    Ok(false)
+}
+
+fn verify_layer_file(path: &Path, layer: &ResolvedLayer) -> OciDiskResult<()> {
+    let actual_size = fs::metadata(path)?.len();
+    if actual_size != layer.size_bytes {
+        remove_file_if_exists(path)?;
+        return Err(OciDiskError::LayerSizeMismatch {
+            digest: layer.digest.clone(),
+            path: path.to_path_buf(),
+            expected: layer.size_bytes,
+            actual: actual_size,
+        });
+    }
+
+    let actual_digest = sha256_file(path)?;
+    let (_, expected_digest) = digest_path_components(&layer.digest)?;
+    if actual_digest != expected_digest {
+        remove_file_if_exists(path)?;
+        return Err(OciDiskError::LayerDigestMismatch {
+            digest: layer.digest.clone(),
+            path: path.to_path_buf(),
+            actual: actual_digest,
+        });
+    }
+    Ok(())
+}
+
+fn layer_digest_matches(path: &Path, digest: &str) -> OciDiskResult<bool> {
+    let actual_digest = sha256_file(path)?;
+    let (_, expected_digest) = digest_path_components(digest)?;
+    Ok(actual_digest == expected_digest)
+}
+
+fn promote_layer_part(part_path: &Path, blob_path: &Path) -> OciDiskResult<()> {
+    if let Some(parent) = blob_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    remove_file_if_exists(blob_path)?;
+    fs::rename(part_path, blob_path)?;
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> OciDiskResult<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -753,25 +1251,61 @@ fn read_metadata(path: &Path) -> OciDiskResult<ImageMetadata> {
 }
 
 fn layer_reader(media_type: &MediaType, bytes: Vec<u8>) -> OciDiskResult<Box<dyn Read>> {
+    layer_reader_from_read(media_type, Cursor::new(bytes))
+}
+
+fn layer_reader_from_path(media_type: &str, path: &Path) -> OciDiskResult<Box<dyn Read>> {
+    let media_type =
+        MediaType::from_str(media_type).map_err(|err| OciDiskError::UnsupportedLayerMediaType {
+            media_type: format!("{media_type}: {err}"),
+        })?;
+    let file = fs::File::open(path)?;
+    layer_reader_from_read(&media_type, BufReader::new(file))
+}
+
+fn layer_reader_from_read(
+    media_type: &MediaType,
+    reader: impl Read + 'static,
+) -> OciDiskResult<Box<dyn Read>> {
     match media_type {
-        MediaType::OciLayer | MediaType::OciLayerNondistributable => {
-            Ok(Box::new(Cursor::new(bytes)))
-        }
+        MediaType::OciLayer | MediaType::OciLayerNondistributable => Ok(Box::new(reader)),
         MediaType::OciLayerGzip
         | MediaType::DockerLayerGzip
-        | MediaType::OciLayerNondistributableGzip => {
-            Ok(Box::new(GzDecoder::new(Cursor::new(bytes))))
-        }
+        | MediaType::OciLayerNondistributableGzip => Ok(Box::new(GzDecoder::new(reader))),
         MediaType::OciLayerZstd | MediaType::OciLayerNondistributableZstd => {
-            Ok(Box::new(zstd::Decoder::new(Cursor::new(bytes))?))
+            Ok(Box::new(zstd::Decoder::new(reader)?))
         }
         MediaType::Other(value) if value == "application/vnd.docker.image.rootfs.diff.tar" => {
-            Ok(Box::new(Cursor::new(bytes)))
+            Ok(Box::new(reader))
         }
         other => Err(OciDiskError::UnsupportedLayerMediaType {
             media_type: other.as_str().to_string(),
         }),
     }
+}
+
+fn digest_path_components(digest: &str) -> OciDiskResult<(String, String)> {
+    let Some((algorithm, encoded)) = digest.split_once(':') else {
+        return Err(OciDiskError::InvalidDigest {
+            digest: digest.to_string(),
+            message: "digest must contain an algorithm and encoded value".to_string(),
+        });
+    };
+    if algorithm != "sha256" {
+        return Err(OciDiskError::UnsupportedDigestAlgorithm {
+            digest: digest.to_string(),
+        });
+    }
+    if encoded.len() != 64 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(OciDiskError::InvalidDigest {
+            digest: digest.to_string(),
+            message: "sha256 digests must be 64 hexadecimal characters".to_string(),
+        });
+    }
+    Ok((
+        sanitize_component(algorithm),
+        sanitize_component(&encoded.to_ascii_lowercase()),
+    ))
 }
 
 fn canonical_local_file(reference: &str, path: &Path) -> OciDiskResult<PathBuf> {
@@ -927,14 +1461,16 @@ fn now_unix_nanos() -> u128 {
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Read};
-    use std::sync::Mutex;
 
     use ext4::Reader;
     use tar::{Builder, Header};
 
+    use crate::progress::ImageProgressSender;
+    use crate::registry::ResolvedLayer;
     use crate::store::{
-        image_id_path_component, sha256_bytes, ImageMetadata, ImageProgress, ImageStore,
-        RootfsImageSource, RootfsOptions, METADATA_VERSION, ROOTFS_FILESYSTEM, ROOTFS_FILE_NAME,
+        digest_path_components, image_id_path_component, layer_download_concurrency, sha256_bytes,
+        verify_layer_file, ImageMetadata, ImageProgress, ImageStore, RootfsImageSource,
+        RootfsOptions, METADATA_VERSION, ROOTFS_FILESYSTEM, ROOTFS_FILE_NAME,
     };
     use crate::{Platform, RootfsImage};
 
@@ -966,7 +1502,9 @@ mod tests {
                 image_ref: "index.docker.io/library/alpine:latest".to_string(),
                 image_id: "sha256:def456".to_string(),
                 source: RootfsImageSource::OciRegistry,
+                manifest_digest: Some("sha256:def456".to_string()),
                 config_digest: Some("sha256:config".to_string()),
+                layers: Vec::new(),
                 platform: platform.clone(),
                 filesystem: ROOTFS_FILESYSTEM.to_string(),
                 rootfs_file: ROOTFS_FILE_NAME.to_string(),
@@ -1039,7 +1577,9 @@ mod tests {
                 image_ref: "index.docker.io/library/alpine:latest".to_string(),
                 image_id: "sha256:def456".to_string(),
                 source: RootfsImageSource::OciRegistry,
+                manifest_digest: Some("sha256:def456".to_string()),
                 config_digest: Some("sha256:config".to_string()),
+                layers: Vec::new(),
                 platform: platform.clone(),
                 filesystem: "xfs".to_string(),
                 rootfs_file: ROOTFS_FILE_NAME.to_string(),
@@ -1066,6 +1606,61 @@ mod tests {
         let err = image_id_path_component("not-an-id").expect_err("image id should fail");
 
         assert!(err.to_string().contains("image id must contain"));
+    }
+
+    #[test]
+    fn digest_path_components_rejects_non_sha256_digests() {
+        let err = digest_path_components("sha512:abc").expect_err("digest should fail");
+
+        assert!(err.to_string().contains("only sha256"));
+    }
+
+    #[test]
+    fn blob_cache_paths_are_content_addressed() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let store = ImageStore::open(temp.path()).expect("open store");
+        let digest = format!("sha256:{}", sha256_bytes(b"layer"));
+        let encoded = digest.strip_prefix("sha256:").expect("digest prefix");
+
+        assert_eq!(
+            store.blob_path(&digest).expect("blob path"),
+            temp.path().join("blobs/sha256").join(encoded)
+        );
+        assert_eq!(
+            store.blob_part_path(&digest).expect("part path"),
+            temp.path().join(format!("tmp/sha256-{encoded}.part"))
+        );
+        assert_eq!(
+            store.blob_lock_path(&digest).expect("lock path"),
+            temp.path()
+                .join(format!("tmp/sha256-{encoded}.download.lock"))
+        );
+    }
+
+    #[test]
+    fn layer_download_concurrency_matches_dynamic_bounds() {
+        assert_eq!(layer_download_concurrency(0), 1);
+        assert_eq!(layer_download_concurrency(2), 2);
+        let high = layer_download_concurrency(128);
+        assert!((4..=16).contains(&high));
+    }
+
+    #[test]
+    fn layer_digest_mismatch_removes_partial_file() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let path = temp.path().join("layer.part");
+        std::fs::write(&path, b"wrong").expect("write layer");
+        let layer = ResolvedLayer {
+            digest: format!("sha256:{}", sha256_bytes(b"right")),
+            media_type: "application/vnd.oci.image.layer.v1.tar".to_string(),
+            size_bytes: 5,
+            diff_id: "sha256:diff".to_string(),
+        };
+
+        let err = verify_layer_file(&path, &layer).expect_err("digest mismatch should fail");
+
+        assert!(err.to_string().contains("has digest"));
+        assert!(!path.exists());
     }
 
     #[test]
@@ -1123,28 +1718,22 @@ mod tests {
         let tar_path = temp.path().join("rootfs.tar");
         std::fs::write(&tar_path, tar_file("etc/progress", b"tick")).expect("write tar");
         let store = ImageStore::open(temp.path().join("cache")).expect("open store");
-        let events = Mutex::new(Vec::new());
+        let (progress, mut progress_events) = ImageProgressSender::channel(16);
 
-        {
-            let progress = |event| {
-                events
-                    .lock()
-                    .expect("record progress event")
-                    .push(progress_label(event));
-            };
+        store
+            .get_or_create_rootfs_tar(
+                &format!("tar:{}", tar_path.display()),
+                tar_path,
+                RootfsOptions::new(Platform::linux_amd64()).with_disk_size_bytes(64 * 1024 * 1024),
+                Some(&progress),
+            )
+            .expect("convert tar");
+        drop(progress);
 
-            store
-                .get_or_create_rootfs_tar(
-                    &format!("tar:{}", tar_path.display()),
-                    tar_path,
-                    RootfsOptions::new(Platform::linux_amd64())
-                        .with_disk_size_bytes(64 * 1024 * 1024),
-                    Some(&progress),
-                )
-                .expect("convert tar");
+        let mut events = Vec::new();
+        while let Ok(event) = progress_events.try_recv() {
+            events.push(progress_label(event));
         }
-
-        let events = events.into_inner().expect("progress events");
         assert_eq!(
             events,
             vec![
@@ -1343,14 +1932,28 @@ mod tests {
             ImageProgress::CacheHit { .. } => "cache-hit".to_string(),
             ImageProgress::CacheMiss { .. } => "cache-miss".to_string(),
             ImageProgress::UsingLocalDisk { .. } => "use-local-disk".to_string(),
-            ImageProgress::PullingLayer { index, total } => {
-                format!("pull-layer-{index}/{total}")
+            ImageProgress::ResolvedManifest { .. } => "resolved-manifest".to_string(),
+            ImageProgress::LayerDownloadStarted { index, total, .. } => {
+                format!("download-start-{index}/{total}")
             }
-            ImageProgress::ApplyingLayer { index, total } => {
+            ImageProgress::LayerDownloadProgress { index, total, .. } => {
+                format!("download-progress-{index}/{total}")
+            }
+            ImageProgress::LayerDownloadVerifying { index, total, .. } => {
+                format!("download-verify-{index}/{total}")
+            }
+            ImageProgress::LayerDownloadFinished { index, total, .. } => {
+                format!("download-finish-{index}/{total}")
+            }
+            ImageProgress::LayerDownloadSkipped { index, total, .. } => {
+                format!("download-skip-{index}/{total}")
+            }
+            ImageProgress::ApplyingLayer { index, total, .. } => {
                 format!("apply-layer-{index}/{total}")
             }
             ImageProgress::WritingExt4 => "write-ext4".to_string(),
             ImageProgress::SavingBaseImage => "save-base-image".to_string(),
+            ImageProgress::Complete => "complete".to_string(),
         }
     }
 }

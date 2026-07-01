@@ -1,0 +1,29 @@
+pub mod app;
+pub mod commands;
+pub mod config;
+pub mod constants;
+pub mod context;
+pub mod errors;
+pub mod help;
+pub mod profile;
+pub mod ssh;
+pub mod terminal;
+pub mod ui;
+pub mod view;
+
+use std::process::ExitCode;
+
+use app::Cli;
+
+pub async fn run() -> ExitCode {
+    let cli = Cli::parse();
+    let verbose = cli.verbose;
+
+    match cli.run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            errors::print(&error, verbose);
+            ExitCode::FAILURE
+        }
+    }
+}

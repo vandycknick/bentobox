@@ -36,7 +36,28 @@ pub enum OciDiskError {
     Registry {
         reference: String,
         #[source]
-        source: containerregistry_registry::Error,
+        source: oci_client::errors::OciDistributionError,
+    },
+
+    #[error("unsupported OCI digest algorithm in {digest:?}; only sha256 is supported")]
+    UnsupportedDigestAlgorithm { digest: String },
+
+    #[error("invalid OCI digest {digest:?}: {message}")]
+    InvalidDigest { digest: String, message: String },
+
+    #[error("cached OCI layer {digest} at {path} has digest sha256:{actual}")]
+    LayerDigestMismatch {
+        digest: String,
+        path: PathBuf,
+        actual: String,
+    },
+
+    #[error("cached OCI layer {digest} at {path} has {actual} bytes; expected {expected}")]
+    LayerSizeMismatch {
+        digest: String,
+        path: PathBuf,
+        expected: u64,
+        actual: u64,
     },
 
     #[error("image {reference:?} does not provide {requested}; available platforms: {available}")]
@@ -85,7 +106,7 @@ pub enum OciDiskError {
 impl OciDiskError {
     pub(crate) fn registry(
         reference: impl Into<String>,
-        source: containerregistry_registry::Error,
+        source: oci_client::errors::OciDistributionError,
     ) -> Self {
         Self::Registry {
             reference: reference.into(),
